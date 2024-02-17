@@ -1,0 +1,9 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+current_private/
+current_private
+renv/
+renv
+
