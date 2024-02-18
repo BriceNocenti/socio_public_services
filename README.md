@@ -1,6 +1,6 @@
 # Publications _open science_ sociologie des services publics
 
-## Dans une démarche d'_open science_, ce dépot github comprend le code nécessaire pour reproduire les analyses statistiques des articles scientifiques publiés par Brice Nocenti, principalement en sociologie de l'action publique, sociologie du management, sociologie du travail appliquée aux services publics.
+Dans une démarche d'_open science_, ce dépot github comprend le code nécessaire pour reproduire les analyses statistiques des articles scientifiques publiés par Brice Nocenti, principalement en sociologie de l'action publique, sociologie du management, sociologie du travail appliquée aux services publics.
 
 Les articles suivants sont disponibles : 
 
