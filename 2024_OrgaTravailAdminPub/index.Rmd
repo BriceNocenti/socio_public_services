@@ -1,5 +1,5 @@
 ---
-title: "Les formes d’organisation du travail dans les administrations publiques : open science"
+title: "Les formes d’organisation du travail dans les administrations publiques : _open science_"
 author: "Brice Nocenti"
 date: February 17, 2024
 output: 
@@ -153,7 +153,7 @@ https://commande.progedo.fr
 
 Créer un nouveau projet RStudio (File > New Project), dans un nouveau dossier. Pour initialer le projett sans packages installés et utiliser les versions données ci-dessous, cocher la case "Use renv with this project". 
 
-Au sein du dossier du projet, copier tous les fichiers du répertoire  [https://github.com/BriceNocenti/socio_public_services/blob/main/2024_OrgaTravailAdminPub](https://github.com/BriceNocenti/socio_public_services/blob/main/2024_OrgaTravailAdminPub). 
+Au sein du dossier du projet, copier tous les fichiers du répertoire  [https://github.com/BriceNocenti/socio_public_services/blob/main/2024_OrgaTravailAdminPub](https://github.com/BriceNocenti/socio_public_services/blob/main/2024_OrgaTravailAdminPub).
 
 Les analyses ont été réalisées sur `R 4.3.2` (Windows 10). 
 
@@ -377,6 +377,7 @@ ct_paths <- c(
 <br>
 
 **4. Sourcer le script de mise en forme des bases de données**
+
 ``` {r intro4, eval = FALSE, echo = TRUE, class.source = 'fold-show'}
 # setwd() # si ce n'est pas le cas, préciser le dossier du projet comme working directory
 
@@ -625,7 +626,7 @@ acm_orga_1_cah_output
 ```
 
 <font size=2>
-Lecture : en gras les variables actives de l’ACM (utilisées pour construire les axes) ; en italique les variables supplémentaires ; encadrées et en couleur les classes de la CAH. CR = contraintes de rythme.
+Lecture : en gras, les variables actives (voir détail des intitulés tableau 1) ; encadrées et en coleur les classes de la CAH. En italique les variables supplémentaires : CSP recodée (voir encadré 1 dans l’annexe méthodologique), type d’employeur (voir encadré 2 en annexe), année, objectifs chiffrés (voir tableau 5), contraintes de rythme (voir tableau 1). CR = contraintes de rythme. Les catégories débutant par « Pas » désignent l’absence de quelque chose.
 
 `r champ05`
 
@@ -704,8 +705,12 @@ acm_orga_1_output <-
 ### **TABLEAU 1. Les classes d’organisation du poste de travail (axes 1 et 2 de l’ACM)**
 ```{r tab1, echo = TRUE}
 cah_orga_subtext <- c(
-  "Note : les variables suivies de * ne sont pas des variables actives de l’ACM.",
-  "Lecture : 97 % des salarié·es de la classe « autonomie du métier » ont une autonomie procédurale.",
+  "Note : les variables suivies de * ne sont pas des variables actives de l’ACM. 
+  Nuances de bleu : proportion supérieure à la moyenne de l'Ensemble d'au moins 
+  5 points de pourcentage. Nuances du jaune au rouge : proportion inférieure 
+  à la moyenne d'au moins 5 points de pourcentage.",
+  "Lecture : 97 % des salarié·es de la classe « autonomie du métier » 
+  ont une autonomie procédurale.",
   champ05, 
   source0519 #, 
 )
@@ -810,16 +815,19 @@ subtext_orga_evol <- c(
   champ05, 
   source0519)
 
-orga_evol_tabs <- list(
-  "Administrations publiques" = 
+orga_evol_tabs <- 
+list(
+  "Administrations publiques" =
     ct[salariat05 & ct$EMP_ADM_ENT == "1-Administrations publiques", ],
-  
-  "Entreprises" = 
+
+  "Entreprises" =
     ct[salariat05 & ct$EMP_ADM_ENT == "2-Entreprises", ],
   
-  "Ensemble" = 
+  "Ensemble" =
     ct[salariat05, ]
 ) |>
+  # ct[salariat05 & !is.na(ct$EMP4), ] |> group_by(EMP4) |> group_split() %>% #
+  #   set_names(map_chr(., ~ pull(., EMP4) |> first() |> as.character())) |> 
   imap_dfr(
     ~ tab_many(.x, ANNEE, cah_ORGA, PPP1, wt = pondcal, pct = "row",
                color = "after_ci", diff = "2005", na = "drop", totaltab = "table",
@@ -1330,6 +1338,7 @@ orga_cadres_tab |> tab_kable(tooltips = FALSE)
 <br>
 
 ## **Taux de feminisation des professions**
+<!-- Ne pas changer le nom : référence utilisée dans l'article -->
 
 Pour rendre visible la place des femmes dans la structure sociale, la règle de féminisation des noms de professions suivante a été adoptée par défaut : masculin s’il y a plus de deux tiers d’hommes dans une profession ; féminin s’il y a plus de deux tiers de femmes ; forme inclusive s’il y a entre 33% et 66% de femmes. 
 
