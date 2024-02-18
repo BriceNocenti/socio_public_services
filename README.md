@@ -1,2 +1,9 @@
-# socio_public_services
-Code to reproduce data analysis done in my scientific papers, mainly sociology of public action, public organizations and public labour
+# Publications _open science_ sociologie des services publics
+
+## Dans une démarche d'_open science_, ce dépot github comprend le code nécessaire pour reproduire les analyses statistiques des articles scientifiques publiés par Brice Nocenti, principalement en sociologie de l'action publique, sociologie du management, sociologie du travail appliquée aux services publics.
+
+Les articles suivants sont disponibles : 
+
+- [**« Les formes d’organisation du travail dans les administrations publiques : quelle managérialisation de l’État, des hôpitaux et des collectivités locales ? », _Travail et emploi_, n° 168/2022.**](https://github.com/BriceNocenti/socio_public_services/blob/main/2024_OrgaTravailAdminPub/2024_OrgaTravailAdminPub.html)
+
+
