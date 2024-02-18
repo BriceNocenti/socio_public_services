@@ -2,8 +2,6 @@
 title: "Les formes d’organisation du travail dans les administrations publiques : open science"
 author: "Brice Nocenti"
 date: February 17, 2024
-knit: (function(inputFile, encoding) {
-  rmarkdown::render(inputFile, encoding = encoding, output_dir = "~github/socio_public_services") })
 output: 
   rmdformats::downcute:
     df_print: kable
@@ -77,46 +75,46 @@ ct <- ct |> mutate(COMMENT = fct_relevel(COMMENT, sort))
 /* Reduce line spacing in kable() tables */
 .page-content table tbody tr td,
 .page-content table thead tr th {
-    padding: 0px 3px; /* 1) line spacing ; 2) line indentation*/
-    border-bottom: 1px solid var(--border-color);
-    border-top: none;
-    text-align: left
+padding: 0px 3px; /* 1) line spacing ; 2) line indentation*/
+border-bottom: 1px solid var(--border-color);
+border-top: none;
+text-align: left
 }
 
 /* 
 .page-content table thead tr th {
-    color: var(--table-header-color);
-    background: var(--table-header-background);
-    border-bottom: 1px solid var(--border-color);
-    border-top: 1px solid var(--border-color) !important;
-    font-weight: 400;
-    font-size: 14px;
-    padding: 0px 
+color: var(--table-header-color);
+background: var(--table-header-background);
+border-bottom: 1px solid var(--border-color);
+border-top: 1px solid var(--border-color) !important;
+font-weight: 400;
+font-size: 14px;
+padding: 0px 
 }
 */
 /* padding: 0px : line spacing in headers */
 
 /*
 .page-content .table-wrapper {
-    overflow-x: auto;
-    margin-bottom: 3rem;
+overflow-x: auto;
+margin-bottom: 3rem;
 }
 
 .page-content table {
-    width: 100%;
-    border-spacing: 0;
-    border-collapse: separate
+width: 100%;
+border-spacing: 0;
+border-collapse: separate
 }
 
 
 .page-content table thead tr th:first-child {
-    border-left: 1px solid var(--border-color);
-    border-radius: 4px 0 0 4px
+border-left: 1px solid var(--border-color);
+border-radius: 4px 0 0 4px
 }
 
 .page-content table thead tr th:last-child {
-    border-right: 1px solid var(--border-color);
-    border-radius: 0 4px 4px 0
+border-right: 1px solid var(--border-color);
+border-radius: 0 4px 4px 0
 }
 
 
@@ -134,7 +132,7 @@ Sont également inclus des tableaux décrivant les taux de féminisation des dif
 
 Source : Dares-Drees-DGAFP, Enquêtes Conditions de travail 2005, 2013, 2016 et 2019, diffusion Adisp. 
 
-[Revenir à la liste des articles.](https://github.com/BriceNocenti/socio_public_services/blob/main/index.html)
+[Revenir à la liste des articles.](https://bricenocenti.github.io/socio_public_services/)
 
 <br>
 
@@ -146,6 +144,8 @@ Source : Dares-Drees-DGAFP, Enquêtes Conditions de travail 2005, 2013, 2016 et 
 https://data.progedo.fr/studies/doi/10.13144/lil-1459 
 
 https://commande.progedo.fr 
+
+<br>
 
 **2. Créer un Projet R et installer les packages nécessaires**
 
@@ -372,6 +372,8 @@ ct_paths <- c(
 )
 ```
 
+<br>
+
 **4. Sourcer le script de mise en forme des bases de données**
 ``` {r intro4, eval = FALSE, echo = TRUE, class.source = 'fold-show'}
 # setwd() # si ce n'est pas le cas, préciser le dossier du projet comme working directory
@@ -380,10 +382,14 @@ source("Demarrage.R", encoding = "UTF-8") # charger les fonctions nécessaires
 source("ctall_mf.R", encoding = "UTF-8")
 ```
 
+<br>
+
 **5. Enregister le résultat dans le dossier actuel**
 ``` {r intro5, eval = FALSE, echo = TRUE, class.source = 'fold-show'}
 saveRDS(ct, file = "ct.rds", compress = FALSE)
 ```
+
+<br>
 
 **6. Appliquer le code des analyses, ci-dessous**
 
@@ -505,8 +511,9 @@ ct <- ct |> HCPC_add_clust(salariat05, clust = orga052_2ind.5clC) # dans "Démar
 
 ### **GRAPHIQUE 1. L’espace des formes d’organisation du poste de travail**
 ```{r graph1, echo = TRUE}
-acm_orga_1_cah <-
-  ggmca(res.mca, ct[salariat05, ], sup_vars = c("cah_ORGA", "OBJtous", "RWNORMH", "RWCOLEG"),
+acm_orga_1_cah <- res.mca |> 
+  ggmca(ct[salariat05, ],
+        sup_vars = c("cah_ORGA", "OBJtous", "RWNORMH", "RWCOLEG"),
         actives_in_bold = TRUE,
         cah = "cah_ORGA", color_groups = c("^.{1}", "^.{0}", "^.{0}", "^.{0}"),
         profiles = TRUE, max_profiles = 5000,
@@ -515,7 +522,8 @@ acm_orga_1_cah <-
         size_scale_max = 6,
         get_data = TRUE
   )
-acm_orga_1_cah_cah <- acm_orga_1_cah$vars_data |> filter(str_detect(color_group, "^cah_ORGA"))
+acm_orga_1_cah_cah <- acm_orga_1_cah$vars_data |> 
+  filter(str_detect(color_group, "^cah_ORGA"))
 acm_orga_1_cah_vars <- new_tab(acm_orga_1_cah$vars_data) |>
   filter(vars != "cah_ORGA") |>
   mutate(face = if_else(color_group != "active_vars", "italic", "bold") )
@@ -532,9 +540,10 @@ acm_orga_1_cah_profiles <- acm_orga_1_cah$profiles_coord |>
     cah = map2_chr(
       cah, sup_vars,
       ~ case_when(
-        !is.na(.x)                             ~ .x,
-        all(is.na(.y$cah_ORGA) | .y$cah_ORGA == first(.y$cah_ORGA)) ~ as.character(first(.y$cah_ORGA)),
-        TRUE                                   ~ NA_character_)
+        !is.na(.x)                      ~ .x,
+        all(is.na(.y$cah_ORGA) | .y$cah_ORGA == first(.y$cah_ORGA))
+                                        ~ as.character(first(.y$cah_ORGA)),
+        TRUE                            ~ NA_character_)
     ),
     
     cah_id = fct_recode(cah, !!!cah_id_recode) |> as.integer(),
@@ -570,8 +579,8 @@ acm_orga_1_cah_output <-
   ggrepel::geom_text_repel(
     ggplot2::aes(label = lvs, fontface = face),
     size = 3, na.rm = TRUE, direction = "both",  min.segment.length = 0.01,
-    force = 0.5, force_pull = 1, point.padding = 0, box.padding = 0, point.size = NA,
-    arrow = ggplot2::arrow(length = ggplot2::unit(0.25, "lines"))
+    force = 0.5, force_pull = 1, point.padding = 0, box.padding = 0, 
+    point.size = NA, arrow = ggplot2::arrow(length = ggplot2::unit(0.25, "lines"))
   ) +
   geom_segment(
     data = acm_orga_1_cah_cah |>
@@ -580,7 +589,8 @@ acm_orga_1_cah_output <-
              start1  = pmin(0.95, pmax(`Dim 1`, -0.5)),
              start2  = pmin(1.25, pmax(`Dim 2`, -0.775)),
       ),
-    ggplot2::aes(x = start1, xend = `Dim 1`, y = start2, yend = `Dim 2`,  color = color_group),
+    ggplot2::aes(x = start1, xend = `Dim 1`, y = start2, yend = `Dim 2`,  
+                 color = color_group),
     arrow = ggplot2::arrow(length = ggplot2::unit(0.3, "lines")), na.rm = TRUE
   ) +
   geom_label(
@@ -594,8 +604,9 @@ acm_orga_1_cah_output <-
     fontface = "bold", size = 3, na.rm = TRUE
   )
 
-# ggsave2(acm_orga_1_cah_output, dir = "2024_OrgaTravailAdminPub", name = "1-ACM orga cah color",
-#         width = 17, height = 17 / heigth_width_ratio, replace = TRUE, open = TRUE)
+# ggsave2(acm_orga_1_cah_output, dir = "2024_OrgaTravailAdminPub",
+#  name = "1-ACM orga cah color", 
+#  width = 17, height = 17 / heigth_width_ratio, replace = TRUE, open = TRUE)
 
 ```
 
@@ -622,9 +633,10 @@ Lecture : en gras les variables actives de l’ACM (utilisées pour construire l
 # Graphique 1, noir et blanc, version article publié.
 
 # ACM de base :
-acm_orga_1 <-
-  ggmca(res.mca, ct[salariat05, ], sup_vars = c("cah_ORGA", "PPP1", "EMP4", "ANNEE",
-                                                "OBJtous", "RWNORMH", "RWCOLEG"),
+acm_orga_1 <- res.mca |> 
+  ggmca(ct[salariat05, ], 
+        sup_vars = c("cah_ORGA", "PPP1", "EMP4", "ANNEE",
+                     "OBJtous", "RWNORMH", "RWCOLEG"),
         discard_levels = c("Autres"),
         actives_in_bold = TRUE, active_tables = "sup", profiles = FALSE,
         text_size = 2.5, text_repel = TRUE,
@@ -674,8 +686,9 @@ acm_orga_1_output <-
     size = 3, na.rm = TRUE, color = "black"
   )
 
-# ggsave2(acm_orga_1_output, dir = "2024_OrgaTravailAdminPub", name = "Graph1-ACM orga base",
-#         width = 17, height = 17 / heigth_width_ratio, replace = TRUE, open = TRUE)
+# ggsave2(acm_orga_1_output, dir = "2024_OrgaTravailAdminPub", 
+#   name = "Graph1-ACM orga base",
+#   width = 17, height = 17 / heigth_width_ratio, replace = TRUE, open = TRUE)
 ```
 
 
@@ -692,11 +705,16 @@ cah_orga_subtext <- c(
 )
 
 cah_orga_active_tabs <-
-  HCPC_tab_active(ct$cah_ORGA[salariat05], ct[salariat05, ], "pondcal",
-                  unique(c(active_vars, Ceval, "NBCTREVAL", Cexec, "NBCTREXEC", "NBCONTR"), fromLast = TRUE), 
-                  recode_helper = FALSE
+  HCPC_tab_active(
+    ct$cah_ORGA[salariat05], ct[salariat05, ], "pondcal",
+    unique(c(active_vars, Ceval, "NBCTREVAL", Cexec, "NBCTREXEC", "NBCONTR"), 
+           fromLast = TRUE), 
+    recode_helper = FALSE
   ) |>
-  mutate(across(all_of(c("NBCTREVAL", "NBCTREXEC", "NBCONTR")), ~ mutate(., digits = 1L))) |>
+  mutate(across(
+    all_of(c("NBCTREVAL", "NBCTREXEC", "NBCONTR")), 
+    ~ mutate(., digits = 1L)
+  )) |>
   tab_transpose()
 
 n_rows <- filter(cah_orga_active_tabs, is_totrow(cah_orga_active_tabs)) |>
@@ -738,8 +756,10 @@ cah_orga_active_tabs <- cah_orga_active_tabs |>
            fct_relevel(names(active_vars_rename_vect))
   ) |> 
   arrange(variables) |>
-  add_row(variables = factor("Le rythme du travail est imposé par (contraintes de rythme) : "), 
-          .after = 17
+  add_row(variables = factor(
+    "Le rythme du travail est imposé par (contraintes de rythme) : "
+  ), 
+  .after = 17
   ) |> 
   rename(Ensemble = Total) |> 
   mutate(across(where(is_fmt), ~ if_else(.$display == "mean",
@@ -775,13 +795,20 @@ Note : les classes ont été consolidées par K-means, ce qui conduit à des cat
 set_color_breaks(pct_breaks = c(0.04, 0.08, 0.16, 0.32)) #-0.05 -0.10 -0.20 -0.30
 
 subtext_orga_evol <- c(
-  "Lecture : en 2005, 37 % des cadres des administrations publiques sont dans la classe « autonomie du métier ». Pour chaque catégorie, le pourcentage de 2013 et 2019 est comparé à celui de 2005. En gris : chiffre non significativement différent de celui de 2005 après prise en compte de la marge d’erreur (intervalle de Wald avec ajustement d’Agresti et Caffo, seuil de confiance à 95 %). En couleur : évolutions significatives.", 
+  "Lecture : en 2005, 37 % des cadres des administrations publiques sont dans la 
+  classe « autonomie du métier ». Pour chaque catégorie, le pourcentage de 2013 et
+  2019 est comparé à celui de 2005. En gris : chiffre non significativement 
+  différent de celui de 2005 après prise en compte de la marge d’erreur 
+  (intervalle de Wald avec ajustement d’Agresti et Caffo, seuil de confiance à 95 %).
+  En couleur : évolutions significatives.", 
   champ05, 
   source0519)
 
 orga_evol_tabs <- list(
-  "Administrations publiques" = ct[salariat05 & ct$EMP_ADM_ENT == "1-Administrations publiques", ],
-  "Entreprises"               = ct[salariat05 & ct$EMP_ADM_ENT == "2-Entreprises", ] #,
+  "Administrations publiques" = 
+    ct[salariat05 & ct$EMP_ADM_ENT == "1-Administrations publiques", ],
+  
+  "Entreprises" = ct[salariat05 & ct$EMP_ADM_ENT == "2-Entreprises", ] #,
   #"Ensemble"                  = ct[salariat05, ]
 ) |>
   imap_dfr(
@@ -793,7 +820,9 @@ orga_evol_tabs <- list(
       arrange(ANNEE) |>
       filter(!is_totrow(Total)) |>
       tab_spread(ANNEE) |>
-      mutate(across(1, function(.var) if_else(.var == "Ensemble", paste0("Total ", .y), .var))
+      mutate(across(1, function(.var) if_else(.var == "Ensemble",
+                                              true  = paste0("Total ", .y),
+                                              false = .var))
       )
   ) |>
   select(-starts_with("Total")) |>
@@ -805,7 +834,7 @@ orga_evol_tabs <- list(
   rename_with(~ str_replace(., "_", " ")) |>
   rename_with(~ paste0(map_chr(1:length(.), ~ paste0(rep(" ", .), collapse = "") ), 
                        str_sub(., -4, -1)), 
-              .cols = where(is_fmt) ) # & !ends_with("2005")
+              .cols = where(is_fmt) ) 
 # cah_evol_tabs |> tab_xl(sheets = "unique")
 
 orga_evol_tabs |> tab_kable(tooltips = FALSE) |>
@@ -820,9 +849,6 @@ orga_evol_tabs |> tab_kable(tooltips = FALSE) |>
   )
 
 set_color_breaks(pct_breaks = c(0.05,  0.10,  0.20,  0.30)) 
-
-# <ins> </ins>  
-# <i> </i>
 ```
 
 
@@ -831,8 +857,15 @@ set_color_breaks(pct_breaks = c(0.05,  0.10,  0.20,  0.30))
 ### **TABLEAU 3 – Les formes d’organisation et les objectifs chiffrés des professions organisées des administrations publiques en 2019**
 ```{r tab3, echo = TRUE}
 orga_prof_subtext <- c(
-  "Lecture : 21 % des médecins hospitalier·es sont dans la classe d’organisation « autonomie du métier ». Nuances de bleu : proportion significativement supérieure à la moyenne (Total de colonne) après prise en compte de la marge d’erreur (intervalle de Wald avec ajustement d’Agresti et Caffo, seuil de confiance à 95 %). Nuances du jaune au rouge : proportion significativement inférieure à la moyenne. En gris : proportion non significativement différente de la moyenne.", 
-  "Champ : professions organisées des administrations publiques, France métropolitaine. Pourcentages pondérés.",
+  "Lecture : 21 % des médecins hospitalier·es sont dans la classe d’organisation 
+  « autonomie du métier ». Nuances de bleu : proportion significativement 
+  supérieure à la moyenne (Total de colonne) après prise en compte de la marge
+  d’erreur (intervalle de Wald avec ajustement d’Agresti et Caffo, seuil de 
+  confiance à 95 %). Nuances du jaune au rouge : proportion significativement 
+  inférieure à la moyenne. En gris : proportion non significativement différente
+  de la moyenne.", 
+  "Champ : professions organisées des administrations publiques, 
+  France métropolitaine. Pourcentages pondérés.",
   source19
 )
 
@@ -874,12 +907,16 @@ evol_cah_PPP1_EMP <- ct[salariat05, ] |>
          !(str_detect(EMP4, "industrie") & str_detect(PPP1, "Empl|Prof")),
          !(str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "Ouvr")),
          !(str_detect(EMP4, "services") & str_detect(PPP1, "Prof"))
-         #!(str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "CBI")),
+         #!(str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "CBS")),
   ) |>
   select(-Total) |>
   #Mettre devant (= tracer après) les lignes où il y a des changements depuis 2005
-  arrange(!is.na(fmt_get_color_code(`2013`)) | !is.na(fmt_get_color_code(`2019`)), .by_group = TRUE) |>
-  pivot_longer(cols = c(`2005`, `2013`, `2019`), names_to = "ANNEE", values_to = "fmt") |>
+  arrange(
+    !is.na(fmt_get_color_code(`2013`)) | !is.na(fmt_get_color_code(`2019`)), 
+    .by_group = TRUE
+  ) |>
+  pivot_longer(cols = c(`2005`, `2013`, `2019`), 
+               names_to = "ANNEE", values_to = "fmt") |>
   mutate(pct   = fmt$pct * 100,
          ci    = fmt$ci  * 100,
          n     = fmt$n,
@@ -887,7 +924,11 @@ evol_cah_PPP1_EMP <- ct[salariat05, ] |>
          #En grisé quand pas significativement différent de 2005
          no_diff_from_2005 = ANNEE != 2005 & is.na(fmt_get_color_code(fmt)),
          #En gras quand ±4% par rapport à 2005 (après marge d'erreur)
-         big_diff = if_else(abs(fmt$diff) - fmt$ci >= 0.04 & ANNEE != 2005 & !no_diff_from_2005, "bold", "plain"),
+         big_diff = if_else(
+           abs(fmt$diff) - fmt$ci >= 0.04 & ANNEE != 2005 & !no_diff_from_2005,
+           true  = "bold",
+           false = "plain"
+           ),
          ANNEE = if_else(ANNEE == 2005, 2007L, ANNEE)
   ) |>
   ungroup() |>
@@ -896,7 +937,6 @@ evol_cah_PPP1_EMP <- ct[salariat05, ] |>
   mutate(ngroup = sum(n),
          pct    = if_else(ngroup < 100, NA_real_, pct),
          ngroup = if_else(row_number() == 1, paste("n =", ngroup), NA_character_)) |>
-  #mutate(ngroup = sum(n), pct = if_else(ngroup < 100, NA_real_, pct) ) |>
   group_by(PPP1, EMP4, cah_ORGA) |>
   mutate(pct_prev   = lag(pct),
          ANNEE_prev = lag(ANNEE) ) |>
@@ -906,25 +946,23 @@ evol_cah_PPP1_EMP <- ct[salariat05, ] |>
          pct2 = if_else(duplicated(pct2), NA_character_, pct2) ) |>
   group_by(PPP1) |>
   mutate(max_pct = max(pct, na.rm = TRUE),
-         #max_pct = if_else((str_detect(EMP4, "industrie") & str_detect(PPP1, "Ouvr")) |
-         #                    (str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "Emp")) |
-         #                    (str_detect(EMP4, "PME") & str_detect(PPP1, "Emp")),
-         #                  true  = max_pct - 10,
-         #                  false = max_pct)
          ngroup_x = if_else(
-           !is.na(ngroup) & ((str_detect(EMP4, "industrie") & str_detect(PPP1, "Ouvr")) |
-                               (str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "Emp")) |
-                               (str_detect(EMP4, "PME") & str_detect(PPP1, "Emp"))      |
-                               (str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "interm"))
+           !is.na(ngroup) & (
+             (str_detect(EMP4, "industrie") & str_detect(PPP1, "Ouvr")) |
+               (str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "Emp")) |
+               (str_detect(EMP4, "PME") & str_detect(PPP1, "Emp"))      |
+               (str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "interm"))
            ),
            true  = 2006,
-           false = 2020),
+           false = 2020
+         ),
          
          ngroup_hjust = if_else(
-           !is.na(ngroup) & ((str_detect(EMP4, "industrie") & str_detect(PPP1, "Ouvr")) |
-                               (str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "Emp")) |
-                               (str_detect(EMP4, "PME") & str_detect(PPP1, "Emp"))      |
-                               (str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "interm"))
+           !is.na(ngroup) & (
+             (str_detect(EMP4, "industrie") & str_detect(PPP1, "Ouvr")) |
+               (str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "Emp")) |
+               (str_detect(EMP4, "PME") & str_detect(PPP1, "Emp"))      |
+               (str_detect(EMP4, "Hôpitaux") & str_detect(PPP1, "interm"))
            ),
            true  = 0,
            false = 1),
@@ -996,7 +1034,8 @@ graph_evol_cah_PPP1_EMP <-
                         values = c('solid', 'dotted', "longdash", 'solid', 'dotted')
   ) + 
   geom_label(aes(label = pct2, color = no_diff_from_2005, fontface = big_diff),
-             size = 2.5, label.padding = unit(0.05, "lines"), label.size = 0, na.rm = TRUE) +
+             size = 2.5, label.padding = unit(0.05, "lines"), 
+             label.size = 0, na.rm = TRUE) +
   facet_grid(vars(PPP1), vars(EMP4), scales = "free_y", switch = "y") +
   ylab("Pourcentage de salarié·es dans chaque forme d'organisation") + 
   scale_color_discrete(type = c("black", "gray50"), guide = NULL) +
@@ -1016,7 +1055,8 @@ graph_evol_cah_PPP1_EMP <-
   )
 
 # ggsave(plot = graph_evol_cah_PPP1_EMP,
-#        path = "2024_OrgaTravailAdminPub", filename = "Graph3-Evolutions organisations.png", device = "png",
+#        path = "2024_OrgaTravailAdminPub", 
+#        filename = "Graph3-Evolutions organisations.png", device = "png",
 #        dpi = 600, width = 17, height = 20, units = "cm")
 # file.show("Plots\\cah_evol.png")
 
@@ -1030,39 +1070,50 @@ graph_evol_cah_PPP1_EMP <-
 ### **TABLEAU 4 – Les formes d’organisation et les objectifs chiffrés des agent·es subalternes des administrations publiques en 2019**
 ```{r tab4, echo = TRUE}
 orga_CBS_exec_subtext <- c(
-  "Lecture : 23 % des contrôleuses et contrôleurs des Finances publiques sont dans la classe d’organisation « autonomie du métier ». HP = hôpitaux publics ; CL = collectivités locales. Nuances de bleu : proportion significativement supérieure à la moyenne (Total de colonne) après prise en compte de la marge d’erreur (intervalle de Wald avec ajustement d’Agresti et Caffo, seuil de confiance à 95 %). Nuances du jaune au rouge : proportion significativement inférieure à la moyenne. En gris : proportion non significativement différente de la moyenne.", 
-  "Champ : cols-blancs intermédiaires, employées et ouvriers des administrations publiques, France métropolitaine. Pourcentages pondérés.",
+  "Lecture : 23 % des contrôleuses et contrôleurs des Finances publiques sont dans 
+  la classe d’organisation « autonomie du métier ». HP = hôpitaux publics ; 
+  CL = collectivités locales. Nuances de bleu : proportion significativement 
+  supérieure à la moyenne (Total de colonne) après prise en compte de la marge
+  d’erreur (intervalle de Wald avec ajustement d’Agresti et Caffo, seuil de 
+  confiance à 95 %). Nuances du jaune au rouge : proportion significativement
+  inférieure à la moyenne. En gris : proportion non significativement 
+  différente de la moyenne.", 
+  "Champ : cols-blancs intermédiaires, employées et ouvriers des 
+  administrations publiques, France métropolitaine. Pourcentages pondérés.",
   source19)
 
 orga_CBS_exec_tab <- 
   ct[salariat05 & `2019` & ct$EMP_ADM_ENT == "1-Administrations publiques" &
        ct$PPP1 %in% c("3-Cols blancs subalternes", "5-Employées", "6-Ouvriers"), ] |>
   mutate(
-    EMP     = fct_relevel(EMP, "2-État", "3-Hôpitaux publics", "1-Collectivités locales"), 
+    EMP = fct_relevel(EMP, "2-État", "3-Hôpitaux publics", "1-Collectivités locales"), 
     PPP2adm = fct_cross(PPP2, EMP) |>
-      fct_relabel(~ str_replace(., "^(...)-([^:]+):(.)-(.+)", "\\1\\3-\\2 \\4") |>
-                    str_replace("(?<=^...)1", "4") |>
-                    str_replace("(?<=^...)2", "1") |>
-                    str_replace("(?<=^...)3", "2") |>
-                    str_replace("(?<=^...)4", "3") |>
-                    str_replace("Hôpitaux publics", "HP") |>
-                    str_replace("Collectivités locales", "CL") |>
-                    str_replace("Employées services à la personne", "Agentes de services") |>
-                    str_replace("Militaires, gendarmes, pompiers CL", "Pompiers CL") |>
-                    str_replace("Militaires, gendarmes, pompiers État", "Militaires")
+      fct_relabel(
+        ~ str_replace(., "^(...)-([^:]+):(.)-(.+)", "\\1\\3-\\2 \\4") |>
+          str_replace("(?<=^...)1", "4") |>
+          str_replace("(?<=^...)2", "1") |>
+          str_replace("(?<=^...)3", "2") |>
+          str_replace("(?<=^...)4", "3") |>
+          str_replace("Hôpitaux publics", "HP") |>
+          str_replace("Collectivités locales", "CL") |>
+          str_replace("Employées services à la personne", 
+                      "Agentes de services") |>
+          str_replace("Militaires, gendarmes, pompiers CL", "Pompiers CL") |>
+          str_replace("Militaires, gendarmes, pompiers État", "Militaires")
       ) |>
       fct_recode("5G13-Policiers pompiers CL" = "5G13-Policiers CL",
                  "5G13-Policiers pompiers CL" = "5G23-Pompiers CL")
     ,
-    PPP2 = as.factor(if_else(FAPPP %in% c("D-Filière administrative",
-                                          "E-Filière technique",
-                                          "G-Filière sécurité", 
-                                          "I-Filière éducation-social",
-                                          "H-Services à la personne"),
-                             true  = as.character(PPP2adm),
-                             false = str_replace(as.character(PPP2), "^(...)-", "\\10-")
-                             
-    )) |>
+    PPP2 = as.factor(
+      if_else(FAPPP %in% c("D-Filière administrative",
+                           "E-Filière technique",
+                           "G-Filière sécurité", 
+                           "I-Filière éducation-social",
+                           "H-Services à la personne"),
+              true  = as.character(PPP2adm),
+              false = str_replace(as.character(PPP2), "^(...)-", "\\10-")
+              
+      )) |>
       fct_relabel(~ str_remove(., "CBS banque") |> str_remove("Employées banque") |>
                     str_remove(", +$")) |>
       fct_relabel(~ str_replace(., "^(.)(.)(.)(.)", "\\4\\2\\1\\3") ) |>
@@ -1090,8 +1141,8 @@ orga_CBS_exec_tab <-
   filter(n >= 20)
 # orga_CBS_exec_tab |> tab_xl(colwidth = 10, sheets = "unique")
 
-orga_CBS_exec_tab |> tab_kable(tooltips = FALSE) #|> 
-  #kableExtra::row_spec(0, bold = TRUE, font_size = 12, align = "center")
+#|> kableExtra::row_spec(0, bold = TRUE, font_size = 12, align = "center")
+orga_CBS_exec_tab |> tab_kable(tooltips = FALSE) 
 ```
 
 
@@ -1101,14 +1152,16 @@ orga_CBS_exec_tab |> tab_kable(tooltips = FALSE) #|>
 ### **TABLEAU 5 – Les objectifs chiffrés selon la forme d’organisation en 2019**
 ```{r tab5, echo = TRUE}
 subtext_obj <- c(
-  "Lecture : 16 % des salarié·es en autonomie du métier sont sous direction par objectifs.",
-  "Champ : salarié·es des organisations, France métropolitaine. Pourcentages pondérés.",
+  "Lecture : 16 % des salarié·es en autonomie du métier sont 
+  sous direction par objectifs.",
+  "Champ : salarié·es des organisations, France métropolitaine.
+  Pourcentages pondérés.",
   source19
 )
 
 orga_obj_tab <- ct[salariat05 & `2019`, ] |>
-  tab_many(cah_ORGA, OBJtous, wt = pondcal, pct = "row", color = "diff_ci", na = "drop",
-           cleannames = TRUE, subtext = subtext_obj)
+  tab_many(cah_ORGA, OBJtous, wt = pondcal, pct = "row", color = "diff_ci", 
+           na = "drop", cleannames = TRUE, subtext = subtext_obj)
 # orga_obj_tab |> tab_xl(sheets = "unique", colwidth = 12)
 
 orga_obj_tab |> tab_kable(tooltips = FALSE)
@@ -1141,15 +1194,23 @@ glm_data_DPO <-
                             "41-Collectivités locales"          ,
                             "21-Hôpitaux publics"               ,
                             "11-État"                           ,),
-         across(where(is.factor),
-                ~ fct_drop(fct_relabel(., ~ str_remove_all(., tabxplor:::cleannames_condition())))
+         across(
+           where(is.factor),
+           ~ fct_drop(
+             fct_relabel(., ~ str_remove_all(., tabxplor:::cleannames_condition()))
+           )
          )
   )
 
 logit_DPO_last <-
-  list("Ensemble"                  = glm_data_DPO,
-       "Entreprises"               = glm_data_DPO[glm_data_DPO$EMP_ADM_ENT == "Entreprises", ],
-       "Administrations publiques" = glm_data_DPO[glm_data_DPO$EMP_ADM_ENT == "Administrations publiques", ]) |>
+  list("Ensemble" = 
+         glm_data_DPO,
+       
+       "Entreprises" = 
+         glm_data_DPO[glm_data_DPO$EMP_ADM_ENT == "Entreprises", ],
+       
+       "Administrations publiques" = 
+         glm_data_DPO[glm_data_DPO$EMP_ADM_ENT == "Administrations publiques", ]) |>
   imap( # survey::svyglm
     ~ glm(DPO19 ~ AGE4 + SEXE + NBSALA2 + DIPLOME4 + ENCADR + PPP1 + EMP4,
           data = .x, 
@@ -1164,12 +1225,12 @@ logit_DPO_last <-
   reduce(~ full_join(.x, .y, by = "parameter")) |>
   relocate(!contains("marginal"), .after = 1)
 
-# logit_DPO_last |> openxlsx::write.xlsx(file = "logit_DPO_last.xlsx") ; # file.show("logit_DPO_last.xlsx")
+# logit_DPO_last |> openxlsx::write.xlsx(file = "logit_DPO_last.xlsx")
+# file.show("logit_DPO_last.xlsx")
 
 logit_DPO_last |> 
   select(-ends_with("marginal effect")) |> 
   knitr::kable(format = "html") |> kableExtra::kable_styling()
-
 ```
 
 <font size=2>
@@ -1191,25 +1252,36 @@ Lecture : toutes les variables choisies étant égales, les salarié·es des gra
 ```{r tab7, echo = TRUE}
 
 orga_cadres_subtext <- 
-  c("Lecture : 13 % des inspecteurs et inspectrices des Finances publiques sont dans la classe d’organisation « autonomie du métier ». HP = hôpitaux publics ; CL = collectivités locales ; EN = Éducation nationale. Nuances de bleu : proportion significativement supérieure à la moyenne (Total de colonne) après prise en compte de la marge d’erreur (intervalle de Wald avec ajustement d’Agresti et Caffo, seuil de confiance à 95 %). Nuances du jaune au rouge : proportion significativement inférieure à la moyenne. En gris : proportion non significativement différente de la moyenne.",
-    "Champ : cadres des administrations publiques, France métropolitaine. Pourcentages pondérés.",
+  c("Lecture : 13 % des inspecteurs et inspectrices des Finances publiques sont 
+    dans la classe d’organisation « autonomie du métier ». HP = hôpitaux publics
+    ; CL = collectivités locales ; EN = Éducation nationale. Nuances de bleu :
+    proportion significativement supérieure à la moyenne (Total de colonne) 
+    après prise en compte de la marge d’erreur (intervalle de Wald avec 
+    ajustement d’Agresti et Caffo, seuil de confiance à 95 %). Nuances du 
+    jaune au rouge : proportion significativement inférieure à la moyenne.
+    En gris : proportion non significativement différente de la moyenne.",
+    "Champ : cadres des administrations publiques, France métropolitaine.
+    Pourcentages pondérés.",
     source19)
 
 orga_cadres_tab <- 
-  ct[salariat05 & `2019` & ct$EMP_ADM_ENT == "1-Administrations publiques" & ct$PPP1 == "2-Cadres", ] |>
+  ct[salariat05 & `2019` & 
+       ct$EMP_ADM_ENT == "1-Administrations publiques" & ct$PPP1 == "2-Cadres", ] |>
   mutate(PPP2adm = fct_cross(PPP2, EMP) |>
-           fct_relabel(~ str_replace(., "^(...)-([^:]+):(.)-(.+)", "\\1\\3-\\2 \\4") |>
-                         str_replace("(?<=^...)1", "4") |>
-                         str_replace("(?<=^...)2", "1") |>
-                         str_replace("(?<=^...)3", "2") |>
-                         str_replace("(?<=^...)4", "3") |>
-                         str_replace("Hôpitaux publics", "HP") |>
-                         str_replace("Collectivités locales", "CL")
+           fct_relabel(
+             ~ str_replace(., "^(...)-([^:]+):(.)-(.+)", "\\1\\3-\\2 \\4") |>
+               str_replace("(?<=^...)1", "4") |>
+               str_replace("(?<=^...)2", "1") |>
+               str_replace("(?<=^...)3", "2") |>
+               str_replace("(?<=^...)4", "3") |>
+               str_replace("Hôpitaux publics", "HP") |>
+               str_replace("Collectivités locales", "CL")
            ),
-         PPP2 = as.factor(if_else(FAPPP %in% c("D-Filière administrative", "E-Filière technique"),
-                                  true  = as.character(PPP2adm),
-                                  false = str_replace(as.character(PPP2), "^(...)-", "\\10-")
-                                  
+         PPP2 = as.factor(if_else(
+           FAPPP %in% c("D-Filière administrative", "E-Filière technique"),
+           true  = as.character(PPP2adm),
+           false = str_replace(as.character(PPP2), "^(...)-", "\\10-")
+           
          )) |>
            fct_relabel(~ str_remove(., "Cadres banque") |> str_remove(", +$") ) |>
            fct_relabel(~ str_replace(., "^(.)(.)(.)(.)", "\\4\\2\\1\\3") ) |>
@@ -1231,6 +1303,13 @@ orga_cadres_tab <-
 orga_cadres_tab |> tab_kable(tooltips = FALSE)
 ```
 
+
+
+
+<br>
+
+<br>
+
 ## **Taux de féminisation des professions**
 
 Pour rendre visible la place des femmes dans la structure sociale, la règle de féminisation des noms de professions suivante a été adoptée par défaut : masculin s’il y a plus de deux tiers d’hommes dans une profession ; féminin s’il y a plus de deux tiers de femmes ; forme inclusive s’il y a entre 33% et 66% de femmes. 
@@ -1242,7 +1321,7 @@ Voici les tableaux utilisés :
 set_color_breaks(pct_breaks = c(0.1666, 0.1666, Inf)) #-0.05 -0.10 -0.20 -0.30
 
 
-PPP1_fem_tab <- ct[salariat05 & `2019`, ] |> # & EMP != "7-Ent taille inconnue" 
+PPP1_fem_tab <- ct[salariat05 & `2019`, ] |>
   mutate(EMP4 = fct_recode(
     EMP4,
     "41-CL"     = "41-Collectivités locales"          ,
@@ -1253,7 +1332,9 @@ PPP1_fem_tab <- ct[salariat05 & `2019`, ] |> # & EMP != "7-Ent taille inconnue"
     "22-CP"     = "22-Cliniques privées"              ,
     "42-PME"    = "42-PME (et assos)"                 ,
     "90-Autres" = "90-Autres (EntI, Ag, GCstr)"       
-  ) |> fct_relevel("41-CL", "11-État", "21-HP", "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
+  ) |> 
+    fct_relevel("41-CL", "11-État", "21-HP", 
+                "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
   ) |>
   tab(PPP1, SEXE, EMP4, wt = pondcal, pct = "row", color = "diff", 
       totaltab = "table", cleannames = TRUE, na = "drop") |>
@@ -1294,7 +1375,9 @@ PPP1_fem_tab <- ct[salariat05 & `2019`, ] |> # & EMP != "7-Ent taille inconnue"
     "22-CP"     = "22-Cliniques privées"              ,
     "42-PME"    = "42-PME (et assos)"                 ,
     "90-Autres" = "90-Autres (EntI, Ag, GCstr)"       
-  ) |> fct_relevel("41-CL", "11-État", "21-HP", "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
+  ) |> 
+    fct_relevel("41-CL", "11-État", "21-HP", 
+                "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
   ) |>
   tab(PPP1, SEXE, EMP4, wt = pondcal, pct = "row", color = "diff", 
       totaltab = "table", cleannames = TRUE, na = "drop") |>
@@ -1335,7 +1418,9 @@ PPP2_fem_tab <- ct[salariat05 & `2019`, ] |> # & EMP != "7-Ent taille inconnue"
     "22-CP"     = "22-Cliniques privées"              ,
     "42-PME"    = "42-PME (et assos)"                 ,
     "90-Autres" = "90-Autres (EntI, Ag, GCstr)"       
-  ) |> fct_relevel("41-CL", "11-État", "21-HP", "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
+  ) |>
+    fct_relevel("41-CL", "11-État", "21-HP",
+                "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
   ) |>
   tab(PPP2, SEXE, c(FAPPP, EMP4), wt = pondcal, pct = "row", color = "diff", 
       totaltab = "table", cleannames = TRUE, na = "drop") |>
@@ -1356,14 +1441,16 @@ total_employeurs <- ct[salariat05 & `2019`, ] |> # & EMP != "7-Ent taille inconn
     "22-CP"     = "22-Cliniques privées"              ,
     "42-PME"    = "42-PME (et assos)"                 ,
     "90-Autres" = "90-Autres (EntI, Ag, GCstr)"       
-  ) |> fct_relevel("41-CL", "11-État", "21-HP", "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
+  ) |> 
+    fct_relevel("41-CL", "11-État", "21-HP",
+                "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
   ) |>
   tab(EMP4, SEXE, wt = pondcal, pct = "row", color = "diff", 
       totaltab = "table", cleannames = TRUE, na = "drop") |> 
-    select(-Total, -Homme) |>
+  select(-Total, -Homme) |>
   mutate(Femme = mutate(Femme, diff = pct - 0.5) |>
            as_totrow() |> as_tottab()
-         ) |>
+  ) |>
   pivot_wider(names_from = "EMP4", values_from = "Femme") |>
   rename(Ensemble = Total) |>
   mutate(PPP2 = factor("TOTAL TOUTES FILIERES"), .before = 1)
@@ -1412,7 +1499,9 @@ PPP2_fem_tab <- ct[salariat05 & `2019`, ] |> # & EMP != "7-Ent taille inconnue"
     "22-CP"     = "22-Cliniques privées"              ,
     "42-PME"    = "42-PME (et assos)"                 ,
     "90-Autres" = "90-Autres (EntI, Ag, GCstr)"       
-  ) |> fct_relevel("41-CL", "11-État", "21-HP", "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
+  ) |> 
+    fct_relevel("41-CL", "11-État", "21-HP", 
+                "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
   ) |>
   tab(PPP2, SEXE, c(FAPPP, EMP4), wt = pondcal, pct = "row", color = "diff", 
       totaltab = "table", cleannames = TRUE, na = "drop") |>
@@ -1433,14 +1522,16 @@ total_employeurs <- ct[salariat05 & `2019`, ] |> # & EMP != "7-Ent taille inconn
     "22-CP"     = "22-Cliniques privées"              ,
     "42-PME"    = "42-PME (et assos)"                 ,
     "90-Autres" = "90-Autres (EntI, Ag, GCstr)"       
-  ) |> fct_relevel("41-CL", "11-État", "21-HP", "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
+  ) |> 
+    fct_relevel("41-CL", "11-État", "21-HP",
+                "30-GI", "12-GES", "22-CP", "42-PME", "90-Autres")
   ) |>
   tab(EMP4, SEXE, wt = pondcal, pct = "row", color = "diff", 
       totaltab = "table", cleannames = TRUE, na = "drop") |> 
-    select(-Total, -Homme) |>
+  select(-Total, -Homme) |>
   mutate(Femme = mutate(Femme, diff = pct - 0.5) |>
            as_totrow() |> as_tottab()
-         ) |>
+  ) |>
   pivot_wider(names_from = "EMP4", values_from = "Femme") |>
   rename(Ensemble = Total) |>
   mutate(PPP2 = factor("TOTAL TOUTES FILIERES"), .before = 1)
@@ -1450,17 +1541,16 @@ PPP2_fem_tab <- PPP2_fem_tab |> tab_spread(EMP4, names_sort = TRUE)
 PPP2_fem_tab <- PPP2_fem_tab |> 
   filter(FAPPP != "Ensemble") |> 
   select(-Ensemble) |>
-  left_join(filter(PPP2_fem_tab, FAPPP == "Ensemble") |>
-              select(PPP2, Ensemble), 
-            by = "PPP2") |>
+  left_join(
+    filter(PPP2_fem_tab, FAPPP == "Ensemble") |>select(PPP2, Ensemble), 
+    by = "PPP2"
+  ) |>
   mutate(Ensemble = if_else(!is.na(Ensemble), Ensemble, Total) |> as_totcol()) |>
   select(-Total)  |>
   bind_rows(total_employeurs) 
 
 
 PPP2_fem_tab |> tab_kable(tooltips = FALSE, color_legend = FALSE)
-
-# set_color_breaks(pct_breaks = c(0.05,  0.10,  0.20,  0.30)) 
 ```
 
 <font size=2>
@@ -1471,3 +1561,5 @@ Lecture : 61 % des cadres administratifs/tives des collectivités locales sont d
 `r source19`
 </font>
 
+
+<!-- # set_color_breaks(pct_breaks = c(0.05,  0.10,  0.20,  0.30))  -->
