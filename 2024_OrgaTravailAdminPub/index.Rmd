@@ -14,6 +14,8 @@ output:
 <!-- html_document: -->
 <!-- highlight: tango -->
 
+<!-- Liens html : pas d'accents etc dans les titres de niveau 2 -->
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
   echo = TRUE, warning = FALSE, message = FALSE
@@ -137,7 +139,7 @@ Source : Dares-Drees-DGAFP, Enquêtes Conditions de travail 2005, 2013, 2016 et 
 <br>
 
 
-## **Reproduire les analyses : marche à suivre**
+## **Reproduire les analyses : marche a suivre**
 
 **1. Commander les données auprès de l'ADISP sur le site Quetelet-Progedo: **
 
@@ -149,7 +151,7 @@ https://commande.progedo.fr
 
 **2. Créer un Projet R et installer les packages nécessaires**
 
-Créer un nouveau projet RStudio (File > New Project), dans un nouveau dossier. 
+Créer un nouveau projet RStudio (File > New Project), dans un nouveau dossier. Pour initialer le projett sans packages installés et utiliser les versions données ci-dessous, cocher la case "Use renv with this project". 
 
 Au sein du dossier du projet, copier tous les fichiers du répertoire  [https://github.com/BriceNocenti/socio_public_services/blob/main/2024_OrgaTravailAdminPub](https://github.com/BriceNocenti/socio_public_services/blob/main/2024_OrgaTravailAdminPub). 
 
@@ -399,7 +401,7 @@ saveRDS(ct, file = "ct.rds", compress = FALSE)
 
 ## **Analyses**
 
-### **Démarrage**
+### **Demarrage**
 ```{r startup, eval = FALSE, echo = TRUE, class.source = 'fold-show'}
 library(tidyverse)
 library(rlang)
@@ -411,9 +413,10 @@ source("Demarrage.R", encoding = "UTF-8")
 ct <- readRDS("ct.rds")
 
 # Variables logiques pour délimiter le champ
-salariat05 <- ct$CHAMP_CT2005 == "1-Champ 2005" & ct$ANNEE %in% c("2005", "2013", "2019") & 
-  !ct$EMP %in% c("8-Particuliers", "I-Pas d'employeur", "I-Pas d’employeur") & !is.na(ct$EMP) &
-  !is.na(ct$pondcal)
+salariat05 <- ct$CHAMP_CT2005 == "1-Champ 2005" & 
+  ct$ANNEE %in% c("2005", "2013", "2019") & 
+  !ct$EMP %in% c("8-Particuliers", "I-Pas d'employeur", "I-Pas d’employeur") &
+  !is.na(ct$EMP) & !is.na(ct$pondcal)
 
 `2005` <- ct$ANNEE == "2005"
 `2013` <- ct$ANNEE == "2013"
@@ -421,11 +424,14 @@ salariat05 <- ct$CHAMP_CT2005 == "1-Champ 2005" & ct$ANNEE %in% c("2005", "2013"
 `2019` <- ct$ANNEE == "2019"
 
 # Champs et sources
-champ05 <- "Champ : salarié·es des organisations, France métropolitaine. Pourcentages pondérés."
+champ05 <- "Champ : salarié·es des organisations, France métropolitaine. 
+Pourcentages pondérés."
 
-source0519 <- "Source : Dares-Drees-DGAFP, enquête Conditions de travail 2005, 2013 et 2019, volet actifs occupés (diffusion Adisp)."
+source0519 <- "Source : Dares-Drees-DGAFP, enquête Conditions de travail 2005, 
+2013 et 2019, volet actifs occupés (diffusion Adisp)."
 
-source19 <- "Source : Dares-Drees-DGAFP, enquête Conditions de travail 2019, volet actifs occupés (diffusion Adisp)."
+source19 <- "Source : Dares-Drees-DGAFP, enquête Conditions de travail 2019, 
+volet actifs occupés (diffusion Adisp)."
 ```
 
 
@@ -459,7 +465,7 @@ res.mca$axes_names <- c("autonomie peu contrainte / pas d'autonomie fortes contr
                         "coopération et évaluation formalisée / peu de coopération")
 ```
 
-### **Classification ascendante hiérarchique (CAH) sur composantes principales**
+### **Classification ascendante hierarchique (CAH) sur composantes principales**
 ```{r cah, eval = FALSE, echo = TRUE}
 # 1) En ajoutant la CAH sauvegardée
 ct <- ct |> left_join(readRDS("cah_orga_final.rds"), by = "ID") # "cah_orga05_2_ext.rds"
@@ -808,22 +814,30 @@ orga_evol_tabs <- list(
   "Administrations publiques" = 
     ct[salariat05 & ct$EMP_ADM_ENT == "1-Administrations publiques", ],
   
-  "Entreprises" = ct[salariat05 & ct$EMP_ADM_ENT == "2-Entreprises", ] #,
-  #"Ensemble"                  = ct[salariat05, ]
+  "Entreprises" = 
+    ct[salariat05 & ct$EMP_ADM_ENT == "2-Entreprises", ],
+  
+  "Ensemble" = 
+    ct[salariat05, ]
 ) |>
   imap_dfr(
     ~ tab_many(.x, ANNEE, cah_ORGA, PPP1, wt = pondcal, pct = "row",
                color = "after_ci", diff = "2005", na = "drop", totaltab = "table",
-               cleannames = TRUE, subtext = subtext_orga_evol ) |>
+               cleannames = TRUE) |>
       ungroup() |>
       select(ANNEE, PPP1, everything()) |>
       arrange(ANNEE) |>
       filter(!is_totrow(Total)) |>
       tab_spread(ANNEE) |>
-      mutate(across(1, function(.var) if_else(.var == "Ensemble",
-                                              true  = paste0("Total ", .y),
-                                              false = .var))
-      )
+      mutate(across(
+        1, 
+        function(.var) if_else(
+          .var != "Ensemble",
+          true  = .var |> fct_expand(paste0("Total ", .y)), 
+          false = as_factor(paste0("Total ", .y))
+        )
+      )) |>
+      mutate(EMP_ADM_ENT = factor(.y), .before = 1)
   ) |>
   select(-starts_with("Total")) |>
   mutate(across(
@@ -831,13 +845,16 @@ orga_evol_tabs <- list(
     ~ if_else(is_tottab(.), as_totrow(.), .) |>
       set_col_var(str_sub(cur_column(), 1, -6))
   ) ) |> 
-  rename_with(~ str_replace(., "_", " ")) |>
+  rename_with(~ str_replace(., "_", " "), .cols = where(is_fmt)) |>
+  filter(!(EMP_ADM_ENT == "Ensemble" & PPP1 != "Total Ensemble")) |>
+  new_tab(subtext = subtext_orga_evol)
+# orga_evol_tabs |> tab_xl(sheets = "unique")
+
+orga_evol_tabs |> 
   rename_with(~ paste0(map_chr(1:length(.), ~ paste0(rep(" ", .), collapse = "") ), 
                        str_sub(., -4, -1)), 
-              .cols = where(is_fmt) ) 
-# cah_evol_tabs |> tab_xl(sheets = "unique")
-
-orga_evol_tabs |> tab_kable(tooltips = FALSE) |>
+              .cols = where(is_fmt) ) |> 
+  tab_kable(tooltips = FALSE) |>
   kableExtra::add_header_above(c(" " = 1,
                                  "Autonomie du métier" = 3,
                                  "Autonomie évaluée"   = 3,
@@ -850,6 +867,7 @@ orga_evol_tabs |> tab_kable(tooltips = FALSE) |>
 
 set_color_breaks(pct_breaks = c(0.05,  0.10,  0.20,  0.30)) 
 ```
+
 
 
 <br>
@@ -878,7 +896,7 @@ orga_prof_tab <-
   ) |>
   mutate(n = mutate(Total, display = "n")) |>
   filter(n >= 50)
-# tab_xl(colwidth = 10, sheets = "unique")
+# tab_xl(orga_prof_tab, colwidth = 10, sheets = "unique")
 
 orga_prof_tab |> tab_kable(tooltips = FALSE)
 ```
@@ -1130,19 +1148,20 @@ orga_CBS_exec_tab <-
   ) |>
   mutate(n = mutate(Total, display = "n")) |>
   filter(!(is_totrow(Total) & grouping != "Total")) |> 
+  group_by(grouping, PPP1ex) |> 
+  filter(n >= 20)
+# orga_CBS_exec_tab |> tab_xl(colwidth = 10, sheets = "unique")
+
+
+orga_CBS_exec_tab |> 
   mutate(PPP2 = if_else(
     condition = is_totrow(Total), 
     true      = as.factor(paste0("<b>", str_remove(PPP2, " Total$"), "</b>")), 
     false     = PPP2
   ) |>
     as_factor()
-  ) |>
-  group_by(grouping, PPP1ex) |> 
-  filter(n >= 20)
-# orga_CBS_exec_tab |> tab_xl(colwidth = 10, sheets = "unique")
-
-#|> kableExtra::row_spec(0, bold = TRUE, font_size = 12, align = "center")
-orga_CBS_exec_tab |> tab_kable(tooltips = FALSE) 
+  ) |> # kableExtra::row_spec(0, bold = TRUE, font_size = 12, align = "center") |>
+  tab_kable(tooltips = FALSE) 
 ```
 
 
@@ -1224,9 +1243,9 @@ logit_DPO_last <-
   ) |>
   reduce(~ full_join(.x, .y, by = "parameter")) |>
   relocate(!contains("marginal"), .after = 1)
+# logit_DPO_last |> openxlsx::write.xlsx(file = tab_temp<-tempfile(fileext = ".xlsx") )
+# file.show(tab_temp)
 
-# logit_DPO_last |> openxlsx::write.xlsx(file = "logit_DPO_last.xlsx")
-# file.show("logit_DPO_last.xlsx")
 
 logit_DPO_last |> 
   select(-ends_with("marginal effect")) |> 
@@ -1234,7 +1253,7 @@ logit_DPO_last |>
 ```
 
 <font size=2>
-Lecture : toutes les variables choisies étant égales, les salarié·es des grandes entreprises de service ont 1,85 fois plus de chances que les salarié·es des PME (référence) d’être soumis·es à une direction par objectifs (par rapport au fait de ne pas l’être). « 1/1,09 » signifie 1,09 fois moins de chances que la référence. *** : les chances d’être soumis à une direction par objectifs sont significativement différentes de celles de la modalité de référence, au seuil de confiance de 99  % ; ** : au seuil de 95  % ; * : au seuil de 90  % ; aucune étoile : non significatif. CAP : certificat d’aptitude professionnelle ; BEP : brevet d’études professionnelles.
+Lecture : toutes les variables choisies étant égales, les salarié·es des grandes entreprises de service ont 1,83 fois plus de chances que les salarié·es des PME (référence) d’être soumis·es à une direction par objectifs (par rapport au fait de ne pas l’être). « 1/1,09 » signifie 1,09 fois moins de chances que la référence. *** : les chances d’être soumis à une direction par objectifs sont significativement différentes de celles de la modalité de référence, au seuil de confiance de 99 % ; ** : au seuil de 95  % ; * : au seuil de 90 % ; aucune étoile : non significatif. CAP : certificat d’aptitude professionnelle ; BEP : brevet d’études professionnelles.
 
 `r champ05` Modèles pondérés.
 
@@ -1310,7 +1329,7 @@ orga_cadres_tab |> tab_kable(tooltips = FALSE)
 
 <br>
 
-## **Taux de féminisation des professions**
+## **Taux de feminisation des professions**
 
 Pour rendre visible la place des femmes dans la structure sociale, la règle de féminisation des noms de professions suivante a été adoptée par défaut : masculin s’il y a plus de deux tiers d’hommes dans une profession ; féminin s’il y a plus de deux tiers de femmes ; forme inclusive s’il y a entre 33% et 66% de femmes. 
 
