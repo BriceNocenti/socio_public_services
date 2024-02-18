@@ -4,6 +4,6 @@
 
 Les articles suivants sont disponibles : 
 
-- [**« Les formes d’organisation du travail dans les administrations publiques : quelle managérialisation de l’État, des hôpitaux et des collectivités locales ? », _Travail et emploi_, n° 168/2022.**](https://github.com/BriceNocenti/socio_public_services/blob/main/2024_OrgaTravailAdminPub/2024_OrgaTravailAdminPub.html)
+- [**« Les formes d’organisation du travail dans les administrations publiques : quelle managérialisation de l’État, des hôpitaux et des collectivités locales ? », _Travail et emploi_, n° 168/2022.**](https://bricenocenti.github.io/socio_public_services/2024_OrgaTravailAdminPub)
 
 
