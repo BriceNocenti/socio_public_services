@@ -6,6 +6,7 @@ output:
   rmdformats::downcute:
     df_print: kable
     code_folding: hide
+    self_contained: FALSE
 ---
 
 <!--   rmdformats::downcute: -->
@@ -367,7 +368,9 @@ ct_paths <- c(
 
 **4. Sourcer le script de mise en forme des bases de données**
 ``` {r intro4, eval = FALSE, echo = TRUE, class.source = 'fold-show'}
-source("Demarrage.R", encoding = "UTF-8") # fonctions nécessaires
+# setwd() # si ce n'est pas le cas, préciser le dossier du projet comme working directory
+
+source("Demarrage.R", encoding = "UTF-8") # charger les fonctions nécessaires
 source("ctall_mf.R", encoding = "UTF-8")
 ```
 
@@ -377,9 +380,10 @@ saveRDS(ct, file = "ct.rds", compress = FALSE)
 ```
 
 **6. Appliquer le code des analyses, ci-dessous**
-```{r intro6, eval = FALSE, echo = TRUE, class.source = 'fold-show'}
-# setwd() # si ce n'est pas le cas, préciser le dossier du projet comme working directory
-```
+
+<br>
+
+<br>
 
 ## **Analyses**
 
@@ -584,7 +588,7 @@ acm_orga_1_cah_output <-
     fontface = "bold", size = 3, na.rm = TRUE
   )
 
-# ggsave2(acm_orga_1_cah_output, dir = "", name = "1-ACM orga cah color",
+# ggsave2(acm_orga_1_cah_output, dir = "publications/2024_OrgaTravailAdminPub", name = "1-ACM orga cah color",
 #         width = 17, height = 17 / heigth_width_ratio, replace = TRUE, open = TRUE)
 
 ```
@@ -742,7 +746,7 @@ cah_orga_active_tabs <- cah_orga_active_tabs |>
   group_by(grouping)
 # cah_orga_active_tabs |> tab_xl()
 
-cah_orga_active_tabs |> tab_kable()
+cah_orga_active_tabs |> tab_kable(tooltips = FALSE, tooltips = FALSE)
 ```
 
 <br>
@@ -750,7 +754,7 @@ cah_orga_active_tabs |> tab_kable()
 ### **GRAPHIQUE 2. Les classes d’organisation du travail : arbre de classification**
 
 ```{r graph2, echo=FALSE, out.width="100%"}
-knitr::include_graphics("Dendroplot.png")
+knitr::include_graphics("Graph2-Arbre de classification.png")
 ```
 
 <font size=2>
@@ -798,7 +802,7 @@ orga_evol_tabs <- list(
               .cols = where(is_fmt) ) # & !ends_with("2005")
 # cah_evol_tabs |> tab_xl(sheets = "unique")
 
-orga_evol_tabs |> tab_kable() |>
+orga_evol_tabs |> tab_kable(tooltips = FALSE) |>
   kableExtra::add_header_above(c(" " = 1,
                                  "Autonomie du métier" = 3,
                                  "Autonomie évaluée"   = 3,
@@ -837,7 +841,7 @@ orga_prof_tab <-
   filter(n >= 50)
 # tab_xl(colwidth = 10, sheets = "unique")
 
-orga_prof_tab |> tab_kable()
+orga_prof_tab |> tab_kable(tooltips = FALSE)
 ```
 
 
@@ -989,6 +993,7 @@ graph_evol_cah_PPP1_EMP <-
              size = 2.5, label.padding = unit(0.05, "lines"), label.size = 0, na.rm = TRUE) +
   facet_grid(vars(PPP1), vars(EMP4), scales = "free_y", switch = "y") +
   ylab("Pourcentage de salarié·es dans chaque forme d'organisation") + 
+  scale_color_discrete(type = c("black", "gray50"), guide = NULL) +
   scale_y_continuous(position = "right") +
   scale_x_continuous(limits = c(2006, 2020), 
                      breaks = c(2007, 2013, 2019), 
@@ -1005,7 +1010,7 @@ graph_evol_cah_PPP1_EMP <-
   )
 
 # ggsave(plot = graph_evol_cah_PPP1_EMP,
-#        path = "Plots", filename = "cah_evol.png", device = "png",
+#        path = "publications/2024_OrgaTravailAdminPub", filename = "Graph3-Evolutions organisations.png", device = "png",
 #        dpi = 600, width = 17, height = 20, units = "cm")
 # file.show("Plots\\cah_evol.png")
 
@@ -1079,7 +1084,7 @@ orga_CBS_exec_tab <-
   filter(n >= 20)
 # orga_CBS_exec_tab |> tab_xl(colwidth = 10, sheets = "unique")
 
-orga_CBS_exec_tab |> tab_kable() #|> 
+orga_CBS_exec_tab |> tab_kable(tooltips = FALSE) #|> 
   #kableExtra::row_spec(0, bold = TRUE, font_size = 12, align = "center")
 ```
 
@@ -1100,7 +1105,7 @@ orga_obj_tab <- ct[salariat05 & `2019`, ] |>
            cleannames = TRUE, subtext = subtext_obj)
 # orga_obj_tab |> tab_xl(sheets = "unique", colwidth = 12)
 
-orga_obj_tab |> tab_kable()
+orga_obj_tab |> tab_kable(tooltips = FALSE)
 ```
 
 
@@ -1217,7 +1222,7 @@ orga_cadres_tab <-
   group_by(grouping)
 # orga_cadres_tab |> tab_xl(colwidth = 10, sheets = "unique")
 
-orga_cadres_tab |> tab_kable()
+orga_cadres_tab |> tab_kable(tooltips = FALSE)
 ```
 
 ## **Taux de féminisation des professions**
@@ -1253,7 +1258,7 @@ PPP1_fem_tab <- ct[salariat05 & `2019`, ] |> # & EMP != "7-Ent taille inconnue"
   mutate(Ensemble = as_totcol(Ensemble))
 
 
-PPP1_fem_tab |> tab_kable(color_legend = FALSE)
+PPP1_fem_tab |> tab_kable(tooltips = FALSE, color_legend = FALSE)
 ```
 
 <font size=2>
@@ -1294,7 +1299,7 @@ PPP1_fem_tab <- ct[salariat05 & `2019`, ] |> # & EMP != "7-Ent taille inconnue"
   mutate(Ensemble = as_totcol(Ensemble))
 
 
-PPP1_fem_tab |> tab_kable(color_legend = FALSE)
+PPP1_fem_tab |> tab_kable(tooltips = FALSE, color_legend = FALSE)
 ```
 
 <font size=2>
@@ -1370,7 +1375,7 @@ PPP2_fem_tab <- PPP2_fem_tab |>
   bind_rows(total_employeurs) 
 
 
-PPP2_fem_tab |> tab_kable(color_legend = FALSE)
+PPP2_fem_tab |> tab_kable(tooltips = FALSE, color_legend = FALSE)
 ```
 
 <font size=2>
@@ -1447,7 +1452,7 @@ PPP2_fem_tab <- PPP2_fem_tab |>
   bind_rows(total_employeurs) 
 
 
-PPP2_fem_tab |> tab_kable(color_legend = FALSE)
+PPP2_fem_tab |> tab_kable(tooltips = FALSE, color_legend = FALSE)
 
 # set_color_breaks(pct_breaks = c(0.05,  0.10,  0.20,  0.30)) 
 ```
