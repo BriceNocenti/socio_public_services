@@ -62,6 +62,7 @@
 suppressMessages({
   #library(lme4)
   #library(magrittr) 
+  library(data.table)
   library(rlang)
   library(tictoc)
   #library(pillar)
@@ -6135,28 +6136,108 @@ HCPC_parangons <- function(HCPC, abrevs) {
 #tabxplor:::fct_recode_helper(data_parangons, everything())
 
 
-# wt = "pondqaa"
-# vars <- "OBJtous"
 HCPC_tab_active <- function(clust, data, wt, vars = character(), 
-                            excl = character(), recode_helper = TRUE, 
+                            excl = character(), recode_helper = FALSE, 
                             color = "diff", ...) {
   #active <- names(CAH$data.clust)[names(CAH$data.clust) != "clust"]
   
-  data <- data |> select(all_of(c(wt, vars))) |> 
-    levels_to_na(all_of(vars), excl = excl)
+  vars <- tidyselect::eval_select(rlang::enquo(vars), data)
+  vars <- names(vars)
   
-  data <- data |> tibble::add_column(clust = clust)
+  if (missing(wt)) {
+    wt <- character()
+  } else {
+    wt <- as.character(ensym(wt))
+  }
   
-  first_lvs <- select(data, all_of(c(vars))) |> 
+  clust <- enquo(clust)
+  
+  safe_clust <- safely(eval_tidy)(clust)
+  
+  if (is.null(safe_clust$error)) {
+    clust_is_var <- (is.factor(safe_clust$result) |
+                       is.character(safe_clust$result)) &
+      length(safe_clust$result) == nrow(data)
+    
+  } else {
+    clust_is_var <- FALSE
+  }
+  
+  if (clust_is_var) {
+    # clust <- safe_clust$result
+    data <- data |> select(all_of(vars), all_of(wt) ) |> 
+      levels_to_na(all_of(vars), excl = excl) |>
+      tibble::add_column(clust = safe_clust$result )  
+    
+  } else {
+    data <- data |> select(all_of(vars), all_of(wt), clust = !!clust ) |> 
+      levels_to_na(all_of(vars), excl = excl) 
+  }
+  
+  
+  
+  
+  
+  if (length(wt) == 0) {
+    wt <- expr(NA)
+  } else {
+    wt <- sym(wt)
+  }
+  
+  first_lvs <- select(data, all_of(vars)) |> 
     map_chr(~ if_else(nlevels(.) == 2L, "first", "all"))
   
   if(recode_helper) tabxplor:::fct_recode_helper(data, "clust")
   
-  tab_many(data, clust, all_of(c( vars)), pct = "row", wt = !!sym(wt),
-           na = "drop", cleannames = TRUE, color = color, levels = first_lvs, ...) |>
+  cah_actives_tab <- tab_many(data, "clust", all_of(vars), pct = "row", wt = !!wt,
+                              na = "drop", cleannames = TRUE, color = color, levels = first_lvs) |>
     rename_with(~ if_else(str_detect(., "Total_", ), "Total", .)) |>
-    mutate(Total = mutate(Total, pct = wn / last(wn)) )
+    mutate(Total = tabxplor:::set_pct(Total, tabxplor:::get_wn(Total) / last(tabxplor:::get_wn(Total))) )
+  
+  
+  cah_actives_tab <- cah_actives_tab |> 
+    tab_transpose() |>
+    rename(Ensemble = Total) |>
+    mutate(variables = fct_recode(variables, "Part de la population" = "Total"),
+           variables = fct_relabel(variables, ~ str_replace_all(., " ", " ")))
+  
+  
+  n_rows <- filter(cah_actives_tab, is_totrow(cah_actives_tab)) |>
+    mutate(variables = factor("n"),
+           across(where(is_fmt), ~ mutate(., display = "n", in_totrow = FALSE)))
+  cah_actives_tab <- bind_rows(cah_actives_tab, n_rows)
+  
+  cah_actives_tab
 }
+
+
+# # wt = "pondqaa"
+# # vars <- "OBJtous"
+# HCPC_tab_active <- function(clust, data, wt, vars = character(), 
+#                             excl = character(), recode_helper = TRUE, 
+#                             color = "diff", ...) {
+#   #active <- names(CAH$data.clust)[names(CAH$data.clust) != "clust"]
+#   
+#   if (isclust)
+#   
+#   data <- data |> select(all_of(c(wt, vars))) |> 
+#     levels_to_na(all_of(vars), excl = excl)
+#   
+#   data <- data |> mutate(clust = clust)
+#   
+#   first_lvs <- select(data, all_of(c(vars))) |> 
+#     map_chr(~ if_else(nlevels(.) == 2L, "first", "all"))
+#   
+#   if(recode_helper) tabxplor:::fct_recode_helper(data, "clust")
+#   
+#   tab_many(data, clust, all_of(c( vars)), pct = "row", wt = !!sym(wt),
+#            na = "drop", cleannames = TRUE, color = color, levels = first_lvs, ...) |>
+#     rename_with(~ if_else(str_detect(., "Total_", ), "Total", .)) |>
+#     mutate(Total = mutate(Total, pct = wn / last(wn)) )
+# }
+
+
+
 
 
 #data <- ct[salariat & `2013`, ]
@@ -8227,6 +8308,35 @@ make_imbricated_partitions <- function(id_small = NA_character_, hierarchy, part
 # pct_femme = "f"
 # bars_width = 1.05
 
+
+# no_patterns = TRUE # otherwise, too long
+# data <- seq3c_manual$manual_parts[[1]]
+# pattern_params = pattern_params_GRAD4 # pattern_scale = 2, # chrono = "chrono", 
+# agregate_states = agregate_states
+# grayscale = FALSE
+# na = c("keep", "drop")
+# remove_na_after = 25
+# na_cap_below <- NULL 
+# salary_vars_prefix = "SM_NETR" #, # clust_names = FALSE, cluster_hierarchy = FALSE,
+# salary_sd = FALSE
+# clust_desc_vars = NULL
+# max_time = 40 
+# allow_second_legend = pull(data, n_small_clust)[1] >= 2 # not with only one group
+# clust_names = TRUE
+# cluster_hierarchy = TRUE
+# chrono = "chrono"
+# reverse_facets = TRUE # nrow = 1 
+# reverse_top_bottom = TRUE #no_patterns = TRUE, 
+# cleannames = TRUE
+# remove_bar_stroke_after = 25
+# text_size = 2.5
+# legend_text_size = 10
+# clust_text_space = 0.10
+# space_from_graph = 0.05
+# pct_femme = " femmes"
+
+
+
 chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE, 
                         na = c("keep", "drop"), remove_na_after, na_cap_below,
                         salary_vars_prefix = "SM_NETR", salary_sd = FALSE, 
@@ -8689,8 +8799,9 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
           NULL
         } else {
           geom_line(data = salary_data,
-                    aes(y = SM_NETR / salary_coeff, 
-                        group = analysis_group),
+                    aes(y = SM_NETR / salary_coeff #, 
+                        #group = analysis_group
+                        ),
                     stat = "identity", color = "white", alpha = 0.8, linewidth = 2)
         }, 
         
@@ -8698,13 +8809,15 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
           geom_smooth(data = salary_data,
                       aes(y    = SM_NETR / salary_coeff, 
                           ymax = (SM_NETR + SM_NETR_sd) / salary_coeff,
-                          ymin = (SM_NETR - SM_NETR_sd) / salary_coeff, 
-                          group = analysis_group),
+                          ymin = (SM_NETR - SM_NETR_sd) / salary_coeff #, 
+                          #group = analysis_group
+                          ),
                       stat = "identity", color = salary_curve_color, fill = salary_sd_fill) 
         } else {
           geom_line(data = salary_data,
-                    aes(y = SM_NETR / salary_coeff, 
-                        group = analysis_group),
+                    aes(y = SM_NETR / salary_coeff #, 
+                        # group = analysis_group
+                        ),
                     stat = "identity", color = salary_curve_color, linewidth = 0.75) # 0.5
         }, 
         
@@ -8757,18 +8870,18 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
     
     # S'il n'y a qu'un seul analysis group ou si la variable n'existe pas
     if (!"analysis_group" %in% names(data)) {
-      see_grid <- FALSE
+      #see_grid <- FALSE
       facet_wrap("clust", ...) #, theme(strip.text = element_blank() )
       
     } else {
       
       if (length(unique(pull(data, analysis_group))) == 1) {
-        see_grid <- FALSE
+        #see_grid <- FALSE
         facet_wrap("clust", ...) 
         
         # S'il y a plusieurs analysis group
       } else {
-        see_grid <- TRUE
+        #see_grid <- TRUE
         list(
           facet_grid(rows = vars(analysis_group),
                      cols = vars(clust),
@@ -8795,7 +8908,24 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
     
   }
   
-
+  see_grid <- 
+    if ("small_clust" %in% names(chrono_data) & "order" %in% names(chrono_data) ) {
+      FALSE # TRUE ?
+    } else {
+      
+      if (!"analysis_group" %in% names(data)) {
+        FALSE
+      } else {
+        
+        if (length(unique(pull(data, analysis_group))) == 1) {
+          FALSE
+        } else {
+          TRUE
+        }
+        
+      }
+    }
+  
   
   
   # Add another fill legend (with empty plot) if in pattern_params
@@ -8850,18 +8980,18 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
                      width = bars_width,
                      pattern_size = NA, pattern_color = NA, # no stroke color (only fill)
                      #pattern_scale = pattern_scale, # not doing anything
-                     pattern_key_scale_factor = 1/3, just = 0
+                     pattern_key_scale_factor = 1/3 #, just = 0 # just not in ggpattern
     )
   }
   
-  time_variable <- first(chrono_data$time_var)
+  time_variable <- first(chrono_data$time_var) |> as.character()
   
   chrono_data |>
     ggplot(aes(x = time, y = pct)) + 
     legend2 + 
     bar_graph + 
     scale_x_continuous(
-      if (time_variable == "AGE20") {"Age"} else {as.character(time_variable)}, 
+      if (time_variable == "AGE20") {"Age"} else {time_variable}, 
       breaks = break_uniform_integer(range(chrono_data$time)), 
       labels = if (time_variable == "AGE20") {
         ~ as.character(round(. + 20, 1)) 

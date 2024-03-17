@@ -1,7 +1,7 @@
 ---
 title: "Les formes d’organisation du travail dans les administrations publiques : _open science_"
 author: "Brice Nocenti"
-date: February 17, 2024
+date: March 17, 2024
 output: 
   rmdformats::downcute:
     df_print: kable
@@ -216,7 +216,7 @@ renv::install(c(
   "forcats@1.0.0"             ,
   "fs@1.6.3"                  ,
   "generics@0.1.3"            ,
-  "ggfacto@0.2.3"             ,
+  "ggfacto@0.3.0"             ,
   "ggiraph@0.8.8"             ,
   "ggplot2@3.4.4"             ,
   "ggrepel@0.9.5"             ,
@@ -289,8 +289,7 @@ renv::install(c(
   "svglite@2.1.3"             ,
   "sys@3.4.2"                 ,
   "systemfonts@1.0.5"         ,
-  "BriceNocenti/tabxplor@HEAD",
-  #"tabxplor@1.1.3"           ,
+  "tabxplor@1.1.3"            ,
   "testthat@3.2.1"            ,
   "tibble@3.2.1"              ,
   "tidyr@1.3.1"               ,
@@ -517,48 +516,38 @@ ct <- ct |> HCPC_add_clust(salariat05, clust = orga052_2ind.5clC) # dans "Démar
 <br>
 
 ### **GRAPHIQUE 1. L’espace des formes d’organisation du poste de travail**
-```{r graph1, echo = TRUE}
+```{r, echo = TRUE, eval = FALSE}
+res.mca |> 
+  ggmca(dat = ct[salariat05, ],
+        sup_vars = c("cah_ORGA", "PPP1", "EMP4", "ANNEE", "OBJtous", "RWNORMH", "RWCOLEG"), 
+        cah = "cah_ORGA", 
+        profiles = TRUE, max_profiles = 5000,
+        text_size = 3, text_repel = TRUE, size_scale_max = 6
+        scale_color_light = c(material_colors_light()[1:5], rep("black", 6)),
+        actives_in_bold = TRUE, sup_in_italic = TRUE
+  )
+```
+
+```{r graph1, echo=FALSE, fig.width=7, fig.height=7/1.121053, dpi=600}
 acm_orga_1_cah <- res.mca |> 
   ggmca(ct[salariat05, ],
-        sup_vars = c("cah_ORGA", "OBJtous", "RWNORMH", "RWCOLEG"),
-        actives_in_bold = TRUE,
-        cah = "cah_ORGA", color_groups = c("^.{1}", "^.{0}", "^.{0}", "^.{0}"),
+        sup_vars = c("cah_ORGA", "PPP1", "EMP4", "ANNEE",
+                     "OBJtous", "RWNORMH", "RWCOLEG"), 
+        actives_in_bold = TRUE, sup_in_italic = TRUE,
+        cah = "cah_ORGA", color_groups = "^.{0}", 
+        scale_color_light = c(material_colors_light()[1:5], rep("black", 6)),  # "gray30"
         profiles = TRUE, max_profiles = 5000,
         text_size = 3, text_repel = TRUE,
-        xlim = c(-0.8, 1.2), ylim = c(-0.8, 1.1), out_lims_move = TRUE,
-        size_scale_max = 6,
+        xlim = c(-0.93, 1.2), ylim = c(-0.8, 1.1), out_lims_move = TRUE,
+        size_scale_max = 6, 
         get_data = TRUE
   )
+
 acm_orga_1_cah_cah <- acm_orga_1_cah$vars_data |> 
   filter(str_detect(color_group, "^cah_ORGA"))
 acm_orga_1_cah_vars <- new_tab(acm_orga_1_cah$vars_data) |>
   filter(vars != "cah_ORGA") |>
   mutate(face = if_else(color_group != "active_vars", "italic", "bold") )
-#     certains profils n'ont pas de cah : corriger dans ggmca_data
-cah_id_recode <- acm_orga_1_cah$profiles_coord |> select(cah, cah_id) |>
-  filter(!is.na(cah)) |>
-  distinct() |>
-  mutate(recode_vect = set_names(as.character(cah), cah_id)) |> pull(recode_vect)
-cah_color <- acm_orga_1_cah_cah |>
-  select(lvs, color_group) |>
-  mutate(recode_vect = set_names(as.character(lvs), color_group)) |> pull(recode_vect)
-acm_orga_1_cah_profiles <- acm_orga_1_cah$profiles_coord |>
-  mutate(
-    cah = map2_chr(
-      cah, sup_vars,
-      ~ case_when(
-        !is.na(.x)                      ~ .x,
-        all(is.na(.y$cah_ORGA) | .y$cah_ORGA == first(.y$cah_ORGA))
-                                        ~ as.character(first(.y$cah_ORGA)),
-        TRUE                            ~ NA_character_)
-    ),
-    
-    cah_id = fct_recode(cah, !!!cah_id_recode) |> as.integer(),
-    
-    color_group = fct_recode(cah, !!!cah_color)
-  ) |>
-  filter(!is.na(cah))
-# acm_orga_1_cah_profiles |> slice_sample(n = 20)
 
 cah_name_with_pct <- acm_orga_1_cah_cah |>
   select(lvs, wcount) |>
@@ -568,7 +557,7 @@ cah_name_with_pct <- acm_orga_1_cah_cah |>
 acm_orga_1_cah_cah <- acm_orga_1_cah_cah |>
   mutate(lvs = fct_recode(lvs, !!!cah_name_with_pct))
 
-heigth_width_ratio <- (0.8 + 1.2) / (0.8 + 1.1)
+heigth_width_ratio <- (0.93 + 1.2) / (0.8 + 1.1)
 
 
 
@@ -576,7 +565,8 @@ acm_orga_1_cah_output <-
   ggplot(acm_orga_1_cah_vars, aes(x = `Dim 1`, y = `Dim 2`)) +
   acm_orga_1_cah$graph_theme_acm +
   geom_point(
-    data = acm_orga_1_cah_profiles, ggplot2::aes(size = wcount, color = color_group),
+    data = acm_orga_1_cah$profiles_coord, 
+    ggplot2::aes(size = wcount, color = color_group),
     na.rm = TRUE, show.legend = FALSE, stroke = 0, alpha = 0.5
   ) +
   geom_point(
@@ -591,9 +581,9 @@ acm_orga_1_cah_output <-
   ) +
   geom_segment(
     data = acm_orga_1_cah_cah |>
-      mutate(`Dim 1` = pmin(1.3, pmax(`Dim 1`, -0.9)),
+      mutate(`Dim 1` = pmin(1.3, pmax(`Dim 1`, -1.03)),
              `Dim 2` = pmin(1.3, pmax(`Dim 2`, -0.85)),
-             start1  = pmin(0.95, pmax(`Dim 1`, -0.5)),
+             start1  = pmin(0.95, pmax(`Dim 1`, -0.65)),
              start2  = pmin(1.25, pmax(`Dim 2`, -0.775)),
       ),
     ggplot2::aes(x = start1, xend = `Dim 1`, y = start2, yend = `Dim 2`,  
@@ -602,14 +592,16 @@ acm_orga_1_cah_output <-
   ) +
   geom_label(
     data = acm_orga_1_cah_cah |>
-      mutate(`Dim 1` = pmin(0.95, pmax(`Dim 1`, -0.5)),
+      mutate(`Dim 1` = pmin(0.95, pmax(`Dim 1`, -0.65)),
              `Dim 2` = pmin(1.25, pmax(`Dim 2`, -0.775)),
       ),
     ggplot2::aes(label = lvs, color = color_group), #fill = rgb(1, 1, 1, alpha = 0),
-    direction = "y", force = 0.5, force_pull = 1, point.padding = 0, point.size = NA,
-    arrow = ggplot2::arrow(length = ggplot2::unit(0.25, "lines")),
+    # direction = "y", force = 0.5, force_pull = 1, point.padding = 0, point.size = NA,
+    # arrow = ggplot2::arrow(length = ggplot2::unit(0.25, "lines")),
     fontface = "bold", size = 3, na.rm = TRUE
   )
+
+acm_orga_1_cah_output
 
 # ggsave2(acm_orga_1_cah_output, dir = "2024_OrgaTravailAdminPub",
 #  name = "1-ACM orga cah color", 
@@ -617,16 +609,110 @@ acm_orga_1_cah_output <-
 
 ```
 
-
+``` {r, echo = FALSE, include = FALSE}
+# # Code précédent
+# acm_orga_1_cah <- res.mca |> 
+#   ggmca(ct[salariat05, ],
+#         sup_vars = c("cah_ORGA", "OBJtous", "RWNORMH", "RWCOLEG"),
+#         actives_in_bold = TRUE,
+#         cah = "cah_ORGA", color_groups = c("^.{1}", "^.{0}", "^.{0}", "^.{0}"),
+#         profiles = TRUE, max_profiles = 5000,
+#         text_size = 3, text_repel = TRUE,
+#         xlim = c(-0.8, 1.2), ylim = c(-0.8, 1.1), out_lims_move = TRUE,
+#         size_scale_max = 6,
+#         get_data = TRUE
+#   )
+# acm_orga_1_cah_cah <- acm_orga_1_cah$vars_data |> 
+#   filter(str_detect(color_group, "^cah_ORGA"))
+# acm_orga_1_cah_vars <- new_tab(acm_orga_1_cah$vars_data) |>
+#   filter(vars != "cah_ORGA") |>
+#   mutate(face = if_else(color_group != "active_vars", "italic", "bold") )
+# #     certains profils n'ont pas de cah : corriger dans ggmca_data
+# cah_id_recode <- acm_orga_1_cah$profiles_coord |> select(cah, cah_id) |>
+#   filter(!is.na(cah)) |>
+#   distinct() |>
+#   mutate(recode_vect = set_names(as.character(cah), cah_id)) |> pull(recode_vect)
+# cah_color <- acm_orga_1_cah_cah |>
+#   select(lvs, color_group) |>
+#   mutate(recode_vect = set_names(as.character(lvs), color_group)) |> pull(recode_vect)
+# acm_orga_1_cah_profiles <- acm_orga_1_cah$profiles_coord |>
+#   mutate(
+#     cah = map2_chr(
+#       cah, sup_vars,
+#       ~ case_when(
+#         !is.na(.x)                      ~ .x,
+#         all(is.na(.y$cah_ORGA) | .y$cah_ORGA == first(.y$cah_ORGA))
+#                                         ~ as.character(first(.y$cah_ORGA)),
+#         TRUE                            ~ NA_character_)
+#     ),
+#     
+#     cah_id = fct_recode(cah, !!!cah_id_recode) |> as.integer(),
+#     
+#     color_group = fct_recode(cah, !!!cah_color)
+#   ) |>
+#   filter(!is.na(cah))
+# # acm_orga_1_cah_profiles |> slice_sample(n = 20)
+# 
+# cah_name_with_pct <- acm_orga_1_cah_cah |>
+#   select(lvs, wcount) |>
+#   mutate(pct = round(wcount/sum(wcount)*100), 0) |>
+#   mutate(recode_vect = set_names(as.character(lvs), paste0(lvs, " (", pct, "%)"))) |>
+#   pull(recode_vect)
+# acm_orga_1_cah_cah <- acm_orga_1_cah_cah |>
+#   mutate(lvs = fct_recode(lvs, !!!cah_name_with_pct))
+# 
+# heigth_width_ratio <- (0.8 + 1.2) / (0.8 + 1.1)
+# 
+# 
+# 
+# acm_orga_1_cah_output <-
+#   ggplot(acm_orga_1_cah_vars, aes(x = `Dim 1`, y = `Dim 2`)) +
+#   acm_orga_1_cah$graph_theme_acm +
+#   geom_point(
+#     data = acm_orga_1_cah_profiles, ggplot2::aes(size = wcount, color = color_group),
+#     na.rm = TRUE, show.legend = FALSE, stroke = 0, alpha = 0.5
+#   ) +
+#   geom_point(
+#     data = acm_orga_1_cah$mean_point_data,
+#     color = "black", fill = "#eeeeee", shape = 3, size = 5, stroke = 1.5, na.rm = TRUE
+#   ) +
+#   ggrepel::geom_text_repel(
+#     ggplot2::aes(label = lvs, fontface = face),
+#     size = 3, na.rm = TRUE, direction = "both",  min.segment.length = 0.01,
+#     force = 0.5, force_pull = 1, point.padding = 0, box.padding = 0, 
+#     point.size = NA, arrow = ggplot2::arrow(length = ggplot2::unit(0.25, "lines"))
+#   ) +
+#   geom_segment(
+#     data = acm_orga_1_cah_cah |>
+#       mutate(`Dim 1` = pmin(1.3, pmax(`Dim 1`, -0.9)),
+#              `Dim 2` = pmin(1.3, pmax(`Dim 2`, -0.85)),
+#              start1  = pmin(0.95, pmax(`Dim 1`, -0.5)),
+#              start2  = pmin(1.25, pmax(`Dim 2`, -0.775)),
+#       ),
+#     ggplot2::aes(x = start1, xend = `Dim 1`, y = start2, yend = `Dim 2`,  
+#                  color = color_group),
+#     arrow = ggplot2::arrow(length = ggplot2::unit(0.3, "lines")), na.rm = TRUE
+#   ) +
+#   geom_label(
+#     data = acm_orga_1_cah_cah |>
+#       mutate(`Dim 1` = pmin(0.95, pmax(`Dim 1`, -0.5)),
+#              `Dim 2` = pmin(1.25, pmax(`Dim 2`, -0.775)),
+#       ),
+#     ggplot2::aes(label = lvs, color = color_group), #fill = rgb(1, 1, 1, alpha = 0),
+#     direction = "y", force = 0.5, force_pull = 1, point.padding = 0, point.size = NA,
+#     arrow = ggplot2::arrow(length = ggplot2::unit(0.25, "lines")),
+#     fontface = "bold", size = 3, na.rm = TRUE
+#   )
+# 
+# # ggsave2(acm_orga_1_cah_output, dir = "2024_OrgaTravailAdminPub",
+# #  name = "1-ACM orga cah color", 
+# #  width = 17, height = 17 / heigth_width_ratio, replace = TRUE, open = TRUE)
+```
 
 <!-- heigth_width_ratio = 1.053 ; height = 8.421053 -->
 
-```{r graph1_2, echo=FALSE, fig.width=7, fig.height=7/heigth_width_ratio, fig.dpi=600}
-acm_orga_1_cah_output
-```
-
 <font size=2>
-Lecture : en gras, les variables actives (voir détail des intitulés tableau 1) ; encadrées et en coleur les classes de la CAH. En italique les variables supplémentaires : CSP recodée (voir encadré 1 dans l’annexe méthodologique), type d’employeur (voir encadré 2 en annexe), année, objectifs chiffrés (voir tableau 5), contraintes de rythme (voir tableau 1). CR = contraintes de rythme. Les catégories débutant par « Pas » désignent l’absence de quelque chose.
+Lecture : en gras, les variables actives (voir détail des intitulés tableau 1) ; encadrées et en couleur les classes de la CAH. En italique les variables supplémentaires : CSP recodée (voir encadré 1 dans l’annexe méthodologique), type d’employeur (voir encadré 2 en annexe), année, objectifs chiffrés (voir tableau 5), contraintes de rythme (voir tableau 1). CR = contraintes de rythme. Les catégories débutant par « Pas » désignent l’absence de quelque chose.
 
 `r champ05`
 
@@ -715,23 +801,12 @@ cah_orga_subtext <- c(
   source0519 #, 
 )
 
-cah_orga_active_tabs <-
-  HCPC_tab_active(
-    ct$cah_ORGA[salariat05], ct[salariat05, ], "pondcal",
-    unique(c(active_vars, Ceval, "NBCTREVAL", Cexec, "NBCTREXEC", "NBCONTR"), 
-           fromLast = TRUE), 
-    recode_helper = FALSE
-  ) |>
-  mutate(across(
-    all_of(c("NBCTREVAL", "NBCTREXEC", "NBCONTR")), 
-    ~ mutate(., digits = 1L)
-  )) |>
-  tab_transpose()
+active_vars_and_sums <- unique(c(active_vars, Ceval, "NBCTREVAL", Cexec, "NBCTREXEC", "NBCONTR"), fromLast = TRUE)
 
-n_rows <- filter(cah_orga_active_tabs, is_totrow(cah_orga_active_tabs)) |>
-  mutate(variables = factor("Nombre d'observations"),
-         across(where(is_fmt), ~ mutate(., display = "n", in_totrow = FALSE)))
-cah_orga_active_tabs <- bind_rows(cah_orga_active_tabs, n_rows)
+cah_orga_active_tabs <- ct[salariat05, ] |>
+  HCPC_tab(row_vars = all_of(active_vars_and_sums), clust = cah_ORGA,
+           wt = pondcal, subtext = cah_orga_subtext
+  )
 
 active_vars_rename_vect <- c(
   "Autonomie procédurale : le chef indique « l’objectif du travail » mais sans préciser « comment il faut faire »" = "Autonomie procédurale",
@@ -758,24 +833,26 @@ active_vars_rename_vect <- c(
   "-Dépendance immédiate vis-à-vis des collègues*" = "CR public",
   "Nombre de contraintes d’exécution*" = "NBCTREXEC",
   "Nombre de contraintes (évaluation + exécution)*" = "NBCONTR",
-  "Part des salarié·es" = "Total",
-  "Nombre d’observations (cumul 2005, 2013 et 2019)" = "Nombre d'observations" #,
+  "Part des salarié·es" = "% of population",
+  "Nombre d’observations (cumul 2005, 2013 et 2019)" = "n" #,
 )
 
 cah_orga_active_tabs <- cah_orga_active_tabs |>
-  mutate(variables = fct_recode(variables, !!!active_vars_rename_vect) |>
+  ungroup() |> 
+  mutate(lvs = fct_recode(lvs, !!!active_vars_rename_vect) |>
            fct_relevel(names(active_vars_rename_vect))
   ) |> 
-  arrange(variables) |>
-  add_row(variables = factor(
+  arrange(variables, lvs) |>
+  add_row(variables = factor(""), lvs = factor(
     "Le rythme du travail est imposé par (contraintes de rythme) : "
   ), 
   .after = 17
   ) |> 
-  rename(Ensemble = Total) |> 
-  mutate(across(where(is_fmt), ~ if_else(.$display == "mean",
-                                         true  = mutate(., diff = 0) |> as_totrow(), 
-                                         false = .))) |>
+  select(-variables) |> 
+  mutate(lvs = fct_relabel(lvs, ~ str_wrap(., width = 40) |> 
+                             str_replace_all(" ", ggfacto:::unbrk) |>
+                             str_replace_all("-", "\\u2011") |> # trait d'union insécable
+                             stringi::stri_unescape_unicode())) |> 
   mutate(grouping = as.factor(c(1, 2, 2, 2, 3, 3, 3, 4, 4, 5, 5, 5, 
                                 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 8, 9, 9)), 
          .before = 1) |>
