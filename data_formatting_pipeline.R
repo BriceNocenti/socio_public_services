@@ -1,20 +1,41 @@
 # ============================================================
-# Survey Formatting Pipeline — data_formatting_pipeline.R  v2
+# Survey Formatting Pipeline — data_formatting_pipeline.R  v3
 # ============================================================
 # Source this file in any _mf.R script:
 #   source("data_formatting_pipeline.R")
 #
+# METADATA SCHEMA — extract_survey_metadata() produces a tibble with:
+#   var_name, var_label, r_class, n_distinct, detected_role, desc,
+#   values, labels, missing_vals, new_labels, new_name, doc_note
+#
+#   detected_role (7 values):
+#     identifier    — ID column (unique per row or named IDENT/ID)
+#     double        — continuous float, no value labels
+#     integer       — discrete integer, no labels (or missing-only labels)
+#     integer_scale — integer scale (Likert, left/right) — set by AI/user
+#     integer_count — integer count (1 enfant, 2 enfants…) — set by AI/user
+#     factor_binary — exactly 2 non-missing levels
+#     factor_ordinal — ≥3 ordered levels — set by AI/user
+#     factor_nominal — ≥3 unordered levels (default for labelled ≥3)
+#
+#   desc (logical):
+#     factor_binary : TRUE = positive level is first; FALSE = second; NA = unknown
+#     factor_ordinal: TRUE = descending (high→low); FALSE = ascending; NA = not set
+#     double/integer: FALSE; identifier/nominal: NA
+#
 # USER WORKFLOW (iterate until metadata is good):
 #   1. df   <- import_survey("file.sas7bdat")
-#   2. meta <- extract_survey_metadata(df)
-#      # Console shows binary detections + ambiguous vars count
+#   2b.[optional] ai_suggest_missing(meta)
+#      # Prints missing_chr / missing_num vectors — paste into step 2 args
+#   2. meta <- extract_survey_metadata(df,
+#                missing_chr = c(...), missing_num = c(...))
+#      # Console shows factor_binary detections + n needing AI classification
 #   3. [optional] ai_classify_roles(meta)
-#      # Prints copy-pasteable detected_roles / positive_levels vectors
-#      # Edit them, then re-run step 2 with those args
+#      # Prints detected_roles / desc_overrides vectors — edit, then re-run step 2
 #   4. [optional] metadata_apply_codebook(meta, codebook_df, ...)
 #   5. meta <- metadata_fix_binary(meta)
 #   6. export_metadata_excel(meta, "meta_review.xlsx")
-#      # Open Excel, check orange rows, iterate if needed
+#      # Open Excel, check orange rows (factor_binary/nominal/integer), iterate
 #   7. [optional] meta <- ai_suggest_labels(meta)
 #                 meta <- ai_suggest_varnames(meta)
 #                 export_metadata_excel(meta, "meta_review2.xlsx")
@@ -23,15 +44,16 @@
 #
 # Functions:
 #   import_survey()             — auto-detect format and import
-#   extract_survey_metadata()   — build standardised varmod tibble
+#   extract_survey_metadata()   — build standardised varmod tibble (v3 schema)
 #   metadata_apply_codebook()   — merge external Excel/CSV codebook
-#   metadata_fix_binary()       — standardise binary positive/negative levels
+#   metadata_fix_binary()       — standardise binary positive/negative labels
 #   export_metadata_excel()     — review file (openxlsx, orange = needs attention)
 #   apply_survey_formats()      — apply metadata → factors on real data
 #   generate_format_script()    — write readable _recode.R for students
 #
 # AI helpers (require ANTHROPIC_API_KEY env var):
-#   ai_classify_roles()         — Haiku: classify ambiguous vars, print dput vectors
+#   ai_suggest_missing()        — Haiku: identify missing-value label candidates
+#   ai_classify_roles()         — Haiku: classify ambiguous vars (nominal/ordinal/scale/count)
 #   ai_call_claude()            — synchronous single call (httr2)
 #   ai_batch_submit()           — submit Message Batch job (httr2)
 #   ai_batch_retrieve()         — poll + retrieve batch results (httr2)
@@ -82,7 +104,7 @@ import_survey <- function(
 #' Extract variable and value metadata from a labelled tibble
 #'
 #' Produces a "varmod" tibble. Iterate: run, review console output, adjust
-#' arguments (missing_num, detected_roles, positive_levels), run again.
+#' arguments (missing_num, missing_chr, detected_roles, desc_overrides), run again.
 #' When satisfied, proceed to metadata_fix_binary() and export_metadata_excel().
 #'
 #' @param df              A tibble from import_survey().
@@ -96,27 +118,38 @@ import_survey <- function(
 #'                        NULL uses built-in defaults.
 #' @param no_labels       Keywords for the "negative" level. NULL = built-in.
 #' @param max_levels_cat  Unlabelled numeric vars with ≤ this many distinct
-#'                        values are flagged "numeric_or_cat" (ambiguous).
+#'                        non-missing values are classed "integer" (not factor).
 #' @param detected_roles  Named character vector overriding role for specific
 #'                        variables. Names = var_name, values = role string.
 #'                        Paste output of ai_classify_roles() here after editing.
-#' @param positive_levels Named character vector: for binary vars, which level
-#'                        label is the positive/"yes" one.
-#'                        Paste output of ai_classify_roles() here.
+#' @param desc_overrides  Named logical vector overriding desc for specific vars.
+#'                        For factor_binary: TRUE = positive level is first.
+#'                        For factor_ordinal: TRUE = descending (high→low).
+#'                        Paste output of ai_classify_roles() here after editing.
 #'
 #' @return A tibble with columns:
-#'   var_name, var_label, r_class, n_distinct, detected_role, positive_level,
-#'   is_ordinal, values, labels, missing_vals, new_labels, new_name, doc_note
+#'   var_name, var_label, r_class, n_distinct, detected_role, desc,
+#'   values, labels, missing_vals, new_labels, new_name, doc_note
+#'
+#' Role taxonomy:
+#'   "identifier"     — ID column (unique per row or named IDENT/ID)
+#'   "double"         — continuous float, no value labels, empty labels list
+#'   "integer"        — discrete integer, no value labels (AI: integer_scale/integer_count)
+#'   "integer_scale"  — integer with scale labels (Likert, left/right) — AI/user only
+#'   "integer_count"  — integer with count labels (1 enfant, 2 enfants) — AI/user only
+#'   "factor_binary"  — exactly 2 non-missing levels after missing removal
+#'   "factor_ordinal" — ≥3 levels with natural order — AI/user only
+#'   "factor_nominal" — ≥3 levels, default for all labelled vars ≥3
 extract_survey_metadata <- function(
     df,
-    missing_num     = c(96, 99, 996, 999, 9996, 9999), # 8, 9, 
+    missing_num     = c(96, 99, 996, 999, 9996, 9999), # 8, 9,
     missing_chr     = c("-1", "NSP", "NRP", "NR", "REFUS",
                         "Ne sait pas", "Refus"), # "8", "9",
     yes_labels      = NULL,
     no_labels       = NULL,
     max_levels_cat  = 20,
     detected_roles  = NULL,
-    positive_levels = NULL
+    desc_overrides  = NULL
 ) {
   default_yes <- c("oui", "choisi", "yes", "vrai", "true",
                    "présent", "actif", "sélectionné", "concerné",
@@ -146,18 +179,22 @@ extract_survey_metadata <- function(
     var_lbl <- var_labels_list[[vname]]
     if (is.null(var_lbl) || is.na(var_lbl)) var_lbl <- ""
 
-    # --- R class (most informative class) ---
-    r_class <- class(col)[[1]]
+    # --- R class: strip haven_labelled/vctrs_vctr to get underlying type ---
+    all_classes <- class(col)
+    r_class_raw <- all_classes[!all_classes %in% c("haven_labelled", "vctrs_vctr",
+                                                     "haven_labelled_spss")]
+    r_class <- if (length(r_class_raw) > 0) r_class_raw[[1]] else all_classes[[1]]
 
     # --- value labels ---
-    val_labs <- labelled::val_labels(col)
+    val_labs     <- labelled::val_labels(col)
+    has_val_labs <- !is.null(val_labs) && length(val_labs) > 0
 
-    # --- distinct non-NA values ---
+    # --- distinct non-NA values (ALL, before missing removal — for identifier check) ---
     vals_present <- unique(col[!is.na(col)])
-    n_dist       <- length(vals_present)
+    n_dist_total <- length(vals_present)
 
-    # --- values and labels vectors (all, including missing candidates) ---
-    if (!is.null(val_labs) && length(val_labs) > 0) {
+    # --- values and labels vectors (ALL, including missing candidates) ---
+    if (has_val_labs) {
       raw_values <- unname(val_labs)
       raw_labels <- names(val_labs)
     } else if (is.factor(col)) {
@@ -171,7 +208,7 @@ extract_survey_metadata <- function(
 
     # --- flag candidate missing values (unified: numeric + char + label text) ---
     is_miss <- purrr::map2_lgl(raw_values, raw_labels, function(v, l) {
-      v_num <- suppressWarnings(as.numeric(v))
+      v_num   <- suppressWarnings(as.numeric(v))
       num_hit <- !is.na(v_num) && v_num %in% missing_num
       chr_hit <- as.character(v) %in% missing_chr
       lbl_hit <- grepl(missing_lbl_pattern, l, perl = TRUE)
@@ -184,152 +221,164 @@ extract_survey_metadata <- function(
     lbls_clean <- raw_labels[!is_miss]
     n_clean    <- length(vals_clean)
 
+    # n_distinct = count of non-missing, non-NA levels (for display and binary detection)
+    n_dist <- n_clean
+
     # --- detect role ---
-    role_out <- .detect_role_v2(
-      vname, col, val_labs, n_dist, n_rows, n_clean,
-      lbls_clean, yes_kw, no_kw, max_levels_cat,
-      detected_roles, r_class
+    role_out <- .detect_role_v3(
+      vname, col, has_val_labs, n_dist_total, n_rows,
+      n_clean, vals_clean, lbls_clean, yes_kw, no_kw, r_class
     )
-    detected_role  <- role_out$role
-    positive_level <- if (!is.null(positive_levels) && vname %in% names(positive_levels)) {
-      positive_levels[[vname]]
-    } else {
-      role_out$positive_level
-    }
+    detected_role <- role_out$role
+    desc_auto     <- role_out$desc
 
     # Override role from user-supplied vector
     if (!is.null(detected_roles) && vname %in% names(detected_roles)) {
       detected_role <- detected_roles[[vname]]
     }
+    # Override desc from user-supplied vector
+    desc_val <- if (!is.null(desc_overrides) && vname %in% names(desc_overrides)) {
+      desc_overrides[[vname]]
+    } else {
+      desc_auto
+    }
 
-    is_ordinal <- detected_role == "categorical_ordinal"
+    # --- For double columns: suppress spurious float labels ---
+    if (detected_role == "double") {
+      raw_values <- character(0)
+      raw_labels <- character(0)
+    }
 
-    # --- console output for binary detection ---
-    if (detected_role %in% c("binary_oui_non", "binary_candidate")) {
+    # --- console output for factor_binary detection ---
+    if (detected_role == "factor_binary") {
       lv1 <- if (length(lbls_clean) >= 1) lbls_clean[[1]] else "?"
       lv2 <- if (length(lbls_clean) >= 2) lbls_clean[[2]] else "?"
-      pos_str <- if (!is.null(positive_level) && !is.na(positive_level) && positive_level != "") {
-        paste0(" (positive: \"", positive_level, "\")")
-      } else ""
-      match_str <- if (detected_role == "binary_oui_non") "keyword \u2713" else "no keyword match"
-      tag <- if (detected_role == "binary_oui_non") "[binary]  " else "[binary?] "
+      if (is.na(desc_val)) {
+        tag      <- "[factor_binary?]"
+        desc_str <- "desc=NA, needs review"
+      } else if (isTRUE(desc_val)) {
+        tag      <- "[factor_binary] "
+        desc_str <- "positive=first (desc=TRUE) \u2713"
+      } else {
+        tag      <- "[factor_binary] "
+        desc_str <- "positive=second (desc=FALSE)"
+      }
       binary_lines <<- c(binary_lines,
-        sprintf("%s%-20s: \"%s\" vs \"%s\"%s \u2014 %s",
-                tag, vname, lv1, lv2, pos_str, match_str))
+        sprintf("%s %-20s: \"%s\" vs \"%s\" \u2014 %s",
+                tag, vname, lv1, lv2, desc_str))
     }
 
     tibble::tibble(
-      var_name       = vname,
-      var_label      = var_lbl,
-      r_class        = r_class,
-      n_distinct     = n_dist,
-      detected_role  = detected_role,
-      positive_level = if (is.null(positive_level)) NA_character_ else positive_level,
-      is_ordinal     = is_ordinal,
-      values         = list(raw_values),
-      labels         = list(raw_labels),
-      missing_vals   = list(missing_vals_vec),
-      new_labels     = list(raw_labels),
-      new_name       = vname,
-      doc_note       = var_lbl
+      var_name      = vname,
+      var_label     = var_lbl,
+      r_class       = r_class,
+      n_distinct    = n_dist,
+      detected_role = detected_role,
+      desc          = desc_val,
+      values        = list(raw_values),
+      labels        = list(raw_labels),
+      missing_vals  = list(missing_vals_vec),
+      new_labels    = list(raw_labels),
+      new_name      = vname,
+      doc_note      = var_lbl
     )
   }) |>
     dplyr::bind_rows()
 
   # --- Console summary ---
-  n_binary    <- sum(meta$detected_role %in% c("binary_oui_non", "binary_candidate"))
-  n_ambiguous <- sum(meta$detected_role %in% c("categorical", "binary_candidate",
-                                                "numeric_or_cat"))
+  n_needs_ai <- sum(meta$detected_role %in% c("factor_nominal", "integer") |
+                    (meta$detected_role == "factor_binary" & is.na(meta$desc)))
   message("\nextract_survey_metadata: ", nrow(meta), " variables | ",
           nrow(df), " observations")
   message("  Roles: ",
           paste(names(table(meta$detected_role)),
                 table(meta$detected_role), sep = "=", collapse = "  "))
   if (length(binary_lines) > 0) {
-    message("\nBinary variables detected:")
+    message("\nBinary variables (factor_binary) detected:")
     purrr::walk(binary_lines, message)
   }
-  if (n_ambiguous > 0) {
-    message("\n[!] ", n_ambiguous, " ambiguous variable(s) need classification",
-            " (categorical / binary_candidate / numeric_or_cat).")
-    message("    Run ai_classify_roles(meta) to get suggested detected_roles vector.")
+  if (n_needs_ai > 0) {
+    message("\n[!] ", n_needs_ai, " variable(s) may need role refinement",
+            " (factor_nominal / integer / factor_binary with desc=NA).")
+    message("    Run ai_classify_roles(meta) to get suggested detected_roles/desc_overrides vectors.")
   }
 
   meta
 }
 
 
-# Internal role detection — not exported
-.detect_role_v2 <- function(
-    vname, col, val_labs, n_dist, n_rows, n_clean,
-    lbls_clean, yes_kw, no_kw, max_levels_cat,
-    detected_roles, r_class
+# Internal role detection v3 — not exported
+.detect_role_v3 <- function(
+    vname, col, has_val_labs, n_dist_total, n_rows,
+    n_clean, vals_clean, lbls_clean, yes_kw, no_kw, r_class
 ) {
-  # 1. Identifier: ID name or all values unique
+  # 1. Identifier: ID name or all (total) values unique
   id_pattern <- "^(IDENT|IDENTIF|IDENTIFIANT|ID|_ID|ID_|NUMEN|NUMIDENT)$"
-  if (grepl(id_pattern, vname, ignore.case = TRUE) || n_dist == n_rows) {
-    return(list(role = "identifier", positive_level = NA_character_))
+  if (grepl(id_pattern, vname, ignore.case = TRUE) || n_dist_total == n_rows) {
+    return(list(role = "identifier", desc = NA))
   }
 
-  # 2. Has value labels → categorical (regardless of R class); check binary first
-  has_val_labs <- !is.null(val_labs) && length(val_labs) > 0
-
-  if (n_clean == 2) {
-    # Structural binary: exactly 2 non-missing levels
-    pos <- .find_positive_level(lbls_clean, yes_kw, no_kw)
-    if (!is.null(pos)) {
-      return(list(role = "binary_oui_non", positive_level = pos))
+  # 2. Labelled column → factor_binary (2 clean levels) or factor_nominal (>=3)
+  if (has_val_labs) {
+    if (n_clean == 2) {
+      desc <- .find_binary_desc(lbls_clean, yes_kw, no_kw)
+      return(list(role = "factor_binary", desc = desc))
     }
-    return(list(role = "binary_candidate", positive_level = NA_character_))
+    return(list(role = "factor_nominal", desc = NA))
   }
 
-  if (has_val_labs || is.factor(col)) {
-    return(list(role = "categorical", positive_level = NA_character_))
+  # 3. Factor column (no val_labs but is.factor)
+  if (is.factor(col)) {
+    if (n_clean == 2) {
+      desc <- .find_binary_desc(lbls_clean, yes_kw, no_kw)
+      return(list(role = "factor_binary", desc = desc))
+    }
+    return(list(role = "factor_nominal", desc = NA))
   }
 
-  # 3. Numeric/character without labels
-  if (is.numeric(col) || r_class %in% c("numeric", "double", "integer")) {
-    if (n_dist > max_levels_cat) return(list(role = "numeric", positive_level = NA_character_))
-    return(list(role = "numeric_or_cat", positive_level = NA_character_))
+  # 4. Unlabelled numeric: distinguish double (any non-whole value) from integer
+  if (r_class %in% c("double", "numeric", "integer") || is.numeric(col)) {
+    vals_num <- suppressWarnings(as.numeric(vals_clean))
+    vals_num <- vals_num[!is.na(vals_num)]
+    if (length(vals_num) > 0 && any(vals_num != floor(vals_num))) {
+      return(list(role = "double", desc = FALSE))
+    }
+    return(list(role = "integer", desc = FALSE))
   }
 
+  # 5. Character column without labels
   if (is.character(col)) {
-    # All values look like numbers → probably numeric codes without labels
-    all_numeric_str <- all(grepl("^-?[0-9]+(\\.[0-9]+)?$",
-                                  lbls_clean[lbls_clean != ""]))
-    if (all_numeric_str && n_dist > max_levels_cat) {
-      return(list(role = "numeric", positive_level = NA_character_))
-    }
-    if (n_dist > 0) return(list(role = "categorical", positive_level = NA_character_))
+    all_int_str <- length(vals_clean) > 0 &&
+      all(grepl("^-?[0-9]+$", vals_clean[vals_clean != ""]))
+    if (all_int_str) return(list(role = "integer", desc = FALSE))
+    return(list(role = "factor_nominal", desc = NA))
   }
 
-  list(role = "other", positive_level = NA_character_)
+  list(role = "other", desc = NA)
 }
 
 
-# Internal: find positive level by keyword matching (partial, case-insensitive)
-# Returns the label string if found, NULL if not
-.find_positive_level <- function(lbls_clean, yes_kw, no_kw) {
-  if (length(lbls_clean) != 2) return(NULL)
+# Internal: determine desc for a 2-level binary variable
+# Returns TRUE (positive is first), FALSE (positive is second), or NA (no keyword match)
+.find_binary_desc <- function(lbls_clean, yes_kw, no_kw) {
+  if (length(lbls_clean) != 2) return(NA)
 
-  lbl_lower <- tolower(lbls_clean)
+  lbl_lower    <- tolower(lbls_clean)
   # Remove numeric prefix (e.g. "1-") before keyword matching
-  lbl_stripped <- stringr::str_remove(lbl_lower, "^[0-9]+-")
+  lbl_stripped <- stringr::str_remove(lbl_lower, "^[0-9]+-\\s*")
 
   yes_match <- purrr::map_lgl(yes_kw, ~ any(stringr::str_detect(lbl_stripped, stringr::fixed(.x))))
-  no_match  <- purrr::map_lgl(no_kw,  ~ any(stringr::str_detect(lbl_stripped, stringr::fixed(.x))))
+  has_yes   <- any(yes_match)
 
-  has_yes <- any(yes_match)
-  has_no  <- any(no_match)
+  if (!has_yes) return(NA)
 
-  if (!has_yes && !has_no) return(NULL)
-
-  # Determine which of the two labels is positive
+  # Which of the two labels is positive?
   yes_idx <- which(purrr::map_lgl(lbl_stripped,
     ~ any(stringr::str_detect(.x, stringr::fixed(yes_kw[yes_match])))))
-  if (length(yes_idx) == 1) return(lbls_clean[[yes_idx]])
 
-  NULL
+  if (length(yes_idx) == 1) return(yes_idx == 1L)  # TRUE if positive is first
+
+  NA
 }
 
 
@@ -404,57 +453,57 @@ metadata_apply_codebook <- function(
 # 4. metadata_fix_binary()
 # ============================================================
 
-#' Standardise binary variable labels using positive_level column
+#' Standardise binary variable labels using the desc column
 #'
-#' For rows with detected_role == "binary_oui_non":
-#'   - Renames the positive level to "1-<var_label>"
-#'   - Renames the negative level to "2-Non"
-#'   - Any remaining levels → "NULL" (mapped to NA at apply step)
+#' For rows with detected_role == "factor_binary" and desc != NA:
+#'   - desc = TRUE  → labels[[1]] is positive, labels[[2]] is negative
+#'   - desc = FALSE → labels[[2]] is positive, labels[[1]] is negative
+#'     (reorders new_labels so positive comes first)
+#'   - Renames positive level to "1-<var_label>", negative to "2-Non"
+#'   - Any other levels (e.g. missing candidates left in labels) → "NULL"
 #'
-#' For rows with detected_role == "binary_candidate":
-#'   - Warns and skips. Resolve these first (set detected_roles override, or
-#'     set positive_levels override, then re-run extract_survey_metadata()).
+#' For rows with desc == NA:
+#'   - Warns and skips. Set desc_overrides in extract_survey_metadata() first.
 #'
 #' @param metadata       Varmod tibble.
 #' @param use_var_label  If TRUE (default), positive level is renamed to
 #'                       paste0("1-", var_label). If FALSE, keeps original label.
 #'
-#' @return Updated metadata tibble.
+#' @return Updated metadata tibble with new_labels modified for factor_binary rows.
 metadata_fix_binary <- function(metadata, use_var_label = TRUE) {
-  candidates <- metadata |>
-    dplyr::filter(detected_role == "binary_candidate") |>
+  unresolved <- metadata |>
+    dplyr::filter(detected_role == "factor_binary", is.na(desc)) |>
     dplyr::pull(var_name)
 
-  if (length(candidates) > 0) {
-    warning(length(candidates), " binary_candidate variable(s) not yet resolved: ",
-            paste(candidates, collapse = ", "),
-            "\nSet positive_levels or detected_roles in extract_survey_metadata() first.")
+  if (length(unresolved) > 0) {
+    warning(length(unresolved), " factor_binary variable(s) with desc=NA skipped: ",
+            paste(unresolved, collapse = ", "),
+            "\nSet desc_overrides in extract_survey_metadata() first.")
   }
 
   metadata |>
     dplyr::mutate(new_labels = purrr::pmap(
-      list(detected_role, var_label, new_labels, positive_level),
-      function(role, lbl, nls, pos_lv) {
-        if (role != "binary_oui_non") return(nls)
+      list(detected_role, var_label, new_labels, desc),
+      function(role, lbl, nls, dsc) {
+        if (role != "factor_binary" || is.na(dsc)) return(nls)
 
-        purrr::map_chr(nls, function(l) {
-          # Strip numeric prefix for comparison
-          l_stripped <- stringr::str_remove(tolower(l), "^[0-9]+-")
-          pos_stripped <- if (!is.na(pos_lv))
-            stringr::str_remove(tolower(pos_lv), "^[0-9]+-")
-          else ""
+        # Determine which index is positive
+        pos_idx <- if (isTRUE(dsc)) 1L else 2L
+        neg_idx <- if (isTRUE(dsc)) 2L else 1L
 
-          is_positive <- !is.na(pos_lv) &&
-            (l == pos_lv || l_stripped == pos_stripped)
+        pos_label <- if (use_var_label && lbl != "") paste0("1-", lbl) else nls[[pos_idx]]
+        neg_label <- "2-Non"
 
-          if (is_positive) {
-            if (use_var_label && lbl != "") paste0("1-", lbl) else l
-          } else if (grepl("^(non|no|faux|false|absent|pas |non choisi)", l_stripped)) {
-            "2-Non"
-          } else {
-            "NULL"
-          }
-        })
+        # Reorder so positive is first, negative is second; any others → "NULL"
+        result <- rep("NULL", length(nls))
+        result[[pos_idx]] <- pos_label
+        result[[neg_idx]] <- neg_label
+        # If desc = FALSE (positive was second), also swap new_labels order for display
+        if (!isTRUE(dsc)) {
+          result <- c(result[[pos_idx]], result[[neg_idx]],
+                      result[seq_along(result)[-c(pos_idx, neg_idx)]])
+        }
+        result
       }
     ))
 }
@@ -468,93 +517,135 @@ metadata_fix_binary <- function(metadata, use_var_label = TRUE) {
 #'
 #' Read-only review file. Do NOT modify the Excel file and re-import —
 #' make corrections in R (override vectors in extract_survey_metadata()).
-#' Orange rows = variables needing a decision before apply_survey_formats().
+#' Orange rows = variables needing role refinement (AI or manual).
 #'
-#' @param metadata        Varmod tibble.
+#' @param metadata        Varmod tibble from extract_survey_metadata().
 #' @param path            Output path. Default: "metadata_review.xlsx".
-#' @param highlight_roles Character vector of detected_role values to highlight
-#'                        orange. Default: binary_candidate and numeric_or_cat.
+#' @param highlight_roles detected_role values to highlight orange.
+#'                        Default: factor_nominal, factor_binary (desc=NA), integer.
+#' @param show_missing    If FALSE (default), the labels column shows only
+#'                        non-missing labels. If TRUE, shows all labels including
+#'                        missing-flagged ones.
+#' @param hide_cols       Column names to exclude from the Excel output.
+#'                        Default hides new_labels, new_name, doc_note (cluttered
+#'                        before AI label/name suggestion steps are done).
 #'
-#' @return Invisibly returns path. Opens file if in interactive session.
+#' @return Invisibly returns path.
 export_metadata_excel <- function(
     metadata,
     path            = "metadata_review.xlsx",
-    highlight_roles = c("binary_candidate", "numeric_or_cat")
+    highlight_roles = c("factor_nominal", "integer"),
+    show_missing    = FALSE,
+    hide_cols       = c("new_labels", "new_name", "doc_note")
 ) {
   if (!requireNamespace("openxlsx", quietly = TRUE)) {
     stop("openxlsx is required. Install with: install.packages('openxlsx')")
   }
 
   # --- Flatten list columns to readable strings ---
-  collapse5 <- function(x) {
-    if (is.null(x) || length(x) == 0) return("")
-    paste(head(x, 5), collapse = " / ")
+  collapse5 <- function(lbls, vals, miss) {
+    # Filter missing if show_missing = FALSE
+    if (!show_missing && length(miss) > 0) {
+      keep <- !(vals %in% miss)
+      lbls <- lbls[keep]
+    }
+    if (length(lbls) == 0) return("")
+    paste(head(lbls, 5), collapse = " / ")
   }
-  collapse_miss <- function(x) {
-    if (is.null(x) || length(x) == 0) return("")
-    paste(x, collapse = "; ")
+  collapse_miss_labels <- function(miss_vals, lbls, vals) {
+    if (length(miss_vals) == 0) return("")
+    # Show labels for missing values (not raw codes)
+    miss_lbls <- lbls[vals %in% miss_vals]
+    if (length(miss_lbls) == 0) miss_lbls <- as.character(miss_vals)
+    paste(miss_lbls, collapse = "; ")
+  }
+  collapse_new_labels <- function(nls) {
+    if (length(nls) == 0) return("")
+    paste(head(nls, 5), collapse = " / ")
   }
 
   df_excel <- metadata |>
     dplyr::mutate(
-      missing_vals_str = purrr::map_chr(missing_vals, collapse_miss),
-      labels_first5    = purrr::map_chr(labels,       collapse5),
-      new_labels_first5 = purrr::map_chr(new_labels,  collapse5)
+      missing_vals_str  = purrr::pmap_chr(
+        list(missing_vals, labels, values),
+        ~ collapse_miss_labels(..1, ..2, ..3)
+      ),
+      labels_str        = purrr::pmap_chr(
+        list(labels, values, missing_vals),
+        ~ collapse5(..1, ..2, ..3)
+      ),
+      new_labels_str    = purrr::map_chr(new_labels, collapse_new_labels),
+      desc_str          = dplyr::case_when(
+        is.na(desc)       ~ "NA",
+        isTRUE(desc)      ~ "TRUE",
+        .default          = "FALSE"
+      )
     ) |>
     dplyr::select(
-      var_name, var_label, r_class, detected_role, positive_level,
-      is_ordinal, n_distinct,
-      missing_vals   = missing_vals_str,
-      labels         = labels_first5,
-      new_labels     = new_labels_first5,
+      var_name, var_label, r_class, detected_role, desc = desc_str, n_distinct,
+      missing_vals = missing_vals_str,
+      labels       = labels_str,
+      new_labels   = new_labels_str,
       new_name, doc_note
     )
+
+  # Also highlight factor_binary rows with desc=NA
+  highlight_rows_extra <- if ("factor_binary" %in% metadata$detected_role) {
+    which(metadata$detected_role == "factor_binary" & is.na(metadata$desc))
+  } else integer(0)
+
+  # Remove hidden columns
+  if (length(hide_cols) > 0) {
+    df_excel <- dplyr::select(df_excel, -dplyr::any_of(hide_cols))
+  }
 
   wb <- openxlsx::createWorkbook()
   openxlsx::addWorksheet(wb, "metadata")
 
-  # Write data
   openxlsx::writeData(wb, "metadata", df_excel, startRow = 1, startCol = 1,
                       headerStyle = openxlsx::createStyle(
                         fontColour = "#FFFFFF", fgFill = "#2F4F7F",
                         halign = "left", textDecoration = "bold"
                       ))
 
-  # Freeze header row
   openxlsx::freezePane(wb, "metadata", firstRow = TRUE)
 
-  # Auto column widths (approximate)
-  col_widths <- c(20, 40, 12, 22, 25, 10, 10, 25, 40, 40, 20, 40)
-  purrr::walk2(seq_along(col_widths), col_widths, function(col, w) {
+  # Column widths — adapt to which columns remain
+  all_cols   <- c("var_name", "var_label", "r_class", "detected_role", "desc",
+                  "n_distinct", "missing_vals", "labels", "new_labels", "new_name", "doc_note")
+  all_widths <- c(20,          40,           12,        22,              8,
+                  10,           30,            45,        45,             20,           40)
+  shown_cols <- intersect(names(df_excel), all_cols)
+  shown_w    <- all_widths[match(shown_cols, all_cols)]
+  purrr::walk2(seq_along(shown_w), shown_w, function(col, w) {
     openxlsx::setColWidths(wb, "metadata", cols = col, widths = w)
   })
 
-  # Orange highlight for rows needing attention
-  orange_style <- openxlsx::createStyle(fgFill = "#FFD580")
-  orange_rows  <- which(df_excel$detected_role %in% highlight_roles)
-  if (length(orange_rows) > 0) {
-    openxlsx::addStyle(
-      wb, "metadata", style = orange_style,
-      rows = orange_rows + 1,  # +1 for header row
-      cols = seq_len(ncol(df_excel)), gridExpand = TRUE
+  # Orange rows = highlight_roles + factor_binary with desc=NA
+  orange_idx <- union(
+    which(df_excel$detected_role %in% highlight_roles),
+    highlight_rows_extra
+  )
+  if (length(orange_idx) > 0) {
+    openxlsx::addStyle(wb, "metadata",
+      style = openxlsx::createStyle(fgFill = "#FFD580"),
+      rows  = orange_idx + 1, cols = seq_len(ncol(df_excel)), gridExpand = TRUE
     )
   }
 
-  # Alternating row shading for non-highlighted rows
-  light_style <- openxlsx::createStyle(fgFill = "#F5F5F5")
-  other_rows  <- setdiff(seq_len(nrow(df_excel)), orange_rows)
-  even_rows   <- other_rows[other_rows %% 2 == 0]
+  # Alternating light grey for non-highlighted rows
+  other_rows <- setdiff(seq_len(nrow(df_excel)), orange_idx)
+  even_rows  <- other_rows[other_rows %% 2 == 0]
   if (length(even_rows) > 0) {
-    openxlsx::addStyle(
-      wb, "metadata", style = light_style,
-      rows = even_rows + 1, cols = seq_len(ncol(df_excel)), gridExpand = TRUE
+    openxlsx::addStyle(wb, "metadata",
+      style = openxlsx::createStyle(fgFill = "#F5F5F5"),
+      rows  = even_rows + 1, cols = seq_len(ncol(df_excel)), gridExpand = TRUE
     )
   }
 
   openxlsx::saveWorkbook(wb, path, overwrite = TRUE)
   message("Metadata written to: ", path,
-          " (", sum(df_excel$detected_role %in% highlight_roles),
-          " orange rows need attention)")
+          " (", length(orange_idx), " orange rows need attention)")
 
   invisible(path)
 }
@@ -566,9 +657,9 @@ export_metadata_excel <- function(
 
 #' Apply metadata to a dataframe: recode to factors, rename, re-label
 #'
-#' Terminal step. Warns if any binary_candidate variables remain unresolved.
+#' Terminal step. Applies factor recoding to factor_binary/nominal/ordinal roles.
 #' Values in missing_vals are mapped to NA. new_labels == "NULL" → NA.
-#' Ordinal variables (is_ordinal = TRUE) are NOT relevel-sorted.
+#' factor_ordinal variables keep explicit level order (not alphabetically sorted).
 #'
 #' @param df               Tibble from import_survey().
 #' @param metadata         Fully-reviewed varmod tibble.
@@ -578,13 +669,8 @@ export_metadata_excel <- function(
 apply_survey_formats <- function(df, metadata, uppercase_names = TRUE) {
   meta <- metadata |> dplyr::filter(var_name %in% names(df))
 
-  candidates <- meta |>
-    dplyr::filter(detected_role == "binary_candidate") |>
-    dplyr::pull(var_name)
-  if (length(candidates) > 0) {
-    warning(length(candidates), " binary_candidate variable(s) treated as categorical: ",
-            paste(candidates, collapse = ", "))
-  }
+  non_factor_roles <- c("double", "integer", "integer_scale", "integer_count",
+                        "identifier", "other")
 
   for (i in seq_len(nrow(meta))) {
     row       <- meta[i, ]
@@ -593,9 +679,9 @@ apply_survey_formats <- function(df, metadata, uppercase_names = TRUE) {
     nls       <- row$new_labels[[1]]
     miss_vals <- row$missing_vals[[1]]
     role      <- row$detected_role
-    is_ord    <- isTRUE(row$is_ordinal)
+    is_ord    <- role == "factor_ordinal"
 
-    if (role %in% c("numeric", "identifier", "other")) next
+    if (role %in% non_factor_roles) next
     if (length(vals) == 0 || length(nls) == 0) next
 
     null_mask  <- nls == "NULL"
@@ -689,14 +775,13 @@ generate_format_script <- function(
 
   # Mutate block
   cat_meta <- metadata |>
-    dplyr::filter(detected_role %in% c("categorical", "categorical_nominal",
-                                        "categorical_ordinal", "binary_oui_non",
-                                        "binary_candidate"))
+    dplyr::filter(detected_role %in% c("factor_binary", "factor_nominal",
+                                        "factor_ordinal"))
 
   if (nrow(cat_meta) > 0) {
     mutate_lines <- purrr::pmap_chr(cat_meta, function(
       var_name, var_label, new_name, new_labels, values, missing_vals,
-      is_ordinal, detected_role, ...
+      detected_role, ...
     ) {
       display <- if (!is.null(new_name) && new_name != "" && new_name != var_name)
         new_name else var_name
@@ -707,7 +792,7 @@ generate_format_script <- function(
         else sprintf('    "%-35s= "%s"', paste0(nl, '"'), as.character(v))
       })
 
-      relevel_line <- if (isTRUE(is_ordinal)) {
+      relevel_line <- if (detected_role == "factor_ordinal") {
         valid_nls <- new_labels[new_labels != "NULL"]
         lvls <- paste0('"', valid_nls, '"', collapse = ", ")
         paste0('    forcats::fct_relevel(', lvls, ')')
@@ -898,15 +983,23 @@ ai_batch_retrieve <- function(
 
 #' Classify ambiguous variables with Haiku, print copy-pasteable R vectors
 #'
-#' Sends variables with detected_role in "categorical", "binary_candidate",
-#' "numeric_or_cat" to Claude Haiku. Returns three named vectors printed to
-#' the console in dput/copy-paste format:
-#'   - detected_roles    (var_name = role)
-#'   - positive_levels   (var_name = positive label, for binary only)
-#'   - extra_missing     (var_name = additional missing label flagged by AI)
+#' Sends variables with detected_role in "factor_nominal", "integer", or
+#' "factor_binary" (where desc=NA) to Claude Haiku for finer classification.
+#' Returns two named vectors printed to the console in copy-paste format:
+#'   - detected_roles  (var_name = role)
+#'   - desc_overrides  (var_name = TRUE/FALSE, for binary/ordinal only)
+#'
+#' Role codes sent to AI:
+#'   F = factor_nominal (no change needed)
+#'   O = factor_ordinal (ascending or descending order)
+#'   B = factor_binary  (already known; sent only when desc=NA)
+#'   S = integer_scale  (Likert, left/right scales)
+#'   C = integer_count  (1 enfant, 2 enfants…)
+#'   Q = double         (reclassify integer as continuous)
+#'   ? = unclear
 #'
 #' After reviewing the output:
-#'   1. Copy the three vectors into your _mf.R script
+#'   1. Copy the two vectors into your _mf.R script
 #'   2. Edit as needed
 #'   3. Comment out the ai_classify_roles() line
 #'   4. Re-run extract_survey_metadata() with the corrected vectors
@@ -918,7 +1011,7 @@ ai_batch_retrieve <- function(
 #'                         Enough for role detection; keeps tokens minimal.
 #' @param batch_threshold  Above this n_vars, use batch API. Default 60.
 #'
-#' @return Invisibly returns a list(detected_roles, positive_levels,
+#' @return Invisibly returns a list(detected_roles, desc_overrides,
 #'         extra_missing). Primary output is the console print.
 ai_classify_roles <- function(
     metadata,
@@ -927,48 +1020,64 @@ ai_classify_roles <- function(
     max_labels_sent  = 5,
     batch_threshold  = 60
 ) {
+  # Target: factor_nominal (all), integer (all), factor_binary with desc=NA
   target <- metadata |>
-    dplyr::filter(detected_role %in% c("categorical", "binary_candidate",
-                                        "numeric_or_cat"))
+    dplyr::filter(
+      detected_role %in% c("factor_nominal", "integer") |
+        (detected_role == "factor_binary" & is.na(desc))
+    )
 
   if (nrow(target) == 0) {
     message("ai_classify_roles: No ambiguous variables found. ",
             "All roles already determined.")
     return(invisible(list(detected_roles  = character(0),
-                          positive_levels = character(0),
+                          desc_overrides  = logical(0),
                           extra_missing   = character(0))))
   }
 
   message("ai_classify_roles: ", nrow(target), " variable(s) to classify.")
 
   # Build compact prompt lines — one per variable
-  prompt_lines <- purrr::pmap_chr(target, function(
-    var_name, var_label, r_class, n_distinct, labels, missing_vals, ...
-  ) {
-    non_miss_lbls <- labels[!(labels %in% missing_vals)]
-    first_n  <- head(non_miss_lbls, max_labels_sent)
-    n_total  <- length(non_miss_lbls)
-    lbl_str  <- paste0('"', first_n, '"', collapse = ",")
-    suffix   <- if (n_total > max_labels_sent)
-      paste0(",...+", n_total - max_labels_sent, "more") else ""
+  prompt_lines <- purrr::pmap_chr(
+    list(target$var_name, target$var_label, target$r_class,
+         target$n_distinct, target$labels, target$missing_vals,
+         target$detected_role),
+    function(var_name, var_label, r_class, n_distinct, labels, missing_vals,
+             detected_role) {
+      non_miss_lbls <- labels[!(labels %in% missing_vals)]
+      first_n <- head(non_miss_lbls, max_labels_sent)
+      n_total <- length(non_miss_lbls)
+      lbl_str <- paste0('"', first_n, '"', collapse = ",")
+      suffix  <- if (n_total > max_labels_sent)
+        paste0(",...+", n_total - max_labels_sent, "more") else ""
+      # Hint current role so AI knows the starting point
+      cur_code <- switch(detected_role,
+        factor_binary  = "B",
+        factor_nominal = "F",
+        integer        = "I",
+        "?"
+      )
+      sprintf('%s|"%s"|%s|cur:%s|nd:%d|[%s%s]',
+              var_name,
+              substr(var_label, 1, 60),
+              r_class, cur_code, n_distinct,
+              lbl_str, suffix)
+    }
+  )
 
-    sprintf('%s|"%s"|%s|nd:%d|[%s%s]',
-            var_name,
-            substr(var_label, 1, 60),
-            r_class, n_distinct,
-            lbl_str, suffix)
-  })
-
-  # System prompt — ask for abbreviated codes, R wrapper converts to full names
+  # System prompt — abbreviated codes; R wrapper converts to full role names
   system_prompt <- paste0(
     "You classify French social survey variables. For each line:\n",
-    "  FORMAT: var_name|\"label\"|r_class|nd:N|[\"lv1\",\"lv2\",...]\n",
+    "  FORMAT: var_name|\"label\"|r_class|cur:CODE|nd:N|[\"lv1\",\"lv2\",...]\n",
     "Reply with ONE line per variable:\n",
-    "  var_name TAB CODE [TAB pos_label] [TAB miss:\"label\"]\n",
-    "CODES: N=nominal O=ordinal B=binary Q=numeric ?=unclear\n",
-    "- B: add TAB then the positive level label exactly as shown\n",
-    "- miss: add TAB miss:\"label\" if a label text looks like missing ",
-    "(NSP/Refus/etc.) but is not marked as such\n",
+    "  var_name TAB CODE [TAB T|F|?] [TAB miss:\"label\"]\n",
+    "CODES: F=factor_nominal O=factor_ordinal B=factor_binary ",
+    "S=integer_scale C=integer_count Q=double ?=unclear\n",
+    "- B: add TAB then T (positive level is first shown), F (second), or ? if unclear\n",
+    "- O: add TAB then T (descending: high\u2192low) or F (ascending: low\u2192high), or ?\n",
+    "- S or C: no extra field needed\n",
+    "- miss: add TAB miss:\"label\" if a label looks like missing (NSP/Refus/etc.) ",
+    "but is not already marked as such\n",
     "No explanations. No extra text. One variable per line."
   )
 
@@ -980,30 +1089,37 @@ ai_classify_roles <- function(
   # Route sync vs batch
   if (nrow(target) <= batch_threshold) {
     message("  Synchronous call...")
-    resp <- ai_call_claude(user_prompt, model = model, api_key = api_key,
-                           system = system_prompt)
+    resp     <- ai_call_claude(user_prompt, model = model, api_key = api_key,
+                               system = system_prompt)
     raw_text <- resp$content[[1]]$text
   } else {
-    message("  Batch mode (", nrow(target), " vars > threshold ", batch_threshold, ")...")
+    message("  Batch mode (", nrow(target), " vars > threshold ",
+            batch_threshold, ")...")
     req_list <- list(list(custom_id = "classify_all", prompt = user_prompt))
     batch    <- ai_batch_submit(req_list, model = model, api_key = api_key)
     raw      <- ai_batch_retrieve(batch$id, api_key = api_key)
     raw_text <- raw[["classify_all"]]
   }
 
-  # Parse AI response
-  role_map <- c(N = "categorical_nominal", O = "categorical_ordinal",
-                B = "binary_oui_non",      Q = "numeric",
-                "?" = "categorical")
+  # Role code → full role name
+  role_map <- c(
+    F = "factor_nominal",
+    O = "factor_ordinal",
+    B = "factor_binary",
+    S = "integer_scale",
+    C = "integer_count",
+    Q = "double",
+    "?" = "factor_nominal"   # unclear → keep nominal, user decides
+  )
 
   detected_roles  <- character(0)
-  positive_levels <- character(0)
+  desc_overrides  <- logical(0)
   extra_missing   <- character(0)
 
   lines <- stringr::str_split(stringr::str_trim(raw_text), "\n")[[1]]
   lines <- lines[lines != ""]
 
-  # Build lookup: var_name → original labels (for inline comments in output)
+  # Build lookup: var_name → first 3 labels (for inline comments in output)
   lbl_lookup <- purrr::set_names(
     purrr::map(target$labels, ~ paste(head(.x, 3), collapse = '","')),
     target$var_name
@@ -1021,12 +1137,18 @@ ai_classify_roles <- function(
 
     detected_roles[[vname]] <- role_map[[code]]
 
-    # Positive level for binary
-    if (code == "B" && length(parts) >= 3) {
-      pos <- stringr::str_trim(parts[[3]])
-      if (!stringr::str_starts(pos, "miss:") && pos != "") {
-        positive_levels[[vname]] <- pos
-        parts <- parts[-3]  # remove so miss: parsing still works
+    # desc field for B (binary) and O (ordinal): T/F/?
+    if (code %in% c("B", "O") && length(parts) >= 3) {
+      desc_raw <- stringr::str_trim(parts[[3]])
+      if (!stringr::str_starts(desc_raw, "miss:") && desc_raw != "") {
+        desc_val <- switch(desc_raw,
+          T   = TRUE,
+          F   = FALSE,
+          "?" = NA
+        )
+        if (!is.null(desc_val)) {
+          desc_overrides[[vname]] <- desc_val
+        }
       }
     }
 
@@ -1055,47 +1177,203 @@ ai_classify_roles <- function(
     cat("detected_roles <- c(\n",
         paste(lines_out, collapse = "\n"), "\n)\n\n", sep = "")
   } else {
-    cat("detected_roles <- c()  # (no classifications returned)\n\n")
+    cat("detected_roles <- c()  # (no role changes)\n\n")
   }
 
-  if (length(positive_levels) > 0) {
-    pos_lines <- purrr::imap_chr(positive_levels, function(lv, vname) {
-      sprintf('  %-20s = "%s"', vname, lv)
+  # desc_overrides vector (replaces positive_levels)
+  if (length(desc_overrides) > 0) {
+    desc_lines <- purrr::imap_chr(desc_overrides, function(dv, vname) {
+      role <- detected_roles[[vname]]
+      role_hint <- if (!is.null(role)) paste0("  # [", role, "]") else ""
+      sprintf('  %-20s = %s,%s', vname, toupper(as.character(dv)), role_hint)
     })
-    cat("positive_levels <- c(\n",
-        paste(pos_lines, collapse = ",\n"), "\n)\n\n", sep = "")
+    cat("desc_overrides <- c(\n",
+        paste(desc_lines, collapse = "\n"), "\n)\n\n", sep = "")
   }
 
   if (length(extra_missing) > 0) {
     miss_lines <- purrr::imap_chr(extra_missing, function(lbl, vname) {
-      sprintf('  %-20s = "%s"', vname, lbl)
+      sprintf('  "%s"', lbl)
     })
-    cat("extra_missing <- c(\n",
-        paste(miss_lines, collapse = ",\n"), "\n)\n\n", sep = "")
+    cat("# Add to missing_chr:\n")
+    cat("c(\n", paste(miss_lines, collapse = ",\n"), "\n)\n\n", sep = "")
     message("[!] extra_missing: add these to missing_chr in extract_survey_metadata()")
   }
 
   message("# Then re-run:")
   message("# meta <- extract_survey_metadata(df,")
-  message("#   detected_roles  = detected_roles,")
-  message("#   positive_levels = positive_levels)")
+  message("#   detected_roles = detected_roles,")
+  message("#   desc_overrides = desc_overrides)")
   message(strrep("=", 60))
 
   invisible(list(detected_roles  = detected_roles,
-                 positive_levels = positive_levels,
+                 desc_overrides  = desc_overrides,
                  extra_missing   = extra_missing))
 }
 
 
 # ============================================================
-# 10. ai_suggest_labels()
+# 10. ai_suggest_missing()
+# ============================================================
+
+#' Use Haiku to suggest missing value candidates from value labels
+#'
+#' Collects the LAST `max_vals` value labels from each non-identifier variable
+#' (missing codes almost always have the highest numeric codes, so they appear
+#' at the end of sorted value lists). Deduplicates across variables and sends
+#' a single compact list to Haiku, which returns only the labels it considers
+#' likely missing values (NSP, Refus, non-réponse, etc.).
+#'
+#' Primary output: two copy-pasteable vectors printed to the console:
+#'   - `missing_chr`  — character vector of label strings (for missing_chr arg)
+#'   - `missing_num`  — numeric vector of the numeric codes embedded in those labels
+#'
+#' These vectors are CANDIDATES to review manually. Paste them into your
+#' extract_survey_metadata() call after reviewing.
+#'
+#' @param metadata      Varmod tibble from extract_survey_metadata().
+#' @param examples      Optional character vector of known missing label strings
+#'                      from OTHER datasets (for context only — NOT added to
+#'                      output automatically). E.g. c("9-NSP", "99-Refus").
+#' @param max_vals      Max value labels to keep per variable (last N, sorted).
+#'                      Default 10.
+#' @param api_key       ANTHROPIC_API_KEY env var by default.
+#' @param model         Default: Haiku 4.5.
+#' @param max_tokens    Max response tokens. 512 is ample for a label list.
+#' @param debug         If TRUE, prints the raw Haiku response to console before
+#'                      parsing. Use when labels are being ignored unexpectedly.
+#'
+#' @return Invisibly returns list(missing_chr = character(), missing_num = numeric()).
+#'         Primary output is console print of copy-pasteable vectors.
+ai_suggest_missing <- function(
+    metadata,
+    examples   = NULL,
+    max_vals   = 10L,
+    api_key    = Sys.getenv("ANTHROPIC_API_KEY"),
+    model      = "claude-haiku-4-5",
+    max_tokens = 512L,
+    debug      = FALSE
+) {
+  # Drop identifiers — they have no meaningful value labels to inspect
+  target <- metadata |>
+    dplyr::filter(detected_role != "identifier")
+
+  if (nrow(target) == 0) {
+    message("ai_suggest_missing: No non-identifier variables found.")
+    return(invisible(list(missing_chr = character(0), missing_num = numeric(0))))
+  }
+
+  # Collect the LAST max_vals labels from each variable (missing codes cluster at end)
+  all_labels <- purrr::map(target$labels, function(lbls) {
+    if (length(lbls) == 0) return(character(0))
+    # Labels are stored in value order; take the tail
+    tail(lbls, max_vals)
+  })
+
+  # Flatten, deduplicate, drop blanks
+  unique_labels <- unique(unlist(all_labels, use.names = FALSE))
+  unique_labels <- unique_labels[nzchar(unique_labels)]
+
+  if (length(unique_labels) == 0) {
+    message("ai_suggest_missing: No value labels found in metadata.")
+    return(invisible(list(missing_chr = character(0), missing_num = numeric(0))))
+  }
+
+  message("ai_suggest_missing: ", length(unique_labels),
+          " unique tail-labels collected from ", nrow(target), " variables.")
+
+  # Build prompt — send labels WITHOUT numbers so Haiku cannot echo them back
+  examples_block <- if (!is.null(examples) && length(examples) > 0) {
+    paste0("\nFor reference, labels like these are typically missing in similar surveys:\n",
+           paste(paste0("  ", examples), collapse = "\n"), "\n")
+  } else ""
+
+  labels_block <- paste(paste0("  ", unique_labels), collapse = "\n")
+
+  prompt <- paste0(
+    "You are identifying missing value labels in French social survey data.\n",
+    "From the list below, return ONLY the labels that represent missing values:\n",
+    "non-response, refusal, 'ne sait pas', 'NSP', 'NRP', 'REFUS', 'NR',\n",
+    "or any label that clearly means the respondent did not give a valid answer.\n",
+    examples_block,
+    "\nLabels to evaluate:\n",
+    labels_block,
+    "\n\nReply with ONLY the matching labels, one per line, copied EXACTLY as shown.\n",
+    "Do NOT add numbers, bullets, or any prefix. No explanations. No extra text."
+  )
+
+  resp <- ai_call_claude(prompt, model = model, api_key = api_key,
+                         max_tokens = max_tokens)
+  raw_text <- resp$content[[1]]$text
+
+  if (debug) {
+    message("\n--- ai_suggest_missing DEBUG: raw Haiku response ---")
+    message(raw_text)
+    message("--- end raw response ---\n")
+  }
+
+  # Parse response: one label per line, trim whitespace
+  returned_labels <- stringr::str_trim(stringr::str_split(raw_text, "\n")[[1]])
+  returned_labels <- returned_labels[nzchar(returned_labels)]
+
+  # Validate: keep only labels that actually appear in unique_labels (exact match)
+  # This prevents hallucinated values from entering the output
+  valid_labels <- returned_labels[returned_labels %in% unique_labels]
+  invalid      <- setdiff(returned_labels, unique_labels)
+  if (length(invalid) > 0) {
+    message("[!] ai_suggest_missing: ", length(invalid),
+            " returned label(s) not found in source labels (ignored — use debug = TRUE to inspect):\n  ",
+            paste(invalid, collapse = "\n  "))
+  }
+
+  if (length(valid_labels) == 0) {
+    message("ai_suggest_missing: No missing-value labels identified by AI.")
+    return(invisible(list(missing_chr = character(0), missing_num = numeric(0))))
+  }
+
+  # Extract numeric codes embedded in labels (e.g. "9-NSP" → 9, "99-Refus" → 99)
+  # Pattern: optional leading digits before a hyphen or space
+  num_codes <- purrr::map_dbl(valid_labels, function(lbl) {
+    m <- regmatches(lbl, regexpr("^([0-9]+)(?=[-. ]|$)", lbl, perl = TRUE))
+    if (length(m) == 1 && nzchar(m)) as.numeric(m) else NA_real_
+  })
+  missing_num_out <- sort(unique(num_codes[!is.na(num_codes)]))
+
+  # Print copy-pasteable output
+  message("\n", strrep("=", 60))
+  message("ai_suggest_missing: ", length(valid_labels), " missing label(s) found.")
+  message("Review, then paste into extract_survey_metadata().")
+  message(strrep("=", 60), "\n")
+
+  cat("missing_chr <- c(\n")
+  cat(paste0('  "', valid_labels, '"', collapse = ",\n"), "\n")
+  cat(")\n\n")
+
+  if (length(missing_num_out) > 0) {
+    cat("missing_num <- c(", paste(missing_num_out, collapse = ", "), ")\n\n")
+  } else {
+    cat("# missing_num: no numeric codes extracted from these labels\n\n")
+  }
+
+  message("# Then re-run:")
+  message("# meta <- extract_survey_metadata(df,")
+  message("#   missing_chr = missing_chr,")
+  if (length(missing_num_out) > 0) message("#   missing_num = missing_num)")
+  message(strrep("=", 60))
+
+  invisible(list(missing_chr = valid_labels, missing_num = missing_num_out))
+}
+
+
+# ============================================================
+# 11. ai_suggest_labels()
 # ============================================================
 
 #' Use Haiku to suggest concise French factor level labels
 #'
-#' Sends categorical variables to Claude and asks it to shorten labels to
+#' Sends factor variables to Claude and asks it to shorten labels to
 #' ≤ 25 characters while preserving numeric prefix and meaning.
-#' Ordinal variables (is_ordinal = TRUE): labels are shortened but NOT reordered.
+#' Ordinal variables (detected_role = "factor_ordinal"): labels are shortened but NOT reordered.
 #'
 #' Routes to synchronous (<= batch_threshold vars) or batch API (cheaper).
 #' Output MUST be reviewed before applying — especially ordinal variables.
@@ -1119,12 +1397,11 @@ ai_suggest_labels <- function(
     batch_threshold = 60
 ) {
   target <- metadata |>
-    dplyr::filter(detected_role %in% c("categorical", "categorical_nominal",
-                                        "categorical_ordinal", "binary_oui_non",
-                                        "binary_candidate"))
+    dplyr::filter(detected_role %in% c("factor_binary", "factor_nominal",
+                                        "factor_ordinal"))
   if (!is.null(vars)) target <- dplyr::filter(target, var_name %in% vars)
   if (nrow(target) == 0) {
-    message("ai_suggest_labels: No categorical variables to label.")
+    message("ai_suggest_labels: No factor variables to label.")
     return(metadata)
   }
 
@@ -1134,8 +1411,9 @@ ai_suggest_labels <- function(
 
   build_prompt <- function(chunk_df) {
     rows <- purrr::pmap_chr(chunk_df, function(var_name, var_label, labels,
-                                                is_ordinal, ...) {
-      ord_note <- if (isTRUE(is_ordinal)) " [ORDINAL: keep order, do not rearrange]" else ""
+                                                detected_role, ...) {
+      ord_note <- if (detected_role == "factor_ordinal")
+        " [ORDINAL: keep order, do not rearrange]" else ""
       labs_str <- paste0('"', labels, '"', collapse = ", ")
       sprintf('  list(var_name="%s", label="%s"%s, levels=c(%s))',
               var_name, substr(var_label, 1, 60), ord_note, labs_str)
