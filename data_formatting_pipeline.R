@@ -206,13 +206,12 @@ extract_survey_metadata <- function(
       raw_labels  <- as.character(sorted_vals)
     }
 
-    # --- flag candidate missing values (unified: numeric + char + label text) ---
+    # --- flag candidate missing values (unified: numeric code + label text) ---
     is_miss <- purrr::map2_lgl(raw_values, raw_labels, function(v, l) {
       v_num   <- suppressWarnings(as.numeric(v))
       num_hit <- !is.na(v_num) && v_num %in% missing_num
-      chr_hit <- as.character(v) %in% missing_chr
-      lbl_hit <- grepl(missing_lbl_pattern, l, perl = TRUE)
-      num_hit || chr_hit || lbl_hit
+      lbl_hit <- l %in% missing_chr || grepl(missing_lbl_pattern, l, perl = TRUE)
+      num_hit || lbl_hit
     })
     missing_vals_vec <- raw_values[is_miss]
 
@@ -243,10 +242,14 @@ extract_survey_metadata <- function(
       desc_auto
     }
 
+    # --- new_labels: copy of labels with missing candidates pre-marked as "NULL" ---
+    new_labels_init <- ifelse(is_miss, "NULL", raw_labels)
+
     # --- For double columns: suppress spurious float labels ---
     if (detected_role == "double") {
-      raw_values <- character(0)
-      raw_labels <- character(0)
+      raw_values      <- character(0)
+      raw_labels      <- character(0)
+      new_labels_init <- character(0)
     }
 
     # --- console output for factor_binary detection ---
@@ -278,7 +281,7 @@ extract_survey_metadata <- function(
       values        = list(raw_values),
       labels        = list(raw_labels),
       missing_vals  = list(missing_vals_vec),
-      new_labels    = list(raw_labels),
+      new_labels    = list(new_labels_init),
       new_name      = vname,
       doc_note      = var_lbl
     )
@@ -366,15 +369,19 @@ extract_survey_metadata <- function(
   lbl_lower    <- tolower(lbls_clean)
   # Remove numeric prefix (e.g. "1-") before keyword matching
   lbl_stripped <- stringr::str_remove(lbl_lower, "^[0-9]+-\\s*")
+  # Lowercase keywords so matching is case-insensitive
+  yes_kw_lc <- tolower(yes_kw)
 
-  yes_match <- purrr::map_lgl(yes_kw, ~ any(stringr::str_detect(lbl_stripped, stringr::fixed(.x))))
-  has_yes   <- any(yes_match)
+  yes_match <- purrr::map_lgl(yes_kw_lc,
+    ~ any(stringr::str_detect(lbl_stripped, stringr::fixed(.x))))
+  has_yes <- any(yes_match)
 
   if (!has_yes) return(NA)
 
-  # Which of the two labels is positive?
+  # Which of the two labels contains a positive keyword?
+  matched_kw <- yes_kw_lc[yes_match]
   yes_idx <- which(purrr::map_lgl(lbl_stripped,
-    ~ any(stringr::str_detect(.x, stringr::fixed(yes_kw[yes_match])))))
+    ~ any(stringr::str_detect(.x, stringr::fixed(matched_kw)))))
 
   if (length(yes_idx) == 1) return(yes_idx == 1L)  # TRUE if positive is first
 
