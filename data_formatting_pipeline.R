@@ -98,6 +98,56 @@ import_survey <- function(
 
 
 # ============================================================
+# 1b. .normalize_text() — shared text normalization
+# ============================================================
+
+# Normalize a character vector for consistent comparison and display:
+#   - Detect and convert to UTF-8 (via stringi if available, iconv fallback)
+#   - Non-breaking spaces (U+00A0, U+202F, U+2009) → regular space
+#   - Typographic apostrophes (', ‛, ʼ, ʻ) → straight apostrophe (')
+#   - Straight double quotes around words → French guillemets (« »)
+#     when .to_guillemets = TRUE (default FALSE for comparisons)
+#   - Trim leading/trailing whitespace, collapse internal runs of spaces
+#   - Keep French accents and all other Unicode letters intact
+#
+# Parameters:
+#   x              Character vector to normalize.
+#   to_guillemets  If TRUE, replace "text" with «text» (for display/labels).
+#                  Keep FALSE for comparisons (missing_chr matching, etc.).
+.normalize_text <- function(x, to_guillemets = FALSE) {
+  if (!is.character(x) || length(x) == 0) return(x)
+
+  # 1. Ensure UTF-8 — use stringi when available, fall back to iconv
+  if (requireNamespace("stringi", quietly = TRUE)) {
+    x <- stringi::stri_enc_toutf8(x, is_unknown_8bit = TRUE, validate = TRUE)
+  } else {
+    enc <- Encoding(x)
+    needs_conv <- enc %in% c("latin1", "unknown") & !is.na(x)
+    if (any(needs_conv)) {
+      x[needs_conv] <- iconv(x[needs_conv], from = "latin1", to = "UTF-8",
+                             sub = "\uFFFD")
+    }
+  }
+
+  # 2. Non-breaking and narrow spaces → regular space
+  x <- gsub("\u00a0|\u202f|\u2009|\u2007", " ", x, useBytes = FALSE)
+
+  # 3. Typographic apostrophes → straight apostrophe
+  x <- gsub("[\u2019\u2018\u201b\u02bc\u02bb]", "'", x, useBytes = FALSE)
+
+  # 4. Straight double quotes "text" → «\u00a0text\u00a0» (display only)
+  if (to_guillemets) {
+    x <- gsub('"([^"]+)"', "\u00ab\\1\u00bb", x, useBytes = FALSE)
+  }
+
+  # 5. Trim and collapse internal whitespace runs
+  x <- gsub("\\s+", " ", stringr::str_trim(x))
+
+  x
+}
+
+
+# ============================================================
 # 2. extract_survey_metadata()
 # ============================================================
 
@@ -158,8 +208,10 @@ extract_survey_metadata <- function(
                    "absent", "inactif", "non sélectionné",
                    "pas ", "n'a pas", "ne dispose", "ne perçoit")
 
-  yes_kw <- if (!is.null(yes_labels)) yes_labels else default_yes
-  no_kw  <- if (!is.null(no_labels))  no_labels  else default_no
+  # Normalize all user-supplied text inputs once at function entry
+  missing_chr <- .normalize_text(missing_chr)
+  yes_kw <- .normalize_text(if (!is.null(yes_labels)) yes_labels else default_yes)
+  no_kw  <- .normalize_text(if (!is.null(no_labels))  no_labels  else default_no)
 
   var_labels_list <- labelled::get_variable_labels(df)
   n_rows          <- nrow(df)
@@ -178,6 +230,7 @@ extract_survey_metadata <- function(
     # --- variable label ---
     var_lbl <- var_labels_list[[vname]]
     if (is.null(var_lbl) || is.na(var_lbl)) var_lbl <- ""
+    var_lbl <- .normalize_text(var_lbl)
 
     # --- R class: strip haven_labelled/vctrs_vctr to get underlying type ---
     all_classes <- class(col)
@@ -196,14 +249,14 @@ extract_survey_metadata <- function(
     # --- values and labels vectors (ALL, including missing candidates) ---
     if (has_val_labs) {
       raw_values <- unname(val_labs)
-      raw_labels <- names(val_labs)
+      raw_labels <- .normalize_text(names(val_labs))
     } else if (is.factor(col)) {
       raw_values <- levels(col)
-      raw_labels <- levels(col)
+      raw_labels <- .normalize_text(levels(col))
     } else {
       sorted_vals <- sort(vals_present)
       raw_values  <- as.character(sorted_vals)
-      raw_labels  <- as.character(sorted_vals)
+      raw_labels  <- .normalize_text(as.character(sorted_vals))
     }
 
     # --- flag candidate missing values (unified: numeric code + label text) ---
@@ -363,27 +416,40 @@ extract_survey_metadata <- function(
 
 # Internal: determine desc for a 2-level binary variable
 # Returns TRUE (positive is first), FALSE (positive is second), or NA (no keyword match)
+# Returns TRUE (positive is first), FALSE (positive is second), or NA
 .find_binary_desc <- function(lbls_clean, yes_kw, no_kw) {
   if (length(lbls_clean) != 2) return(NA)
 
-  lbl_lower    <- tolower(lbls_clean)
-  # Remove numeric prefix (e.g. "1-") before keyword matching
+  lbl_lower    <- tolower(.normalize_text(lbls_clean))
+  # Remove numeric prefix (e.g. "1-Oui" → "oui")
   lbl_stripped <- stringr::str_remove(lbl_lower, "^[0-9]+-\\s*")
-  # Lowercase keywords so matching is case-insensitive
-  yes_kw_lc <- tolower(yes_kw)
 
-  yes_match <- purrr::map_lgl(yes_kw_lc,
-    ~ any(stringr::str_detect(lbl_stripped, stringr::fixed(.x))))
-  has_yes <- any(yes_match)
+  # Normalize and lowercase keywords
+  yes_kw_lc <- tolower(.normalize_text(yes_kw))
+  no_kw_lc  <- tolower(.normalize_text(no_kw))
 
-  if (!has_yes) return(NA)
+  # For each label, check if it matches any yes or no keyword.
+  # Use EXACT equality first (most reliable), then whole-word regex fallback.
+  # This prevents "choisi" matching "non choisi" via substring.
+  lbl_matches_kw <- function(lbl, kws) {
+    if (lbl %in% kws) return(TRUE)  # exact match
+    any(purrr::map_lgl(kws, function(kw) {
+      # Escape regex metacharacters, then wrap in word/start-end anchors
+      pat <- paste0("(^|\\s)", stringr::str_replace_all(
+        kw, "([.+*?^${}()|\\[\\]\\\\])", "\\\\\\1"), "($|\\s)")
+      grepl(pat, lbl, perl = TRUE, ignore.case = FALSE)
+    }))
+  }
 
-  # Which of the two labels contains a positive keyword?
-  matched_kw <- yes_kw_lc[yes_match]
-  yes_idx <- which(purrr::map_lgl(lbl_stripped,
-    ~ any(stringr::str_detect(.x, stringr::fixed(matched_kw)))))
+  is_yes <- purrr::map_lgl(lbl_stripped, lbl_matches_kw, kws = yes_kw_lc)
+  is_no  <- purrr::map_lgl(lbl_stripped, lbl_matches_kw, kws = no_kw_lc)
 
-  if (length(yes_idx) == 1) return(yes_idx == 1L)  # TRUE if positive is first
+  # Need exactly one yes match and it must not also match no
+  yes_only <- is_yes & !is_no
+  if (sum(yes_only) == 1) return(which(yes_only) == 1L)
+
+  # Fallback: if one matches yes and neither both-match yes, use yes_idx
+  if (sum(is_yes) == 1) return(which(is_yes) == 1L)
 
   NA
 }
@@ -416,7 +482,8 @@ metadata_apply_codebook <- function(
       dplyr::select(var_name = !!rlang::sym(var_col),
                     new_var_label = !!rlang::sym(label_col)) |>
       dplyr::distinct() |>
-      dplyr::filter(!is.na(new_var_label))
+      dplyr::filter(!is.na(new_var_label)) |>
+      dplyr::mutate(new_var_label = .normalize_text(new_var_label))
 
     metadata <- metadata |>
       dplyr::left_join(var_lbl_map, by = "var_name") |>
@@ -435,6 +502,7 @@ metadata_apply_codebook <- function(
         lbl      = !!rlang::sym(value_label_col)
       ) |>
       dplyr::filter(!is.na(code), !is.na(lbl)) |>
+      dplyr::mutate(lbl = .normalize_text(lbl)) |>
       dplyr::group_by(var_name) |>
       dplyr::summarise(
         cb_values = list(as.character(code)),
@@ -1277,8 +1345,8 @@ ai_suggest_missing <- function(
     tail(lbls, max_vals)
   })
 
-  # Flatten, deduplicate, drop blanks
-  unique_labels <- unique(unlist(all_labels, use.names = FALSE))
+  # Flatten, normalize, deduplicate, drop blanks
+  unique_labels <- unique(.normalize_text(unlist(all_labels, use.names = FALSE)))
   unique_labels <- unique_labels[nzchar(unique_labels)]
 
   if (length(unique_labels) == 0) {
@@ -1291,8 +1359,9 @@ ai_suggest_missing <- function(
 
   # Build prompt — send labels WITHOUT numbers so Haiku cannot echo them back
   examples_block <- if (!is.null(examples) && length(examples) > 0) {
+    ex_norm <- .normalize_text(examples)
     paste0("\nFor reference, labels like these are typically missing in similar surveys:\n",
-           paste(paste0("  ", examples), collapse = "\n"), "\n")
+           paste(paste0("  ", ex_norm), collapse = "\n"), "\n")
   } else ""
 
   labels_block <- paste(paste0("  ", unique_labels), collapse = "\n")
@@ -1319,12 +1388,13 @@ ai_suggest_missing <- function(
     message("--- end raw response ---\n")
   }
 
-  # Parse response: one label per line, trim whitespace
-  returned_labels <- stringr::str_trim(stringr::str_split(raw_text, "\n")[[1]])
+  # Parse response: one label per line, normalize, trim whitespace
+  returned_labels <- .normalize_text(
+    stringr::str_trim(stringr::str_split(raw_text, "\n")[[1]]))
   returned_labels <- returned_labels[nzchar(returned_labels)]
 
   # Validate: keep only labels that actually appear in unique_labels (exact match)
-  # This prevents hallucinated values from entering the output
+  # Both sides are normalized so encoding differences don't cause false misses
   valid_labels <- returned_labels[returned_labels %in% unique_labels]
   invalid      <- setdiff(returned_labels, unique_labels)
   if (length(invalid) > 0) {
