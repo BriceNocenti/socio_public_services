@@ -598,16 +598,99 @@ acm_orga_1_cah_output <-
     ggplot2::aes(label = lvs, color = color_group), #fill = rgb(1, 1, 1, alpha = 0),
     # direction = "y", force = 0.5, force_pull = 1, point.padding = 0, point.size = NA,
     # arrow = ggplot2::arrow(length = ggplot2::unit(0.25, "lines")),
-    fontface = "bold", size = 3, na.rm = TRUE
+    fontface = "plain", size = 3, na.rm = TRUE
   )
 
 acm_orga_1_cah_output
 
+# # passer text_size à 3.5
 # ggsave2(acm_orga_1_cah_output, dir = "2024_OrgaTravailAdminPub",
 #  name = "1-ACM orga cah color", 
 #  width = 17, height = 17 / heigth_width_ratio, replace = TRUE, open = TRUE)
 
 ```
+
+```{r graph1, include = FALSE, echo=FALSE}
+# Version noir et blanc article
+acm_orga_1_cah <- res.mca |> 
+  ggmca(ct[salariat05, ],
+        sup_vars = c("cah_ORGA", "PPP1", "EMP4", "ANNEE",
+                     "OBJtous", "RWNORMH", "RWCOLEG"), 
+        actives_in_bold = TRUE, sup_in_italic = TRUE,
+        cah = "cah_ORGA", cah_color_groups = "^.{0}", 
+        scale_color_light = c("black", rep("grey30", 6)),
+        # profiles = TRUE, max_profiles = 5000, size_scale_max = 6, 
+        text_size = 3.5, text_repel = TRUE,
+        xlim = c(-0.93, 1.2), ylim = c(-0.8, 1.1), out_lims_move = TRUE,
+        get_data = TRUE
+  )
+
+acm_orga_1_cah_cah <- acm_orga_1_cah$vars_data |> 
+  filter(str_detect(color_group, "^cah_ORGA"))
+acm_orga_1_cah_vars <- new_tab(acm_orga_1_cah$vars_data) |>
+  filter(vars != "cah_ORGA") |>
+  mutate(face = if_else(color_group != "active_vars", "italic", "bold") )
+
+cah_name_with_pct <- acm_orga_1_cah_cah |>
+  select(lvs, wcount) |>
+  mutate(pct = round(wcount/sum(wcount)*100), 0) |>
+  mutate(recode_vect = set_names(as.character(lvs), paste0(lvs, " (", pct, "%)"))) |>
+  pull(recode_vect)
+acm_orga_1_cah_cah <- acm_orga_1_cah_cah |>
+  mutate(lvs = fct_recode(lvs, !!!cah_name_with_pct))
+
+heigth_width_ratio <- (0.93 + 1.2) / (0.8 + 1.1)
+
+
+
+acm_orga_1_cah_output <-
+  ggplot(acm_orga_1_cah_vars, aes(x = `Dim 1`, y = `Dim 2`)) +
+  acm_orga_1_cah$graph_theme_acm +
+  # geom_point(
+  #   data = acm_orga_1_cah$profiles_coord, 
+  #   ggplot2::aes(size = wcount, color = color_group),
+  #   na.rm = TRUE, show.legend = FALSE, stroke = 0, alpha = 0.5
+  # ) +
+  geom_point(
+    data = acm_orga_1_cah$mean_point_data,
+    color = "black", fill = "#eeeeee", shape = 3, size = 5, stroke = 1.5, na.rm = TRUE
+  ) +
+  ggrepel::geom_text_repel(
+    ggplot2::aes(label = lvs, fontface = face),
+    size = 3.5, na.rm = TRUE, direction = "both",  min.segment.length = 0.01,
+    force = 0.5, force_pull = 1, point.padding = 0, box.padding = 0, 
+    point.size = NA, arrow = ggplot2::arrow(length = ggplot2::unit(0.25, "lines"))
+  ) +
+  geom_segment(
+    data = acm_orga_1_cah_cah |>
+      mutate(`Dim 1` = pmin(1.3, pmax(`Dim 1`, -1.03)),
+             `Dim 2` = pmin(1.3, pmax(`Dim 2`, -0.85)),
+             start1  = pmin(0.95, pmax(`Dim 1`, -0.65)),
+             start2  = pmin(1.25, pmax(`Dim 2`, -0.775)),
+      ),
+    ggplot2::aes(x = start1, xend = `Dim 1`, y = start2, yend = `Dim 2`,  
+                 color = color_group),
+    arrow = ggplot2::arrow(length = ggplot2::unit(0.3, "lines")), na.rm = TRUE
+  ) +
+  geom_label(
+    data = acm_orga_1_cah_cah |>
+      mutate(`Dim 1` = pmin(0.95, pmax(`Dim 1`, -0.65)),
+             `Dim 2` = pmin(1.25, pmax(`Dim 2`, -0.775)),
+      ),
+    ggplot2::aes(label = lvs, color = color_group), #fill = rgb(1, 1, 1, alpha = 0),
+    # direction = "y", force = 0.5, force_pull = 1, point.padding = 0, point.size = NA,
+    # arrow = ggplot2::arrow(length = ggplot2::unit(0.25, "lines")),
+    fontface = "plain", size = 3.5, na.rm = TRUE
+  )
+
+acm_orga_1_cah_output
+
+# ggsave2(acm_orga_1_cah_output, dir = "2024_OrgaTravailAdminPub",
+#  name = "1-ACM orga cah",
+#  width = 17, height = 17 / heigth_width_ratio, replace = TRUE, open = TRUE)
+
+```
+
 
 ``` {r, echo = FALSE, include = FALSE}
 # # Code précédent

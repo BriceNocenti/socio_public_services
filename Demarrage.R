@@ -14,10 +14,12 @@
 #   "knitr", "rmarkdown", "kableExtra", "devtools", "ragg",
 #   "tabxplor", "FactoMineR", "ggfacto", "openxlsx",
 #   "tidymodels", "nnet", "mice", #, "srvyr",
-#   "TraMineR", "TraMineRextras", "WeightedCluster", "seqhandbook",
-#   "ggiraph", "ggpattern", "ggnewscale", "widgetframe", # "oce",
+#   "TraMineR", "TraMineRextras", "WeightedCluster", "seqhandbook", "fuzzyjoin",
+#   "ggiraph", "ggpattern", "ggnewscale", "widgetframe", "oce",
 #   "DescTools",  "dineq", "gtsummary", # "finalfit",
-#   "fastcluster", "Rfast", "arrow", "duckdb", "tictoc"
+#   "fastcluster", "Rfast", "arrow", "duckdb", "tictoc", # "partykit",
+#   "ellmer", "labelled", "qpdf", "rhub", "bookdown", "vroom", "plotly", "finalfit", "ape", 
+#   "dodgr", "geodist", "geomtextpath"
 # ))
 # # # # To try in case it's impossible to install any package (first turn off firewall)
 # # # getOption("repos") ; getOption("download.file.method") ; renv:::renv_download_method()
@@ -25,6 +27,8 @@
 # # # options(RENV_DOWNLOAD_OVERRIDE = utils::download.file) # options(renv.download.override = utils::download.file)
 # # # Sys.setenv(R_LIBCURL_SSL_REVOKE_BEST_EFFORT=TRUE)
 # # # # options(RENV_CURL_EXECUTABLE = "C:\\Windows\\SYSTEM32\\curl.exe")
+
+
 
 # renv::intall("BriceNocenti/pcspp") # github packages
 
@@ -114,6 +118,8 @@ suppressMessages({
   #library(questionr)
   #library(viridis)
 })
+
+# data.table::setDTthreads(percent = 50, verbose = FALSE) # threads = 8, 
 
 
 
@@ -391,10 +397,11 @@ summarise_factor_nest <- function(data, group, var) {
 
 
 
-# tabs <- gradesHC_ppp1
-# rename_field <- 14
-# str_pad <- TRUE
-# comment_var = "comment"
+# tabs <- cut_numeric_vars_params 
+# rename_field <- 0
+# digits = 0
+# show = rlang::is_interactive()
+# comment_var = character()
 tbl_to_tribble_code <- function(tabs, rename_field = 0, digits = 0, 
                                 show = rlang::is_interactive(), 
                                 comment_var = character()
@@ -405,6 +412,7 @@ tbl_to_tribble_code <- function(tabs, rename_field = 0, digits = 0,
                   ~ format(paste0("\"", ., "\"")) 
     )) |>
     mutate(across(where(is.numeric), ~ format(round(., digits)))) |>
+    mutate(across(where(is.logical), ~ format(.))) |>
     mutate(across(where(is_fmt), 
                   ~ format(round(get_num(.),  #* if_else(tabxplor:::get_display(.) == "pct", 100, 1)
                                  get_digits(.) + if_else(tabxplor:::get_display(.) == "pct", 2, 0)))
@@ -434,7 +442,9 @@ tbl_to_tribble_code <- function(tabs, rename_field = 0, digits = 0,
   
   path <- tempfile("cat", fileext = ".R")
   writeLines(out, path, useBytes = TRUE)
-  if (show) file.show(path)
+  if (show) rstudioapi::navigateToFile(path) # file.show(path)
+  
+  
 }
 
 
@@ -931,43 +941,44 @@ tab_dt_to_tab <- function(data, n_var, group, comp = "tab", totrow_condition,
 
 # Utils functions ----
 
-# Function to calculate a score with the first levels of many variables
-# Ajout par rapport au départ : NA = +0, on ne compte pas la première modalité
-score_from_lv1 <- function (data, name, vars_list) {
-  name <- rlang::ensym(name)
-  data <- data |> mutate(!!sym(name) := 0L)
-  
-  reduce(
-    vars_list, 
-    .init = mutate(data, across(all_of(vars_list), ~ fct_explicit_na(., "NA"))), 
-    
-    .f = ~ mutate(.x, !!name := if_else(
-      condition = !!sym(.y) == levels(as.factor(!!sym(.y)))[1],
-      true  = !!name + 1L, 
-      false = !!name
-    )
-    )
-  ) 
-}
-
-png600_save <- function(plot = last_plot(), filename, device = "png",
-                        width = 17, height = 13.5, scale = 1.5, ...) {
-  ggsave(plot = plot, filename = paste0(filename, ".png"), 
-         path = "Plots", device = device, dpi = 600, units = "cm", 
-         width  = width, height = height, scale = scale, ...
-  )
-  invisible(plot)
-}
-
-samp <- function(df, n = 100) {
-  df |> slice_sample(n = n) |> print(n = n)
-  message(paste0("sampling ", n, "rows over ", nrow(df)))
-  invisible(df)
-}
-
-cd <- function(pattern, data = nomenc_CORPS_GRADE_EF_final) {
-  levels(data$CORPS)[str_detect(levels(data$CORPS), pattern)]
-}
+# # Function to calculate a score with the first levels of many variables
+# # (Déjà dans tabxplor utils)
+# # Ajout par rapport au départ : NA = +0, on ne compte que la première modalité
+# score_from_lv1 <- function (data, name, vars_list) {
+#   name <- rlang::ensym(name)
+#   data <- data |> mutate(!!sym(name) := 0L)
+#   
+#   reduce(
+#     vars_list, 
+#     .init = mutate(data, across(all_of(vars_list), ~ fct_explicit_na(., "NA"))), 
+#     
+#     .f = ~ mutate(.x, !!name := if_else(
+#       condition = !!sym(.y) == levels(as.factor(!!sym(.y)))[1],
+#       true  = !!name + 1L, 
+#       false = !!name
+#     )
+#     )
+#   ) 
+# }
+# 
+# png600_save <- function(plot = last_plot(), filename, device = "png",
+#                         width = 17, height = 13.5, scale = 1.5, ...) {
+#   ggsave(plot = plot, filename = paste0(filename, ".png"), 
+#          path = "Plots", device = device, dpi = 600, units = "cm", 
+#          width  = width, height = height, scale = scale, ...
+#   )
+#   invisible(plot)
+# }
+# 
+# samp <- function(df, n = 100) {
+#   df |> slice_sample(n = n) |> print(n = n)
+#   message(paste0("sampling ", n, "rows over ", nrow(df)))
+#   invisible(df)
+# }
+# 
+# cd <- function(pattern, data = nomenc_CORPS_GRADE_EF_final) {
+#   levels(data$CORPS)[str_detect(levels(data$CORPS), pattern)]
+# }
 
 
 
@@ -1210,6 +1221,2988 @@ break_uniform_integer <- function(range) {
 }
 
 
+# COD_VAR  <- "COD_VAR"
+# LIB_VAR  <- "LIB_VAR"
+# COD_MOD  <- "COD_MOD"
+# LIB_MOD  <- "LIB_MOD"
+# TYPE_VAR <- "TYPE_VAR"
+mf_from_varmod <- function(data, varmod, COD_VAR, LIB_VAR, COD_MOD, LIB_MOD, TYPE_VAR) {
+  vars <- varmod |> dplyr::pull(!!rlang::sym(COD_VAR)) |> unique()
+  
+  mod_list <- varmod |> 
+    dplyr::select(!!rlang::sym(COD_VAR), !!rlang::sym(COD_MOD), !!rlang::sym(LIB_MOD)) |>
+    dplyr::mutate(recode_vect = purrr::set_names(
+      !!rlang::sym(COD_MOD), 
+      paste0(!!rlang::sym(COD_MOD), "-", !!rlang::sym(LIB_MOD))
+    )) |> 
+    dplyr::group_by(COD_VAR) |> 
+    dplyr::group_split() %>%
+    purrr::set_names(purrr::map(., ~ as.character(dplyr::first(dplyr::pull(., !!rlang::sym(COD_VAR)))))) |>
+    purrr::map(~ pull(., "recode_vect"))
+  
+  if (!missing(TYPE_VAR)) {
+    typevars <- varmod |>
+      dplyr::select(!!rlang::sym(COD_VAR), !!rlang::sym(TYPE_VAR)) |>
+      dplyr::distinct() |> 
+      dplyr::mutate(typevars = purrr::set_names(TYPE_VAR, COD_VAR)) |> 
+      dplyr::pull(typevars)
+    
+    mod_list <- mod_list[typevars == "CHAR"]
+    # names(mod_list)[typevars != "CHAR"]
+  }
+  
+  data <- 
+    reduce2(
+      mod_list, names(mod_list), .init = data, 
+      .f = ~ dplyr::mutate(..1, !!rlang::sym(..3) := forcats::fct_recode(
+        as.factor(!!rlang::sym(..3)), 
+        !!!..2
+      ))
+    )
+  
+  if (!missing(LIB_VAR)) {
+    libvars <- varmod |>
+      dplyr::select(!!rlang::sym(COD_VAR), !!rlang::sym(LIB_VAR)) |>
+      dplyr::distinct() |> 
+      dplyr::mutate(libvars = purrr::set_names(LIB_VAR, COD_VAR)) |> 
+      dplyr::pull(libvars)
+    
+    data <- data |> labelled::set_variable_labels(.labels = libvars)
+    
+    
+  }
+  
+  return(data)
+}
+
+
+
+justify_grob <- function(grob, hjust = "left", vjust = "top", pad = 5){
+  w <- sum(grob$widths)
+  h <- sum(grob$heights)
+  xy <- list(x = switch(hjust,
+                        center = 0.5 + grid::unit(pad, "points"),
+                        left = 0.5*w + grid::unit(pad, "points"),
+                        right = grid::unit(1,"npc") - 0.5*w - grid::unit(pad, "points")),
+             y = switch(vjust,
+                        center = 0.5 + grid::unit(pad, "points"),
+                        bottom = 0.5*h + grid::unit(pad, "points"),
+                        top = grid::unit(1,"npc") - 0.5*h - grid::unit(pad, "points") ) )
+  if (is.null(grob$vp)) {
+    grob$vp <- grid::viewport(x = xy[[1]], y = xy[[2]] )
+  } else {
+    grob$vp$x <- xy[[1]]
+    grob$vp$y <- xy[[2]]
+  }
+  
+  return(grob)
+}
+
+
+
+
+
+
+ 
+#' Recode first level with var_label text
+#'
+#' @param x A factor with var_label attribute
+#' @param brackets Logical. If TRUE, extract text within [...] from label if present,
+#'   otherwise use whole label. If FALSE (default), always use whole label.
+#' @param remove_parenthesis Logical. If TRUE (default), remove all text in parenthesis
+#'   from the final text added to first level. If FALSE, keep it.
+#' @param simplify_text Logical. If TRUE (default), remove prepositions (English and French,
+#'   case-insensitive) and capitalize first letter. If FALSE, keep text as-is.
+#'
+#' @return A factor with first level recoded, or original x if no label
+#' @keywords internal
+var_label_to_first_level <- function(
+    x,
+    brackets = FALSE,
+    remove_parenthesis = TRUE,
+    simplify_text = TRUE) {
+  # Check if variable has a label attribute
+  label <- labelled::var_label(x)
+  if (is.null(label)) {
+    return(x)
+  }
+  
+  lv1 <- dplyr::first(levels(x))
+  
+  # Extract label text based on brackets argument
+  if (brackets) {
+    bracket_text <- stringr::str_extract(label, "\\[[^\\[]+\\]") |>
+      stringr::str_remove_all("\\[|\\]")
+    
+    label_text <- if (is.na(bracket_text)) label else bracket_text
+  } else {
+    label_text <- label
+  }
+  
+  # Remove parenthesis if requested
+  if (remove_parenthesis) {
+    label_text <- stringr::str_remove_all(label_text, "\\([^)]*\\)")
+  }
+  
+  # Simplify text by removing prepositions and capitalize
+  if (simplify_text) {
+    # French and English prepositions to remove (case-insensitive)
+    prepositions <- c(
+      # French
+      "\\b(le|la|les|de|des|du|d|un|une|des|à|au|aux|et|ou|en|par|pour|avec|sans|sous|sur|entre|dans|pendant|avant|après|depuis|jusqu|vers|chez)\\b",
+      # English
+      "\\b(the|a|an|of|and|or|to|in|on|at|by|for|with|from|as|is|are|be|been|about|above|across|after|against|all|am|among|around|as|at|be|because|before|being|below|between|both|but|by|can|could|did|do|does|doing|down|during|each|few|for|from|further|had|has|have|having|he|her|here|hers|herself|him|himself|his|how|i|if|in|into|is|it|its|itself|just|me|might|more|most|must|my|myself|no|nor|not|of|off|on|once|only|or|other|our|ours|ourselves|out|over|own|same|she|should|so|some|such|than|that|the|their|theirs|them|themselves|then|there|these|they|this|those|through|to|too|under|until|up|very|was|we|were|what|when|where|which|while|who|whom|why|with|would|you|your|yours|yourself|yourselves)\\b"
+    )
+    
+    label_text <- stringr::str_trim(label_text)
+    
+    for (prep in prepositions) {
+      label_text <- stringr::str_replace_all(
+        label_text,
+        stringr::regex(prep, ignore_case = TRUE),
+        ""
+      )
+    }
+    
+    # Clean up multiple spaces
+    label_text <- stringr::str_trim(label_text)
+    label_text <- stringr::str_replace_all(label_text, "\\s+", " ")
+    
+    # Capitalize first letter only
+    label_text <- stringr::str_to_sentence(label_text)
+  }
+  
+  # Check if first level has numero pattern (digit(s) followed by -)
+  if (stringr::str_detect(lv1, "^([0-9]+)-")) {
+    # Extract numero and rest
+    numero <- stringr::str_extract(lv1, "^([0-9]+)")
+    rest <- stringr::str_remove(lv1, "^[0-9]+-")
+    
+    recode_lv1 <- paste0(numero, "-", label_text, ": ", rest)
+  } else {
+    # No numero, add label at beginning
+    recode_lv1 <- paste0(label_text, ": ", lv1)
+  }
+  
+  forcats::fct_relabel(
+    x,
+    function(.lv) stringr::str_replace(
+      .lv,
+      paste0("^", stringr::str_escape(lv1), "$"),
+      recode_lv1
+    )
+  ) |> 
+    labelled::`var_label<-`(label)
+}
+
+
+# Cut numeric vars ----
+
+#' Test Numeric-Categorical Association
+#'
+#' @description
+#' Tests the association between numeric and categorical variables using ANOVA
+#' and calculates eta (correlation ratio) to measure effect size.
+#'
+#' @param data A data frame or tibble
+#' @param num_vars Character vector of numeric variable names to test
+#' @param target_vars Character vector of categorical variable names to test against
+#'
+#' @return A formatted tibble showing numeric variables (rows), categorical targets
+#'   (groups), eta correlation, F-statistic, and p-value for association
+#'
+#' @details
+#' Tests all combinations of num_vars × target_vars using one-way ANOVA.
+#' Results are sorted by association strength (eta), with significant
+#' associations first.
+#'
+#' @keywords internal
+
+test_numeric_categorical_association <- function(
+    data,
+    num_vars,
+    target_vars #, method = "robust"
+) {
+  
+  # Expand all combinations
+  combos <- tidyr::expand_grid(
+    numeric_var = num_vars,
+    target_var = target_vars
+  )
+  
+  results <- purrr::pmap_df(
+    combos,
+    function(numeric_var, target_var) {
+      
+      # Extract clean data
+      test_data <- data |>
+        dplyr::select(
+          num = !!rlang::sym(numeric_var),
+          cat = !!rlang::sym(target_var)
+        ) |>
+        dplyr::filter(!is.na(num), !is.na(cat))
+      
+      if (nrow(test_data) < 2) {
+        return(tibble::tibble(
+          numeric_var = numeric_var,
+          target_var = target_var,
+          eta = NA_real_,
+          f_stat = NA_real_,
+          p_value = NA_real_,
+          significant = NA,
+          method = method
+        ))
+      }
+      
+      # ANOVA
+      fit <- stats::aov(num ~ cat, data = test_data)
+      summary_fit <- summary(fit)[[1]]
+      
+      f_stat <- summary_fit[1, "F value"]
+      p_value <- summary_fit[1, "Pr(>F)"]
+      
+      # Calculate eta (correlation ratio)
+      grand_mean <- mean(test_data$num, na.rm = TRUE)
+      ss_between <- test_data |>
+        dplyr::group_by(cat) |>
+        dplyr::summarise(
+          n = dplyr::n(),
+          mean = mean(num, na.rm = TRUE),
+          .groups = "drop"
+        ) |>
+        dplyr::mutate(ss = n * (mean - grand_mean)^2) |>
+        dplyr::pull(ss) |>
+        sum()
+      
+      ss_total <- sum((test_data$num - grand_mean)^2, na.rm = TRUE)
+      eta <- sqrt(ss_between / ss_total)
+      
+      # Determine significance (alpha = 0.05)
+      significant <- p_value < 0.05
+      
+      tibble::tibble(
+        numeric_var = numeric_var,
+        target_var = target_var,
+        eta = eta,
+        f_stat = f_stat,
+        p_value = p_value,
+        significant = significant
+      )
+    }
+  )
+  
+  results |>
+    dplyr::mutate(
+      numeric_var = forcats::as_factor(numeric_var),
+      target_var = forcats::as_factor(target_var),
+      eta = tabxplor::fmt(
+        n = rep(NA_integer_, length(eta)),
+        type = "row",
+        pct = eta,
+        digits = 1
+      ),
+      f_stat = round(f_stat, 1),
+      p_value = tabxplor::fmt(
+        n = rep(NA_integer_, length(eta)),
+        type = "row",
+        pct = p_value,
+        digits = 1
+      )
+    ) |>
+    dplyr::rename(num_vars = numeric_var) |>
+    dplyr::rename(target_vars = target_var) |>
+    dplyr::arrange(num_vars, !significant, dplyr::desc(eta)) |>
+    tabxplor::new_tab() |>
+    dplyr::group_by(num_vars)
+}
+
+
+#' Adaptive Binning of Numeric Variables
+#'
+#' @description
+#' Cuts numeric variables into meaningful categorical bins using various
+#' discretization methods. Generates French-formatted categorical labels
+#' with adaptive bin merging to ensure minimum bin size. Uses [a,b) intervals
+#' (left-inclusive, right-exclusive) for consistent cutpoint semantics.
+#'
+#' @param data A data frame containing the variable to discretize
+#' @param num_var Character string with the name of the numeric variable
+#' @param method Character string specifying the discretization method.
+#'   Options: "jenks" (Jenks natural breaks), "chiM", "caim", "cacc", "ameva",
+#'   "mdlp", "modChi2" (chi-square family), "manual" (user-provided cutpoints).
+#'   Default: "jenks"
+#' @param n_bins Numeric. Target number of bins. Default: 3
+#' @param min_n Numeric. Minimum number of observations per bin. Default: 30
+#' @param sep_zero Logical. If TRUE and sufficient zero-valued observations
+#'   exist, zero is placed in its own bin. Default: TRUE
+#' @param target_var Character string. For supervised methods (chi-square family),
+#'   name of the categorical target variable. Required for supervised methods.
+#' @param cutpoints Numeric vector. For method="manual", the cutpoints
+#'   (boundaries between bins). Not used for other methods.
+#' @param alpha Numeric. Significance level for supervised methods. Default: 0.05
+#' @param rev_levels Logical. If TRUE, reverse the order of factor levels
+#'   numerically (levels always numbered starting from 1, except when first
+#'   level contains only 0, then it starts from 0). Default: FALSE
+#' @param jenks_extra_bins Numeric. Controls aggressiveness of Jenks initial
+#'   binning. Jenks will try to create n_bins + jenks_extra_bins initial bins,
+#'   then Phase 2 merge reduces to target. Higher values = more aggressive
+#'   exploration of density structure. Default: 3
+#'
+#' @return A list containing:
+#'   \item{breaks}{Numeric vector of break points}
+#'   \item{cutpoints}{Numeric vector of cutpoints between bins}
+#'   \item{n_bins}{Integer count of resulting bins}
+#'   \item{labels}{Character vector of French-formatted labels}
+#'   \item{zero_separated}{Logical. TRUE if zero was separated}
+#'   \item{breaks_explicit}{Tibble with min_val, max_val, n, label}
+#'   \item{rev_levels}{Logical. Indicates if levels were reversed}
+#'
+#' @keywords internal
+
+cut_adaptive <- function(
+    data,
+    num_var,
+    method = "jenks",
+    n_bins = 3, jenks_extra_bins = 3, 
+    min_n = 30,
+    sep_zero = TRUE,
+    target_var = NULL,
+    cutpoints = NULL,
+    alpha = 0.05,
+    rev_levels = FALSE) {
+  
+  # Validate method
+  valid_methods <- c("jenks", "chiM", "caim", "cacc", "ameva", "mdlp", "modChi2", "manual")
+  if (!method %in% valid_methods) {
+    stop("Invalid method. Use: ", paste(valid_methods, collapse = ", "))
+  }
+  
+  var_sym <- rlang::sym(num_var)
+  
+  # Extract clean sorted numeric values
+  x <- data |>
+    dplyr::pull(!!var_sym) |>
+    na.omit() |>
+    sort()
+  
+  n_zero <- sum(x == 0)
+  
+  # Initialize zero bin handling (shared across all methods)
+  zero_bin <- FALSE
+  if (sep_zero && n_zero >= min_n) {
+    zero_bin <- TRUE
+  }
+  
+  # ── Generate breaks by method ──
+  
+  if (method == "jenks") {
+    # Unsupervised: Jenks natural breaks
+    breaks <- .get_jenks_breaks(x, n_bins, sep_zero, zero_bin, jenks_extra_bins = jenks_extra_bins)
+    
+  } else if (method == "manual") {
+    # Manual: use provided cut_points
+    if (is.null(cutpoints)) {
+      stop("method='manual' requires cutpoints argument")
+    }
+    breaks <- .get_manual_breaks(cutpoints, zero_bin)
+    
+  } else {
+    # Supervised: chi-square based methods
+    if (is.null(target_var)) {
+      stop("method='", method, "' requires target_var argument")
+    }
+    target_sym <- rlang::sym(target_var)
+    
+    # Prepare target variable data
+    chi_data <- data |>
+      dplyr::select(!!var_sym, !!target_sym) |>
+      dplyr::filter(!is.na(!!var_sym), !is.na(!!target_sym))
+    
+    if (sep_zero && zero_bin) {
+      chi_data <- chi_data |>
+        dplyr::filter(!!var_sym > 0)
+    }
+    
+    chi_data <- as.data.frame(chi_data)
+    chi_data[[1]] <- as.numeric(chi_data[[1]])
+    chi_data[[2]] <- as.factor(chi_data[[2]])
+    
+    # Apply discretization method
+    breaks <- .get_discretization_breaks(chi_data, method, alpha, n_bins)
+    
+    if (is.null(breaks)) {
+      return(NULL)
+    }
+    
+    # Insert zero boundary if needed
+    if (zero_bin) {
+      breaks <- c(-Inf, 0.5, breaks[2:(length(breaks) - 1)], Inf) |>
+        unique() |>
+        sort()
+    }
+  }
+  
+  if (is.null(breaks)) {
+    cat("Error: Could not generate breaks for ", num_var, "\n", sep = "")
+    return(NULL)
+  }
+  
+  # ── Adaptive merge for underfull bins ──
+
+  breaks <- .adaptive_merge_breaks(
+    x = x,
+    breaks = breaks,
+    min_n = min_n,
+    target_bins = n_bins,       # NEW parameter
+    method = method,            # NEW parameter
+    zero_bin = zero_bin,
+    num_var = num_var
+  )
+  
+  # ── Generate final splits_info with French labels ──
+  # Using right=FALSE: intervals are [a, b) - lower inclusive, upper exclusive
+  
+  splits_info <- tibble::tibble(
+    value = x,
+    bin = cut(x, breaks = breaks, include.lowest = TRUE, right = FALSE)
+  ) |>
+    dplyr::group_by(bin) |>
+    dplyr::summarise(
+      min_val = min(value, na.rm = TRUE),
+      max_val = max(value, na.rm = TRUE),
+      n = dplyr::n(),
+      .groups = "drop"
+    ) |>
+    dplyr::arrange(min_val)
+  
+  # Extract internal cutpoints (between bins, excluding -Inf and Inf)
+  internal_breaks <- breaks[!is.infinite(breaks)]
+  
+  # Generate French labels with incremental counter
+  # Determine if first group contains only 0: only case where we start from 0
+  first_is_zero_only <- (splits_info$min_val[1] == 0 &
+                           splits_info$max_val[1] == 0)
+  
+  # Pre-calculate lower and upper bounds for each bin
+  n_bins_actual <- nrow(splits_info)
+  lower_bounds <- c(NA_real_, internal_breaks[1:(n_bins_actual - 1)])
+  upper_bounds <- c(internal_breaks[1:(n_bins_actual - 1)], NA_real_)
+  
+  labels <- splits_info |>
+    dplyr::mutate(
+      idx = dplyr::row_number(),
+      n_groups = dplyr::n(),
+      # Start from 0 only if first group is exactly 0, else start from 1
+      start_num = dplyr::if_else(first_is_zero_only, 0L, 1L),
+      # Counter for this row
+      counter = idx + start_num - 1,
+      
+      # Use pre-calculated bounds
+      lower_bound = lower_bounds[idx],
+      upper_bound = upper_bounds[idx],
+      
+      # Convert bounds to label values
+      # With right=FALSE: intervals are [a, b)
+      # Meaning: value >= a AND value < b
+      
+      label_lower = dplyr::case_when(
+        idx == 1 ~ NA_real_,
+        # If lower_bound is integer, label starts AT that value (inclusive)
+        lower_bound == floor(lower_bound) ~ as.integer(lower_bound),
+        # If lower_bound is decimal, label starts at ceil(lower_bound)
+        TRUE ~ as.integer(ceiling(lower_bound))
+      ),
+      
+      label_upper = dplyr::case_when(
+        idx == n_groups ~ NA_real_,
+        # If upper_bound is integer, label ends at upper_bound - 1 (exclusive at upper)
+        upper_bound == floor(upper_bound) ~ as.integer(upper_bound - 1),
+        # If upper_bound is decimal, label ends at floor(upper_bound)
+        TRUE ~ as.integer(floor(upper_bound))
+      ),
+      
+      # Generate label text
+      label = dplyr::case_when(
+        # Special case: bin with only 0
+        min_val == 0 & max_val == 0 ~ paste0(counter, "-0"),
+        
+        # Single value (when min_val == max_val)
+        min_val == max_val ~ paste0(counter, "-", as.integer(min_val)),
+        
+        # First bin, single bin total
+        idx == 1 & n_groups == 1 ~ paste0(counter, "-< ", as.integer(max_val + 1)),
+        
+        # First bin, multiple bins
+        idx == 1 & n_groups > 1 ~ paste0(counter, "-Moins de ", label_upper + 1),
+        
+        # Last bin
+        idx == n_groups ~ paste0(counter, "-", label_lower, " ou plus"),
+        
+        # Middle bins: from lower to upper bound
+        TRUE ~ paste0(counter, "-", label_lower, " à ", label_upper)
+      )
+    ) |>
+    dplyr::pull(label)
+  
+  
+  splits_info <- splits_info |>
+    dplyr::mutate(label = labels)
+  
+  # ── Handle rev_levels if requested ──
+  if (rev_levels) {
+    splits_info <- splits_info |>
+      dplyr::arrange(dplyr::desc(dplyr::row_number())) |>
+      dplyr::mutate(
+        new_idx = dplyr::row_number(),
+        label = paste0(new_idx, "-", stringr::str_remove(label, "^\\d+-"))
+      ) |>
+      dplyr::select(-new_idx) |>
+      dplyr::arrange(min_val)
+    
+    labels <- splits_info |>
+      dplyr::pull(label)
+  }
+  
+  list(
+    breaks = breaks,
+    cutpoints = breaks[-c(1, length(breaks))],
+    n_bins = nrow(splits_info),
+    labels = labels,
+    zero_separated = zero_bin,
+    breaks_explicit = splits_info |>
+      dplyr::select(min_val, max_val, n, label),
+    rev_levels = rev_levels
+  )
+}
+
+# ── Helper functions ──
+
+#' Get Jenks Natural Breaks
+#'
+#' @param x Numeric vector of sorted values
+#' @param n_bins Numeric target number of bins
+#' @param sep_zero Logical whether to separate zero
+#' @param zero_bin Logical whether zero bin was created
+#' @param jenks_extra_bins Numeric. Extra bins multiplier for Jenks exploration
+#'   (default 5)
+#'
+#' @return Numeric vector of break points starting with -Inf
+#'
+#' @keywords internal
+
+.get_jenks_breaks <- function(x, n_bins, sep_zero, zero_bin, jenks_extra_bins = 5) {
+  
+  # FIX: Handle constant/single-value case FIRST before any processing
+  if (length(unique(x)) <= 1) {
+    const_val <- unique(x)[1]
+    if (sep_zero && const_val == 0) {
+      return(c(-Inf, 0.5, Inf))
+    } else {
+      return(c(-Inf, const_val + 0.5, Inf))
+    }
+  }
+  
+  if (sep_zero && zero_bin) {
+    x_nonzero <- x[x > 0]
+    if (length(unique(x_nonzero)) <= 1) {
+      return(c(-Inf, 0.5, Inf))
+    }
+    n_unique <- length(unique(x_nonzero))
+    k_start <- min(n_bins + jenks_extra_bins, n_unique - 1) # min(n_bins + 3, n_unique - 1)
+    breaks_nonzero <- .try_jenks_breaks(x_nonzero, k_start)
+    if (!is.null(breaks_nonzero)) {
+      breaks_clean <- breaks_nonzero[!is.infinite(breaks_nonzero)]
+      return(c(-Inf, 0.5, breaks_clean, Inf))
+    }
+  }
+  
+  n_unique <- length(unique(x))
+  k_start <- k_start <- min(n_bins + jenks_extra_bins, n_unique - 1) #min(n_bins + 5, n_unique - 1)
+  breaks_raw <- .try_jenks_breaks(x, k_start)
+  
+  # Ensure breaks start with -Inf and end with Inf
+  if (!is.null(breaks_raw)) {
+    if (!is.infinite(breaks_raw[1])) {
+      breaks_raw <- c(-Inf, breaks_raw)
+    }
+    if (!is.infinite(breaks_raw[length(breaks_raw)])) {
+      breaks_raw <- c(breaks_raw, Inf)
+    }
+  }
+  
+  breaks_raw
+}
+
+
+#' Try Jenks with Decreasing k
+#'
+#' @param x Numeric vector of sorted values
+#' @param k_start Integer starting number of breaks
+#'
+#' @return Numeric vector of break points or NULL if unsuccessful
+#'
+#' @keywords internal
+
+.try_jenks_breaks <- function(x, k_start) {
+  for (attempt_k in seq(k_start, 1, -1)) {
+    tryCatch(
+      {
+        candidate <- BAMMtools::getJenksBreaks(x, k = attempt_k) |> unique()
+        if (length(candidate) > 2) return(candidate)
+      },
+      error = function(e) NULL
+    )
+  }
+  NULL
+}
+
+
+#' Get Manual Break Points
+#'
+#' @param cutpoints Numeric vector of cutpoints
+#' @param zero_bin Logical whether to include zero bin
+#'
+#' @return Numeric vector of break points starting with -Inf
+#'
+#' @keywords internal
+
+.get_manual_breaks <- function(cutpoints, zero_bin) {
+  # Remove NA or non-positive values from cutpoints
+  valid_cutpoints <- cutpoints[!is.na(cutpoints) & cutpoints > 0]
+  
+  # Build breaks - PRESERVES ALL CUTPOINTS
+  if (zero_bin) {
+    breaks <- c(-Inf, 0.5, valid_cutpoints, Inf)
+  } else {
+    breaks <- c(-Inf, valid_cutpoints, Inf)
+  }
+  
+  # Clean up: remove duplicates and ensure sorted
+  breaks |>
+    unique() |>
+    sort()
+}
+
+
+
+
+#' Get Discretization Breaks from chi-square Methods
+#'
+#' @param chi_data Data frame with numeric and categorical columns
+#' @param method Character string naming the discretization method
+#' @param alpha Numeric significance level
+#' @param n_bins Numeric target number of bins
+#'
+#' @return Numeric vector of break points starting with -Inf or NULL if unsuccessful
+#'
+#' @keywords internal
+
+.get_discretization_breaks <- function(chi_data, method, alpha, n_bins) {
+  
+  result <- tryCatch(
+    {
+      if (method == "chiM") {
+        discretization::chiM(chi_data, alpha = alpha)
+      } else if (method == "mdlp") {
+        discretization::mdlp(chi_data)
+      } else if (method == "caim") {
+        discretization::disc.Topdown(chi_data, method = 1)
+      } else if (method == "cacc") {
+        discretization::disc.Topdown(chi_data, method = 2)
+      } else if (method == "ameva") {
+        discretization::disc.Topdown(chi_data, method = 3)
+      } else if (method == "modChi2") {
+        discretization::modChi2(chi_data, alp = alpha)
+      }
+    },
+    error = function(e) {
+      cat("Error in ", method, ": ", e$message, "\n", sep = "")
+      NULL
+    }
+  )
+  
+  if (is.null(result)) return(NULL)
+  
+  # Extract and clean cutpoints
+  cutp <- result$cutp[[1]]
+  breaks <- c(-Inf, cutp, Inf) |>
+    as.numeric() |>
+    unique() |>
+    sort()
+  
+  breaks
+}
+
+#' Adaptive Merge of Underfull Bins - Two-Phase Strategy
+#'
+#' @description
+#' Two-phase merge strategy:
+#' - Phase 1: Merge bins with fewer observations than min_n
+#' - Phase 2: Merge remaining bins to approach target_bins (for automatic methods only)
+#'
+#' @param x Numeric vector of original values
+#' @param breaks Numeric vector of break points
+#' @param min_n Numeric minimum bin size
+#' @param target_bins Numeric target number of bins
+#' @param method Character discretization method
+#' @param zero_bin Logical whether zero bin is separated
+#' @param num_var Character variable name (for warnings)
+#'
+#' @return Numeric vector of adjusted break points
+#'
+#' @keywords internal
+
+.adaptive_merge_breaks <- function(x, breaks, min_n, target_bins, method, zero_bin, num_var) {
+  
+  # ── PHASE 1: Enforce min_n ──
+  if (method != "manual") {
+  repeat {
+    bin_assignments <- cut(x, breaks = breaks, include.lowest = TRUE, right = FALSE)
+    bin_counts <- table(bin_assignments)
+    underfull <- which(bin_counts < min_n)
+    
+    if (length(underfull) == 0) break
+    
+    # Never merge zero bin if separated
+    if (zero_bin && 1 %in% underfull) {
+      underfull <- underfull[-which(underfull == 1)]
+      if (length(underfull) == 0) break
+    }
+    
+    first_underfull <- min(underfull)
+    
+    # Merge with closer neighbor by count
+    if (first_underfull == 1) {
+      breaks <- breaks[-2]
+    } else if (first_underfull == length(breaks) - 1) {
+      breaks <- breaks[-(length(breaks) - 1)]
+    } else {
+      left_count <- bin_counts[first_underfull - 1]
+      right_count <- bin_counts[first_underfull + 1]
+      if (left_count <= right_count) {
+        breaks <- breaks[-(first_underfull)]
+      } else {
+        breaks <- breaks[-(first_underfull + 1)]
+      }
+    }
+    
+    if (length(breaks) <= 2) {
+      cat(
+        "Warning: ", num_var,
+        " - reduced to single bin to satisfy min_n = ", min_n, "\n",
+        sep = ""
+      )
+      break
+    }
+  }
+  }
+  # ── PHASE 2: Merge to reach target bins (only for automatic methods) ──
+  # Skip for manual method (user cutpoints must be respected)
+  if (method != "manual") {
+    breaks <- .merge_to_target_bins(
+      x = x,
+      breaks = breaks,
+      target_bins = target_bins,
+      min_n = min_n, 
+      zero_bin = zero_bin #,
+       #max_bin_pct = 0.40
+    )
+  }
+  
+  breaks
+}
+
+
+#' Validate Labels Match Actual Data Ranges
+#'
+#' @param result Result from cut_adaptive()
+#' @param x Original numeric vector (non-NA values used for binning)
+#' @param var_name Variable name for warning messages
+#'
+#' @return Logical. TRUE if all labels have data, FALSE otherwise
+#'
+#' @keywords internal
+
+.validate_labels <- function(result, x, var_name = "variable") {
+  # Use the SAME x that was used in cut_adaptive (already sorted, no NAs)
+  actual_bins <- cut(x, breaks = result$breaks, include.lowest = TRUE, right = FALSE)
+  
+  all_valid <- TRUE
+  for (i in 1:result$n_bins) {
+    bin_data <- x[actual_bins == i]
+    
+    if (length(bin_data) == 0) {
+      warning(
+        "Label ", i, " ('", result$labels[i], 
+        "') in variable '", var_name, "' has no data. Check your cutpoints.",
+        call. = FALSE
+      )
+      all_valid <- FALSE
+    }
+  }
+  
+  all_valid
+}
+
+
+#' Merge Bins to Reach Target Count
+#'
+#' @param x Numeric vector (no NAs)
+#' @param breaks Numeric vector of break points
+#' @param target_bins Numeric target bin count
+#' @param min_n Numeric minimum bin size
+#' @param zero_bin Logical whether zero bin exists separately
+#'
+#' @return Numeric vector of merged break points
+#' @keywords internal
+
+.merge_to_target_bins <- function(x, breaks, target_bins, min_n, zero_bin = FALSE) {
+  
+  current_bins <- length(breaks) - 1
+  
+  # Adjust target for zero bin
+  if (zero_bin) {
+    target_bins <- target_bins + 1
+  }
+  
+  # Already at target or below
+  if (current_bins <= target_bins) {
+    return(breaks)
+  }
+  
+  # Loop to merge bins
+  while (current_bins > target_bins) {
+    
+    # Assign observations to current bins
+    bin_assignment <- cut(
+      x,
+      breaks = breaks,
+      include.lowest = TRUE,
+      right = FALSE
+    )
+    bin_sizes <- table(bin_assignment)
+    
+    # If any bin is too small, can't merge further
+    if (any(bin_sizes < min_n)) {
+      break
+    }
+    
+    # Find smallest bin to merge
+    smallest_idx <- which.min(bin_sizes)
+    
+    # Determine which neighbor to merge with
+    # (the one that creates the most balanced result)
+    
+    left_size <- if (smallest_idx > 1) bin_sizes[smallest_idx - 1] else NA
+    right_size <- if (smallest_idx < length(bin_sizes)) bin_sizes[smallest_idx + 1] else NA
+    
+    # Choose merge partner
+    if (is.na(left_size)) {
+      # Smallest bin is first, merge with right
+      merge_with <- "right"
+      break_to_remove <- smallest_idx + 1
+    } else if (is.na(right_size)) {
+      # Smallest bin is last, merge with left
+      merge_with <- "left"
+      break_to_remove <- smallest_idx
+    } else if (left_size <= right_size) {
+      # Merge with left
+      merge_with <- "left"
+      break_to_remove <- smallest_idx
+    } else {
+      # Merge with right
+      merge_with <- "right"
+      break_to_remove <- smallest_idx + 1
+    }
+    
+    # Remove the break (position in breaks array = bin_index + 1)
+    new_breaks <- breaks[-break_to_remove]
+    
+    # Verify this doesn't violate min_n
+    new_assignment <- cut(
+      x,
+      breaks = new_breaks,
+      include.lowest = TRUE,
+      right = FALSE
+    )
+    new_sizes <- table(new_assignment)
+    
+    # Accept merge only if all bins still meet min_n
+    if (all(new_sizes >= min_n)) {
+      breaks <- new_breaks
+      current_bins <- length(breaks) - 1
+    } else {
+      # Merge failed, stop
+      break
+    }
+  }
+  
+  breaks
+}
+
+
+# =============================================================================
+# DIAGNOSTIC VERSION (if you need to debug)
+# =============================================================================
+
+.merge_to_target_bins_debug <- function(x, breaks, target_bins, min_n, zero_bin = FALSE) {
+  
+  current_bins <- length(breaks) - 1
+  original_target <- target_bins
+  
+  if (zero_bin) {
+    target_bins <- target_bins + 1
+  }
+  
+  cat("\nDEBUG .merge_to_target_bins():\n")
+  cat("  Input breaks:", paste(breaks, collapse=", "), "\n")
+  cat("  Target bins:", original_target, "(+ 1 for zero = ", target_bins, if(!zero_bin) " [no zero bin]", ")\n")
+  cat("  Current bins:", current_bins, "\n")
+  
+  if (current_bins <= target_bins) {
+    cat("  → Already at target, returning\n\n")
+    return(breaks)
+  }
+  
+  merge_count <- 0
+  
+  while (current_bins > target_bins) {
+    merge_count <- merge_count + 1
+    cat("  Merge iteration", merge_count, ":\n")
+    
+    bin_assignment <- cut(x, breaks = breaks, include.lowest = TRUE, right = FALSE)
+    bin_sizes <- table(bin_assignment)
+    
+    cat("    Bins: ", paste(names(bin_sizes), collapse=", "), "\n")
+    cat("    Sizes:", paste(as.numeric(bin_sizes), collapse=", "), "\n")
+    
+    if (any(bin_sizes < min_n)) {
+      cat("    → Bin too small (<", min_n, "), stopping\n\n")
+      break
+    }
+    
+    smallest_idx <- which.min(bin_sizes)
+    cat("    Smallest bin:", smallest_idx, "(size=", bin_sizes[smallest_idx], ")\n")
+    
+    left_size <- if (smallest_idx > 1) bin_sizes[smallest_idx - 1] else NA
+    right_size <- if (smallest_idx < length(bin_sizes)) bin_sizes[smallest_idx + 1] else NA
+    
+    if (is.na(left_size)) {
+      merge_with <- "right"
+      break_to_remove <- smallest_idx + 1
+    } else if (is.na(right_size)) {
+      merge_with <- "left"
+      break_to_remove <- smallest_idx
+    } else if (left_size <= right_size) {
+      merge_with <- "left"
+      break_to_remove <- smallest_idx
+    } else {
+      merge_with <- "right"
+      break_to_remove <- smallest_idx + 1
+    }
+    
+    cat("    Merge partner:", merge_with, "(size=", if(merge_with=="left") left_size else right_size, ")\n")
+    cat("    Remove break at position:", break_to_remove, "(value=", breaks[break_to_remove], ")\n")
+    
+    new_breaks <- breaks[-break_to_remove]
+    new_assignment <- cut(x, breaks = new_breaks, include.lowest = TRUE, right = FALSE)
+    new_sizes <- table(new_assignment)
+    
+    if (all(new_sizes >= min_n)) {
+      cat("    ✓ Merge accepted\n")
+      breaks <- new_breaks
+      current_bins <- length(breaks) - 1
+    } else {
+      cat("    ✗ Merge rejected (violates min_n)\n\n")
+      break
+    }
+  }
+  
+  cat("  Final breaks:", paste(breaks, collapse=", "), "\n")
+  cat("  Final bins:", length(breaks) - 1, "\n\n")
+  
+  breaks
+}
+
+
+
+
+
+
+
+
+#' Test for Zero-Inflation
+#'
+#' @description
+#' Tests whether a numeric variable has statistically significant zero-inflation
+#' using a Vuong test comparing zero-inflated Poisson to standard Poisson.
+#'
+#' @param x Numeric vector
+#' @param alpha Numeric significance level. Default: 0.05
+#' @param verbose Logical. If TRUE, prints results. Default: FALSE
+#'
+#' @return Logical. TRUE if zero-inflation is statistically significant.
+#'
+#' @details
+#' Uses pscl::zeroinfl() and pscl::vuong() to test H0: regular Poisson
+#' vs H1: zero-inflated Poisson. Positive z-statistic indicates zero-inflation.
+#'
+
+is_zero_special <- function(x, alpha = 0.05, verbose = FALSE) {
+  
+  x_clean <- as.numeric(na.omit(x))
+  
+  if (sum(x_clean == 0) == 0) {
+    if (verbose) cat("No zeros found\n")
+    return(FALSE)
+  }
+  
+  # Fit models
+  zip_fit <- pscl::zeroinfl(x_clean ~ 1 | 1, dist = "poisson")
+  pois_fit <- stats::glm(x_clean ~ 1, family = poisson)
+  
+  # Capture printed output
+  vuong_text <- capture.output(pscl::vuong(zip_fit, pois_fit))
+  
+  # Find Raw line (starts with "Raw")
+  raw_idx <- which(grepl("^Raw", vuong_text))
+  
+  if (length(raw_idx) == 0) {
+    if (verbose) cat("Could not parse Vuong output\n")
+    return(FALSE)
+  }
+  
+  raw_line <- vuong_text[raw_idx[1]]
+  
+  # Extract all numbers from Raw line
+  numbers <- as.numeric(
+    stringr::str_extract_all(raw_line, "-?\\d+\\.\\d+|\\d+")[[1]]
+  )
+  
+  if (length(numbers) < 2) {
+    if (verbose) cat("Could not extract values from Vuong output\n")
+    return(FALSE)
+  }
+  
+  z_stat <- numbers[1]
+  p_value <- numbers[length(numbers)]
+  
+  is_special <- z_stat > 0 && p_value < alpha
+  
+  if (verbose) {
+    prop_zero <- sum(x_clean == 0) / length(x_clean)
+    cat(sprintf(
+      "prop_zero=%.1f%% | z=%.3f | p=%.6f | %s\n",
+      prop_zero * 100,
+      z_stat,
+      p_value,
+      ifelse(is_special, "SPECIAL", "regular")
+    ))
+  }
+  
+  is_special
+}
+
+
+
+
+
+
+
+
+
+
+
+
+#' Multivariate Adaptive Binning Wrapper
+#'
+#' @description
+#' Discretizes multiple numeric variables simultaneously with automatic or
+#' specified parameters per variable. Supports supervised and unsupervised
+#' methods. Returns data frame with new categorical variables (named VAR#,
+#' where # is the number of categories) and formatted discretization summary.
+#'
+#' @param data A data frame containing the variables to discretize
+#' @param num_vars Character vector of numeric variable names to discretize.
+#'   Required.
+#' @param method Character or character vector of discretization methods.
+#'   Recycled to length of num_vars. Options: "jenks", "chiM", "caim", "cacc",
+#'   "ameva", "mdlp", "modChi2", "manual". Default: "jenks"
+#' @param target_vars Character or character vector of categorical target
+#'   variables for supervised methods. Use NA for unsupervised. Recycled to
+#'   length of num_vars. Default: NULL (all unsupervised)
+#' @param conf_level Numeric or numeric vector of significance levels for
+#'   supervised methods. Recycled to length of num_vars. Default: 0.05
+#' @param cutpoints List or list of numeric vectors. For method="manual",
+#'   provide list of cutpoint vectors. Recycled to length of num_vars.
+#'   Default: NULL. REQUIRED when any method is "manual".
+#' @param bins Numeric or numeric vector of target bin counts. Recycled to
+#'   length of num_vars. Default: 3
+#' @param min_n Numeric or numeric vector of minimum bin sizes. Recycled to
+#'   length of num_vars. Default: 30
+#' @param sep_zero Logical or logical vector indicating whether to separate
+#'   zero values. Recycled to length of num_vars. Default: TRUE
+#' @param rev_levels Logical or logical vector. If TRUE, reverses the order of
+#'   factor levels numerically (levels numbered 1-N, then reversed; factor
+#'   levels reordered alphanumerically with forcats::fct_relevel). Recycled to
+#'   length of num_vars. Default: FALSE
+#' @param jenks_extra_bins Numeric or numeric vector. Controls aggressiveness
+#'   of Jenks initial binning (see cut_adaptive()). Recycled to length of
+#'   num_vars.
+#'
+#' @return A data frame (tibble) containing the original data plus new variables
+#'   named as VAR# (where # is the number of categories, e.g., LIVEFREQ_CONCERT3).
+#'   Original numeric variables are retained. New categorical variables are
+#'   labeled with variable label and category count. When rev_levels = TRUE,
+#'   factor levels are sorted alphanumerically.
+#'
+#' @details
+#' Vectorized arguments are recycled to match length of num_vars using
+#' vctrs::vec_recycle(). Automatically adjusts min_n downward if insufficient
+#' non-dominant values exist to create 2 bins. Prints formatted discretization
+#' summary showing bin labels, counts, and cutpoints for each variable.
+#'
+#' Level numbering:
+#' - Starts from 0 only when first bin contains exactly 0: c("0-0", "1-1 à 3", ...)
+#' - Starts from 1 in all other cases: c("1-Moins de 2", "2-2 à 3", ...)
+#'
+#' Interval convention: [a, b) - lower inclusive, upper exclusive
+#'
+#' When method="manual" for any variable, cutpoints MUST be provided and must
+#' contain valid numeric vectors for those variables.
+
+multicut <- function(
+    data,
+    num_vars,
+    method = "jenks",
+    target_vars = NULL,
+    conf_level = 0.05,
+    cutpoints = NULL,
+    bins = 3, jenks_extra_bins = 3, 
+    min_n = 30,
+    sep_zero = TRUE,
+    rev_levels = FALSE) {
+  
+  n_vars <- length(num_vars)
+  
+  # Recycle arguments
+  method <- vctrs::vec_recycle(method, n_vars)
+  bins <- vctrs::vec_recycle(bins, n_vars)
+  min_n <- vctrs::vec_recycle(min_n, n_vars)
+  sep_zero <- vctrs::vec_recycle(sep_zero, n_vars)
+  conf_level <- vctrs::vec_recycle(conf_level, n_vars)
+  rev_levels <- vctrs::vec_recycle(rev_levels, n_vars)
+  jenks_extra_bins <- vctrs::vec_recycle(jenks_extra_bins, n_vars)
+  
+  if (is.null(target_vars)) {
+    target_vars <- rep(NA_character_, n_vars)
+  } else if (is.character(target_vars)) {
+    target_vars <- vctrs::vec_recycle(target_vars, n_vars)
+  }
+  
+  if (is.null(cutpoints)) {
+    cutpoints <- rep(list(NA), n_vars)
+  } else {
+    cutpoints <- vctrs::vec_recycle(cutpoints, n_vars)
+  }
+  
+  result <- dplyr::as_tibble(data)
+  cuts_details <- list()
+  
+  # Process each variable
+  for (i in seq_along(num_vars)) {
+    var_name <- num_vars[i]
+    
+    # ── ISSUE #1 FIX: Validate manual method has cutpoints ──
+    if (method[i] == "manual") {
+      # Check if cutpoints were provided and are not all NA
+      if (is.null(cutpoints[[i]]) || 
+          all(is.na(cutpoints[[i]]))) {
+        cat("Warning: ", var_name, 
+            " - method='manual' requires cutpoints argument. Variable skipped.\n", 
+            sep = "")
+        next
+      }
+      
+      # Verify cutpoints is numeric
+      if (!is.numeric(cutpoints[[i]])) {
+        cat("Warning: ", var_name, 
+            " - cutpoints must be numeric. Variable skipped.\n", 
+            sep = "")
+        next
+      }
+    }
+    # ── END ISSUE #1 FIX ──
+    
+    x_clean <- na.omit(data[[var_name]])
+    
+    # Count dominant value directly
+    dominant_count <- max(table(x_clean))
+    non_dominant_count <- length(x_clean) - dominant_count
+    
+    # Detect and adjust
+    adjusted_min_n <- min_n[i]
+    min_n_warning <- ""
+    
+    if (non_dominant_count > 0 && non_dominant_count < min_n[i]) {
+      adjusted_min_n <- non_dominant_count
+      min_n_warning <- sprintf(
+        " (warning: set to min_n = %d to ensure 2 bins)",
+        adjusted_min_n
+      )
+    }
+    
+    # Call cut_adaptive with adjusted min_n
+    cut_result <- suppressWarnings(
+      cut_adaptive(
+        data = data,
+        num_var = var_name,
+        method = method[i],
+        n_bins = bins[i], 
+        jenks_extra_bins = jenks_extra_bins[i], 
+        min_n = adjusted_min_n,
+        sep_zero = sep_zero[i],
+        target_var = target_vars[i],
+        cutpoints = cutpoints[[i]],
+        alpha = conf_level[i],
+        rev_levels = rev_levels[i]
+      )
+    )
+    
+    if (is.null(cut_result)) {
+      cat("Warning: ", var_name, " could not be discretized\n", sep = "")
+      next
+    }
+    
+    # Create new variable name: VAR# (no "cat" suffix, no underscore)
+    new_var_name <- paste0(var_name, cut_result$n_bins)
+    
+    if (new_var_name %in% names(result)) {
+      cat("Warning: ", new_var_name, " already exists, replacing\n", sep = "")
+    }
+    
+    # Create categorical variable with right=FALSE for [a,b) intervals
+    x_cut <- cut(
+      data[[var_name]],
+      breaks = cut_result$breaks,
+      labels = cut_result$labels,
+      include.lowest = TRUE,
+      right = FALSE
+    )
+    
+    # Apply fct_relevel with sort if rev_levels is TRUE
+    if (rev_levels[i]) {
+      x_cut <- forcats::fct_relevel(x_cut, sort)
+    }
+    
+    result[[new_var_name]] <- x_cut
+    
+    # Add label with category count
+    if (!is.null(attr(data[[var_name]], "label"))) {
+      old_label <- attr(data[[var_name]], "label")
+      new_label <- paste0(old_label, " en ", cut_result$n_bins, " catégories")
+      labelled::var_label(result[[new_var_name]]) <- new_label
+    } else {
+      labelled::var_label(result[[new_var_name]]) <-
+        paste0(var_name, " en ", cut_result$n_bins, " catégories")
+    }
+    
+    # Store details for summary
+    cuts_details[[i]] <- list(
+      var_name = var_name,
+      method = method[i],
+      target = target_vars[i],
+      breaks_explicit = cut_result$breaks_explicit,
+      cutpoints = cut_result$cutpoints,
+      min_n_warning = min_n_warning
+    )
+  }
+  
+  # Print formatted summary
+  cat("\n")
+  cat("═════════════════════════════════════════════════════════════\n")
+  cat("DISCRETIZATION SUMMARY\n")
+  cat("═════════════════════════════════════════════════════════════\n\n")
+  
+  for (detail in cuts_details) {
+    # Method line with target if applicable (only for supervised methods)
+    method_str <- detail$method
+    supervised_methods <- c("chiM", "caim", "cacc", "ameva", "mdlp", "modChi2")
+    if (!is.na(detail$target) && detail$method %in% supervised_methods) {
+      method_str <- paste0(method_str, " over ", detail$target)
+    }
+    
+    cat(sprintf(
+      "%s: %s%s\n",
+      detail$var_name,
+      method_str,
+      detail$min_n_warning
+    ))
+    
+    # Build table: label, n, cutpoints
+    tbl <- detail$breaks_explicit
+    cutpts <- detail$cutpoints
+    
+    # Format columns
+    labels_col <- format(tbl$label, justify = "left")
+    n_col <- format(tbl$n, justify = "right")
+    
+    # Cutpoints: align with each row
+    cutpoints_col <- character(nrow(tbl))
+    if (length(cutpts) > 0) {
+      for (j in seq_along(cutpts)) {
+        cutpoints_col[j + 1] <- as.character(cutpts[j])
+      }
+    }
+    cutpoints_col <- format(cutpoints_col, justify = "right")
+    
+    # Print header
+    cat(
+      "  ", format("label", width = 20, justify = "left"),
+      format("n", width = 6, justify = "right"),
+      format("cutpoints", width = 12, justify = "right"),
+      "\n",
+      sep = ""
+    )
+    
+    # Print rows
+    for (j in seq_len(nrow(tbl))) {
+      cat(
+        "  ", format(labels_col[j], width = 20, justify = "left"),
+        format(n_col[j], width = 6, justify = "right"),
+        format(cutpoints_col[j], width = 12, justify = "right"),
+        "\n",
+        sep = ""
+      )
+    }
+    
+    cat("\n")
+  }
+  
+  cat("═════════════════════════════════════════════════════════════\n\n")
+  
+  result
+}
+
+
+
+## Cut numeric vars tests ----
+
+# # COMPREHENSIVE TEST & ENHANCEMENT FILE FOR cut_adaptive_functions.R
+# 
+# # Source the code first:
+# # source("cut_adaptive_functions.R")
+# 
+# # =============================================================================
+# # TEST SUITE 1: Edge Cases and Single-Value Variables
+# # =============================================================================
+# 
+# test_edge_cases <- function(data) {
+#   cat("\n", strrep("=", 70), "\n")
+#   cat("TEST SUITE 1: EDGE CASES\n")
+#   cat(strrep("=", 70), "\n\n")
+# 
+#   # Test 1.1: All same value (should trigger min_n adjustment)
+#   cat("TEST 1.1: Variable with single constant value\n")
+#   
+#   # Create test data with constant values
+#   test_data <- data |>
+#     dplyr::mutate(CONSTANT_VAR = 42)
+#   
+#   result <- tryCatch(
+#     cut_adaptive(
+#       test_data,
+#       "CONSTANT_VAR",
+#       method = "jenks",
+#       min_n = 30,
+#       sep_zero = FALSE,
+#       rev_levels = FALSE
+#     ),
+#     error = function(e) {
+#       cat("ERROR:", e$message, "\n")
+#       NULL
+#     }
+#   )
+#   
+#   if (!is.null(result)) {
+#     cat("Result:", result$n_bins, "bins\n")
+#     print(result$labels)
+#   }
+#   cat("\n")
+#   
+#   # Test 1.2: Very small unique values
+#   cat("TEST 1.2: Variable with only 2 unique non-zero values\n")
+#   
+#   test_data2 <- data |>
+#     dplyr::mutate(BINARY_VAR = sample(c(0, 1, 0), nrow(data), replace = TRUE))
+#   
+#   result2 <- tryCatch(
+#     cut_adaptive(
+#       test_data2,
+#       "BINARY_VAR",
+#       method = "jenks",
+#       min_n = 10,
+#       sep_zero = TRUE,
+#       rev_levels = FALSE
+#     ),
+#     error = function(e) NULL
+#   )
+#   
+#   if (!is.null(result2)) {
+#     cat("Result:", result2$n_bins, "bins\n")
+#     print(result2$labels)
+#   }
+#   cat("\n")
+# }
+# 
+# 
+# # =============================================================================
+# # TEST SUITE 2: Verify Interval Validation [a,b)
+# # =============================================================================
+# 
+# test_interval_validation <- function(data) {
+#   cat("\n", strrep("=", 70), "\n")
+#   cat("TEST SUITE 2: INTERVAL VALIDATION [a,b) SEMANTICS\n")
+#   cat(strrep("=", 70), "\n\n")
+# 
+#   # Test manual cutpoints and verify actual data falls in correct bins
+#   cat("TEST 2.1: Manual cutpoints 20, 40 - verify interval assignments\n")
+#   
+#   result <- cut_adaptive(
+#     data,
+#     "TEMPSCOUPLE",
+#     method = "manual",
+#     min_n = 30,
+#     cutpoints = c(20, 40),
+#     sep_zero = FALSE,
+#     rev_levels = FALSE
+#   )
+#   
+#   print(result$breaks_explicit)
+#   
+#   # Manual validation: extract actual data and verify
+#   x <- na.omit(data$TEMPSCOUPLE)
+#   actual_bins <- cut(x, breaks = result$breaks, include.lowest = TRUE, right = FALSE)
+#   
+#   # Check that bin boundaries match labels
+#   cat("\nValidation:\n")
+#   for (i in 1:result$n_bins) {
+#     bin_data <- x[actual_bins == i]
+#     if (length(bin_data) > 0) {
+#       actual_min <- min(bin_data)
+#       actual_max <- max(bin_data)
+#       label <- result$labels[i]
+#       cat(sprintf(
+#         "  Bin %d: Label='%s' | Actual data: %d-%d (%d values)\n",
+#         i, label, actual_min, actual_max, length(bin_data)
+#       ))
+#     }
+#   }
+#   cat("\n")
+# }
+# 
+# 
+# # =============================================================================
+# # TEST SUITE 3: rev_levels with fct_relevel Sort
+# # =============================================================================
+# 
+# test_rev_levels_sort <- function(data) {
+#   cat("\n", strrep("=", 70), "\n")
+#   cat("TEST SUITE 3: rev_levels WITH fct_relevel(sort)\n")
+#   cat(strrep("=", 70), "\n\n")
+# 
+#   cat("TEST 3.1: Verify reversed levels are sorted alphanumerically\n")
+#   
+#   result <- cut_adaptive(
+#     data,
+#     "TEMPSCOUPLE",
+#     method = "manual",
+#     min_n = 30,
+#     cutpoints = c(19.5, 39.5),
+#     sep_zero = FALSE,
+#     rev_levels = TRUE
+#   )
+#   
+#   cat("Original labels (before sort):\n")
+#   print(result$labels)
+#   
+#   # Apply forcats::fct_relevel to sort
+#   x <- cut(
+#     data$TEMPSCOUPLE,
+#     breaks = result$breaks,
+#     labels = result$labels,
+#     include.lowest = TRUE,
+#     right = FALSE
+#   )
+#   x_sorted <- forcats::fct_relevel(x, sort)
+#   
+#   cat("\nAfter fct_relevel(sort):\n")
+#   cat("Levels order:", paste(levels(x_sorted), collapse = ", "), "\n\n")
+# }
+# 
+# 
+# # =============================================================================
+# # TEST SUITE 4: sep_zero with manual cutpoints (TEST 3 investigation)
+# # =============================================================================
+# 
+# test_sep_zero_manual_cutpoints <- function(data) {
+#   cat("\n", strrep("=", 70), "\n")
+#   cat("TEST SUITE 4: sep_zero=TRUE WITH MANUAL CUTPOINTS\n")
+#   cat(strrep("=", 70), "\n\n")
+# 
+#   cat("TEST 4.1: Verify cutpoints are NOT lost when sep_zero=TRUE\n\n")
+#   
+#   # First, ensure LIVEFREQ_CONCERT has sufficient zeros
+#   n_zeros <- sum(data$LIVEFREQ_CONCERT == 0, na.rm = TRUE)
+#   cat(sprintf("Data has %d zeros (min required: 30)\n\n", n_zeros))
+#   
+#   if (n_zeros >= 30) {
+#     result <- cut_adaptive(
+#       data,
+#       "LIVEFREQ_CONCERT",
+#       method = "manual",
+#       min_n = 20,
+#       cutpoints = c(5, 10),
+#       sep_zero = TRUE,
+#       rev_levels = FALSE
+#     )
+#     
+#     cat("Breaks generated:", paste(result$breaks, collapse = ", "), "\n")
+#     cat("Expected: -Inf, 0.5, 5, 10, Inf\n")
+#     cat("Match:", all(result$breaks == c(-Inf, 0.5, 5, 10, Inf)), "\n\n")
+#     
+#     cat("Labels:\n")
+#     print(result$labels)
+#     
+#     cat("\nBreaks explicit:\n")
+#     print(result$breaks_explicit)
+#   } else {
+#     cat(sprintf("Skip: only %d zeros, need 30 for test\n", n_zeros))
+#   }
+#   cat("\n")
+# }
+# 
+# 
+# # =============================================================================
+# # TEST SUITE 5: Label Validation Helper
+# # =============================================================================
+# 
+# # Helper function: Validate labels match actual data ranges
+# validate_labels <- function(result, x) {
+#   cat("LABEL VALIDATION:\n")
+#   
+#   actual_bins <- cut(x, breaks = result$breaks, include.lowest = TRUE, right = FALSE)
+#   
+#   validation_pass <- TRUE
+#   for (i in 1:result$n_bins) {
+#     bin_data <- x[actual_bins == i]
+#     if (length(bin_data) == 0) next
+#     
+#     actual_min <- min(bin_data)
+#     actual_max <- max(bin_data)
+#     label <- result$labels[i]
+#     
+#     # Simple validation: label mentions should appear in data
+#     cat(sprintf("  Bin %d: '%s'\n", i, label))
+#     cat(sprintf("    Actual data range: %d to %d\n", actual_min, actual_max))
+#   }
+#   
+#   cat("\nValidation complete.\n\n")
+# }
+# 
+# test_label_validation <- function(data) {
+#   cat("\n", strrep("=", 70), "\n")
+#   cat("TEST SUITE 5: LABEL VALIDATION\n")
+#   cat(strrep("=", 70), "\n\n")
+# 
+#   cat("TEST 5.1: Validate labels match data ranges\n\n")
+#   
+#   result <- cut_adaptive(
+#     data,
+#     "TEMPSCOUPLE",
+#     method = "jenks",
+#     min_n = 30,
+#     sep_zero = FALSE,
+#     rev_levels = FALSE
+#   )
+#   
+#   x <- na.omit(data$TEMPSCOUPLE)
+#   validate_labels(result, x)
+# }
+# 
+# 
+# # =============================================================================
+# # TEST SUITE 6: Extreme ranges
+# # =============================================================================
+# 
+# test_extreme_ranges <- function(data) {
+#   cat("\n", strrep("=", 70), "\n")
+#   cat("TEST SUITE 6: EXTREME VALUE RANGES\n")
+#   cat(strrep("=", 70), "\n\n")
+# 
+#   cat("TEST 6.1: Very large cutpoints (1000+)\n")
+#   
+#   result <- cut_adaptive(
+#     data,
+#     "CINEEQUIP",
+#     method = "manual",
+#     min_n = 30,
+#     cutpoints = c(450, 1400),
+#     sep_zero = FALSE,
+#     rev_levels = FALSE
+#   )
+#   
+#   cat("Labels:", paste(result$labels, collapse="\n       "), "\n")
+#   cat("Cutpoints:", paste(result$cutpoints, collapse=", "), "\n\n")
+# }
+# 
+# 
+# # =============================================================================
+# # MASTER TEST RUNNER
+# # =============================================================================
+# 
+# run_comprehensive_tests <- function(data) {
+#   cat("\n\n")
+#   cat(strrep("=", 70), "\n")
+#   cat("COMPREHENSIVE TEST SUITE FOR cut_adaptive_functions.R\n")
+#   cat(strrep("=", 70), "\n")
+# 
+#   test_edge_cases(data)
+#   test_interval_validation(data)
+#   test_rev_levels_sort(data)
+#   test_sep_zero_manual_cutpoints(data)
+#   test_label_validation(data)
+#   test_extreme_ranges(data)
+# 
+#   cat("\n")
+#   cat(strrep("=", 70), "\n")
+#   cat("ALL TESTS COMPLETE\n")
+#   cat(strrep("=", 70), "\n\n")
+# }
+# 
+# 
+# # =============================================================================
+# # USAGE:
+# # =============================================================================
+# # source("cut_adaptive_functions.R")
+# # run_comprehensive_tests(L325)
+# 
+# 
+# # What You Need to Do:
+# #   
+# # - Apply Test Suite : run_comprehensive_tests(L325) to verify everything works
+# # 
+# # - Review Code Analysis : Details all issues with proposed fixes
+# # 
+# # - Fix Issue #1 first (critical): Add validation in multicut() for manual method without cutpoints
+# # 
+# # - Add validation function: For label-data consistency
+# # 
+# # - Improve edge case handling: For constant values
+# 
+# 
+# 
+# 
+# 
+# # =============================================================================
+# # COMPLETE TEST - VERIFY ALL FIXES
+# # =============================================================================
+# 
+# test_all_fixes <- function(data) {
+#   cat("\n", strrep("=", 70), "\n")
+#   cat("FINAL VERIFICATION - ALL FIXES\n")
+#   cat(strrep("=", 70), "\n\n")
+#   
+#   # FIX #1: Constant value
+#   cat("FIX #1: Constant value handling\n")
+#   cat(strrep("-", 70), "\n")
+#   
+#   test_data <- data |>
+#     dplyr::mutate(CONSTANT = 42)
+#   
+#   result <- tryCatch(
+#     cut_adaptive(
+#       test_data,
+#       "CONSTANT",
+#       method = "jenks",
+#       min_n = 30,
+#       sep_zero = FALSE,
+#       rev_levels = FALSE
+#     ),
+#     error = function(e) {
+#       cat("✗ ERROR:", e$message, "\n")
+#       NULL
+#     }
+#   )
+#   
+#   if (!is.null(result)) {
+#     cat("✓ SUCCESS: Handled constant variable\n")
+#     cat("  Breaks:", paste(result$breaks, collapse=", "), "\n")
+#     cat("  Labels:", paste(result$labels, collapse=", "), "\n")
+#   }
+#   cat("\n")
+#   
+#   # FIX #2: sep_zero + manual cutpoints
+#   cat("FIX #2: sep_zero=TRUE with manual cutpoints\n")
+#   cat(strrep("-", 70), "\n")
+#   
+#   result <- cut_adaptive(
+#     data,
+#     "LIVEFREQ_CONCERT",
+#     method = "manual",
+#     min_n = 20,
+#     cutpoints = c(5, 10),
+#     sep_zero = TRUE,
+#     rev_levels = FALSE
+#   )
+#   
+#   cat("Breaks:", paste(result$breaks, collapse=", "), "\n")
+#   cat("Expected: -Inf, 0.5, 5, 10, Inf\n")
+#   cat("Match:", identical(result$breaks, c(-Inf, 0.5, 5, 10, Inf)), "\n")
+#   
+#   if (identical(result$breaks, c(-Inf, 0.5, 5, 10, Inf))) {
+#     cat("✓ SUCCESS: All cutpoints preserved!\n")
+#   } else {
+#     cat("✗ FAIL: Cutpoints not preserved\n")
+#   }
+#   cat("\n")
+#   
+#   # FIX #3: Label validation (use same x data)
+#   cat("FIX #3: Label validation (correct usage)\n")
+#   cat(strrep("-", 70), "\n")
+#   
+#   result <- cut_adaptive(
+#     data,
+#     "TEMPSCOUPLE",
+#     method = "manual",
+#     min_n = 30,
+#     cutpoints = c(20, 40),
+#     sep_zero = FALSE,
+#     rev_levels = FALSE
+#   )
+#   
+#   # IMPORTANT: Use the same x as cut_adaptive() used internally
+#   x <- data |>
+#     dplyr::pull(TEMPSCOUPLE) |>
+#     na.omit() |>
+#     sort()
+#   
+#   valid <- .validate_labels(result, x, "TEMPSCOUPLE")
+#   
+#   cat("Validation result:", valid, "\n")
+#   if (valid) {
+#     cat("✓ SUCCESS: All bins have data\n")
+#   }
+#   cat("\n")
+#   
+#   # FIX #4: Manual method validation in multicut
+#   cat("FIX #4 & #5: multicut() with validation\n")
+#   cat(strrep("-", 70), "\n")
+#   
+#   test_result <- multicut(
+#     data,
+#     num_vars = c("LIVEFREQ_CONCERT", "TEMPSCOUPLE"),
+#     method = c("manual", "manual"),
+#     cutpoints = list(c(5, 10), c(20, 40)),
+#     bins = 3,
+#     min_n = 20,
+#     sep_zero = c(TRUE, FALSE),
+#     rev_levels = FALSE
+#   )
+#   
+#   cat("✓ multicut() completed successfully\n")
+#   cat("\n")
+#   
+#   cat(strrep("=", 70), "\n")
+#   cat("ALL TESTS COMPLETE\n")
+#   cat(strrep("=", 70), "\n\n")
+# }
+# 
+# # USAGE: test_all_fixes(L325)
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# # # PAST TESTS
+# # # Test script for cut_adaptive cutpoint handling
+# # 
+# # # Test 1: Manual method with simple cutpoints
+# # test_manual_simple <- function(data) {
+# #   cat("\n=== TEST 1: Manual method with cutpoints 19.5, 39.5 ===\n")
+# #   
+# #   result <- cut_adaptive(
+# #     data, 
+# #     "TEMPSCOUPLE",
+# #     method = "manual",
+# #     min_n = 30,
+# #     cutpoints = c(19.5, 39.5),
+# #     sep_zero = FALSE,
+# #     rev_levels = FALSE
+# #   )
+# #   
+# #   print(result$breaks)
+# #   print(result$cutpoints)
+# #   print(result$labels)
+# #   print(result$breaks_explicit)
+# #   
+# #   # What we expect:
+# #   cat("\nEXPECTED LABELS:\n")
+# #   cat("1-Moins de 20  (values 0-19, not including 19.5)\n")
+# #   cat("2-20 à 39      (values 20-39, not including 39.5)\n")
+# #   cat("3-40 ou plus   (values 40+, including 39.5 and up)\n")
+# #   
+# #   return(result)
+# # }
+# # 
+# # # Test 2: Manual with integer cutpoints
+# # test_manual_integer <- function(data) {
+# #   cat("\n=== TEST 2: Manual method with integer cutpoints 20, 40 ===\n")
+# #   
+# #   result <- cut_adaptive(
+# #     data, 
+# #     "TEMPSCOUPLE",
+# #     method = "manual",
+# #     min_n = 30,
+# #     cutpoints = c(20, 40),
+# #     sep_zero = FALSE,
+# #     rev_levels = FALSE
+# #   )
+# #   
+# #   print(result$breaks)
+# #   print(result$cutpoints)
+# #   print(result$labels)
+# #   print(result$breaks_explicit)
+# #   
+# #   # What we expect:
+# #   cat("\nEXPECTED LABELS:\n")
+# #   cat("1-Moins de 20  (values < 20)\n")
+# #   cat("2-20 à 39      (values 20-39)\n")
+# #   cat("3-40 ou plus   (values >= 40)\n")
+# #   
+# #   return(result)
+# # }
+# # 
+# # # Test 3: Manual with zero separation
+# # test_manual_with_zero <- function(data) {
+# #   cat("\n=== TEST 3: Manual with sep_zero = TRUE ===\n")
+# #   
+# #   result <- cut_adaptive(
+# #     data, 
+# #     "LIVEFREQ_CONCERT",  # Variable with zeros
+# #     method = "manual",
+# #     min_n = 30,
+# #     cutpoints = c(5, 10),
+# #     sep_zero = TRUE,
+# #     rev_levels = FALSE
+# #   )
+# #   
+# #   print(result$breaks)
+# #   print(result$cutpoints)
+# #   print(result$labels)
+# #   print(result$breaks_explicit)
+# #   
+# #   # What we expect:
+# #   cat("\nEXPECTED LABELS:\n")
+# #   cat("0-0            (only zeros)\n")
+# #   cat("1-1 à 4        (values 1-4)\n")
+# #   cat("2-5 à 9        (values 5-9)\n")
+# #   cat("3-10 ou plus   (values >= 10)\n")
+# #   
+# #   return(result)
+# # }
+# # 
+# # # Test 4: Jenks method (non-manual)
+# # test_jenks <- function(data) {
+# #   cat("\n=== TEST 4: Jenks method (automatic cutpoints) ===\n")
+# #   
+# #   result <- cut_adaptive(
+# #     data, 
+# #     "TEMPSCOUPLE",
+# #     method = "jenks",
+# #     n_bins = 3,
+# #     min_n = 30,
+# #     sep_zero = FALSE,
+# #     rev_levels = FALSE
+# #   )
+# #   
+# #   print(result$breaks)
+# #   print(result$cutpoints)
+# #   print(result$labels)
+# #   print(result$breaks_explicit)
+# #   
+# #   # Check consistency: labels should reflect actual data ranges
+# #   cat("\nVERIFY: Labels should match actual min/max in each bin\n")
+# #   
+# #   return(result)
+# # }
+# # 
+# # # Test 5: Edge case - cutpoint at decimal .5
+# # test_decimal_cutpoint <- function(data) {
+# #   cat("\n=== TEST 5: Decimal cutpoints .5 ===\n")
+# #   
+# #   result <- cut_adaptive(
+# #     data, 
+# #     "TEMPSCOUPLE",
+# #     method = "manual",
+# #     min_n = 30,
+# #     cutpoints = c(10.5, 30.5, 50.5),
+# #     sep_zero = FALSE,
+# #     rev_levels = FALSE
+# #   )
+# #   
+# #   print(result$breaks)
+# #   print(result$cutpoints)
+# #   print(result$labels)
+# #   print(result$breaks_explicit)
+# #   
+# #   return(result)
+# # }
+# # 
+# # # Run all tests
+# # run_all_tests <- function(data) {
+# #   cat("===== CUTPOINT HANDLING TESTS =====\n")
+# #   cat("Testing how cutpoints translate to labels\n")
+# #   cat("Rule: cutpoint X means left bin goes up to (but not including) X,\n")
+# #   cat("      right bin starts at X and includes it.\n\n")
+# #   
+# #   test_manual_simple(data)
+# #   test_manual_integer(data)
+# #   test_manual_with_zero(data)
+# #   test_jenks(data)
+# #   test_decimal_cutpoint(data)
+# #   
+# #   cat("\n===== TESTS COMPLETE =====\n")
+# # }
+# # 
+# # # Usage:
+# # # source("cut_adaptive_functions.R")
+# # # run_all_tests(L325)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Cut numeric vars save ----
+
+# #' Test Numeric-Categorical Association
+# #'
+# #' @description
+# #' Tests the association between numeric and categorical variables using ANOVA
+# #' and calculates eta (correlation ratio) to measure effect size.
+# #'
+# #' @param data A data frame or tibble
+# #' @param num_vars Character vector of numeric variable names to test
+# #' @param target_vars Character vector of categorical variable names to test against
+# #'
+# #' @return A formatted tibble showing numeric variables (rows), categorical targets
+# #'   (groups), eta correlation, F-statistic, and p-value for association
+# #'
+# #' @details
+# #' Tests all combinations of num_vars × target_vars using one-way ANOVA.
+# #' Results are sorted by association strength (eta), with significant
+# #' associations first.
+# #'
+# #' @keywords internal
+# 
+# test_numeric_categorical_association <- function(
+#     data,
+#     num_vars,
+#     target_vars #, method = "robust"
+# ) {
+#   
+#   # Expand all combinations
+#   combos <- tidyr::expand_grid(
+#     numeric_var = num_vars,
+#     target_var = target_vars
+#   )
+#   
+#   results <- purrr::pmap_df(
+#     combos,
+#     function(numeric_var, target_var) {
+#       
+#       # Extract clean data
+#       test_data <- data |>
+#         dplyr::select(
+#           num = !!rlang::sym(numeric_var),
+#           cat = !!rlang::sym(target_var)
+#         ) |>
+#         dplyr::filter(!is.na(num), !is.na(cat))
+#       
+#       if (nrow(test_data) < 2) {
+#         return(tibble::tibble(
+#           numeric_var = numeric_var,
+#           target_var = target_var,
+#           eta = NA_real_,
+#           f_stat = NA_real_,
+#           p_value = NA_real_,
+#           significant = NA,
+#           method = method
+#         ))
+#       }
+#       
+#       # ANOVA
+#       fit <- stats::aov(num ~ cat, data = test_data)
+#       summary_fit <- summary(fit)[[1]]
+#       
+#       f_stat <- summary_fit[1, "F value"]
+#       p_value <- summary_fit[1, "Pr(>F)"]
+#       
+#       # Calculate eta (correlation ratio)
+#       grand_mean <- mean(test_data$num, na.rm = TRUE)
+#       ss_between <- test_data |>
+#         dplyr::group_by(cat) |>
+#         dplyr::summarise(
+#           n = dplyr::n(),
+#           mean = mean(num, na.rm = TRUE),
+#           .groups = "drop"
+#         ) |>
+#         dplyr::mutate(ss = n * (mean - grand_mean)^2) |>
+#         dplyr::pull(ss) |>
+#         sum()
+#       
+#       ss_total <- sum((test_data$num - grand_mean)^2, na.rm = TRUE)
+#       eta <- sqrt(ss_between / ss_total)
+#       
+#       # Determine significance (alpha = 0.05)
+#       significant <- p_value < 0.05
+#       
+#       tibble::tibble(
+#         numeric_var = numeric_var,
+#         target_var = target_var,
+#         eta = eta,
+#         f_stat = f_stat,
+#         p_value = p_value,
+#         significant = significant
+#       )
+#     }
+#   )
+#   
+#   results |>
+#     dplyr::mutate(
+#       numeric_var = forcats::as_factor(numeric_var),
+#       target_var = forcats::as_factor(target_var),
+#       eta = tabxplor::fmt(
+#         n = rep(NA_integer_, length(eta)),
+#         type = "row",
+#         pct = eta,
+#         digits = 1
+#       ),
+#       f_stat = round(f_stat, 1),
+#       p_value = tabxplor::fmt(
+#         n = rep(NA_integer_, length(eta)),
+#         type = "row",
+#         pct = p_value,
+#         digits = 1
+#       )
+#     ) |>
+#     dplyr::rename(num_vars = numeric_var) |>
+#     dplyr::rename(target_vars = target_var) |>
+#     dplyr::arrange(num_vars, !significant, dplyr::desc(eta)) |>
+#     tabxplor::new_tab() |>
+#     dplyr::group_by(num_vars)
+# }
+# 
+# 
+# #' Adaptive Binning of Numeric Variables
+# #'
+# #' @description
+# #' Cuts numeric variables into meaningful categorical bins using various
+# #' discretization methods. Generates French-formatted categorical labels
+# #' with adaptive bin merging to ensure minimum bin size.
+# #'
+# #' @param data A data frame containing the variable to discretize
+# #' @param var_name Character string with the name of the numeric variable
+# #' @param method Character string specifying the discretization method.
+# #'   Options: "jenks" (Jenks natural breaks), "chiM", "caim", "cacc", "ameva",
+# #'   "mdlp", "modChi2" (chi-square family), "manual" (user-provided cutpoints).
+# #'   Default: "jenks"
+# #' @param n_bins Numeric. Target number of bins. Default: 3
+# #' @param min_n Numeric. Minimum number of observations per bin. Default: 30
+# #' @param separate_zero Logical. If TRUE and sufficient zero-valued observations
+# #'   exist, zero is placed in its own bin. Default: TRUE
+# #' @param maxvar_with Character string. For supervised methods (chi-square family),
+# #'   name of the categorical target variable. Required for supervised methods.
+# #' @param cut_points Numeric vector. For method="manual", the cutpoints
+# #'   (boundaries between bins). Not used for other methods.
+# #' @param alpha Numeric. Significance level for supervised methods. Default: 0.05
+# #' @param rev_levels Logical. If TRUE, reverse the order of factor levels
+# #'   numerically (levels are always numbered starting from 1, except when first
+# #'   level contains only 0, then it starts from 0). Default: FALSE
+# #'
+# #' @return A list containing:
+# #'   \item{breaks}{Numeric vector of break points}
+# #'   \item{cutpoints}{Numeric vector of cutpoints between bins}
+# #'   \item{n_bins}{Integer count of resulting bins}
+# #'   \item{labels}{Character vector of French-formatted labels}
+# #'   \item{zero_separated}{Logical. TRUE if zero was separated}
+# #'   \item{breaks_explicit}{Tibble with min_val, max_val, n, label}
+# #'   \item{rev_levels}{Logical. Indicates if levels were reversed}
+# #'
+# #' @keywords internal
+# 
+# cut_adaptive <- function(
+#     data,
+#     num_var,
+#     method = "jenks",
+#     n_bins = 3,
+#     min_n = 30,
+#     sep_zero = TRUE,
+#     target_var = NULL,
+#     cutpoints = NULL,
+#     alpha = 0.05,
+#     rev_levels = FALSE) {
+#   
+#   # Validate method
+#   valid_methods <- c("jenks", "chiM", "caim", "cacc", "ameva", "mdlp", "modChi2", "manual")
+#   if (!method %in% valid_methods) {
+#     stop("Invalid method. Use: ", paste(valid_methods, collapse = ", "))
+#   }
+#   
+#   var_sym <- rlang::sym(num_var)
+#   
+#   # Extract clean sorted numeric values
+#   x <- data |>
+#     dplyr::pull(!!var_sym) |>
+#     na.omit() |>
+#     sort()
+#   
+#   n_zero <- sum(x == 0)
+#   
+#   # Initialize zero bin handling (shared across all methods)
+#   zero_bin <- FALSE
+#   if (sep_zero && n_zero >= min_n) {
+#     zero_bin <- TRUE
+#   }
+#   
+#   # ── Generate breaks by method ──
+#   
+#   if (method == "jenks") {
+#     # Unsupervised: Jenks natural breaks
+#     breaks <- .get_jenks_breaks(x, n_bins, sep_zero, zero_bin)
+#     
+#   } else if (method == "manual") {
+#     # Manual: use provided cutpoints
+#     if (is.null(cutpoints)) {
+#       stop("method='manual' requires cutpoints argument")
+#     }
+#     breaks <- .get_manual_breaks(cutpoints, zero_bin)
+#     
+#   } else {
+#     # Supervised: chi-square based methods
+#     if (is.null(target_var)) {
+#       stop("method='", method, "' requires target_var argument")
+#     }
+#     target_sym <- rlang::sym(target_var)
+#     
+#     # Prepare target variable data
+#     chi_data <- data |>
+#       dplyr::select(!!var_sym, !!target_sym) |>
+#       dplyr::filter(!is.na(!!var_sym), !is.na(!!target_sym))
+#     
+#     if (sep_zero && zero_bin) {
+#       chi_data <- chi_data |>
+#         dplyr::filter(!!var_sym > 0)
+#     }
+#     
+#     chi_data <- as.data.frame(chi_data)
+#     chi_data[[1]] <- as.numeric(chi_data[[1]])
+#     chi_data[[2]] <- as.factor(chi_data[[2]])
+#     
+#     # Apply discretization method
+#     breaks <- .get_discretization_breaks(chi_data, method, alpha, n_bins)
+#     
+#     if (is.null(breaks)) {
+#       return(NULL)
+#     }
+#     
+#     # Insert zero boundary if needed
+#     if (zero_bin) {
+#       breaks <- c(-Inf, 0.5, breaks[2:(length(breaks) - 1)], Inf) |>
+#         unique() |>
+#         sort()
+#     }
+#   }
+#   
+#   if (is.null(breaks)) {
+#     cat("Error: Could not generate breaks for ", num_var, "\n", sep = "")
+#     return(NULL)
+#   }
+#   
+#   # ── Adaptive merge for underfull bins ──
+#   
+#   breaks <- .adaptive_merge_breaks(x, breaks, min_n, zero_bin, num_var)
+#   
+#   # ── Generate final splits_info with French labels ──
+#   
+#   splits_info <- tibble::tibble(
+#     value = x,
+#     bin = cut(x, breaks = breaks, include.lowest = TRUE)
+#   ) |>
+#     dplyr::group_by(bin) |>
+#     dplyr::summarise(
+#       min_val = min(value, na.rm = TRUE),
+#       max_val = max(value, na.rm = TRUE),
+#       n = dplyr::n(),
+#       .groups = "drop"
+#     ) |>
+#     dplyr::arrange(min_val)
+#   
+#   # Generate French labels with incremental counter
+#   # Determine if first group contains only 0: only case where we start from 0
+#   first_is_zero_only <- (splits_info$min_val[1] == 0 &
+#                            splits_info$max_val[1] == 0)
+#   
+#   labels <- splits_info |>
+#     dplyr::mutate(
+#       idx = dplyr::row_number(),
+#       n_groups = dplyr::n(),
+#       # Start from 0 only if first group is exactly 0, else start from 1
+#       start_num = dplyr::if_else(first_is_zero_only, 0L, 1L),
+#       # Counter for this row
+#       counter = idx + start_num - 1,
+#       label = dplyr::case_when(
+#         min_val == 0 & max_val == 0 ~ paste0(counter, "-0"),
+#         min_val == max_val & idx == 1 & n_groups == 1 ~
+#           paste0(counter, "-", as.character(min_val)),
+#         min_val == max_val & idx < n_groups ~
+#           paste0(counter, "-", as.character(min_val)),
+#         min_val == max_val & idx == n_groups ~
+#           paste0(counter, "-", min_val, " ou plus"),
+#         idx == 1 & n_groups == 1 ~
+#           paste0(counter, "-< ", max_val),
+#         idx == 1 & n_groups > 1 ~
+#           paste0(counter, "-Moins de ", lead(min_val)),
+#         idx == n_groups ~
+#           paste0(counter, "-", min_val, " ou plus"),
+#         TRUE ~
+#           paste0(counter, "-", min_val, " à ", lead(min_val) - 1)
+#       )
+#     ) |>
+#     dplyr::pull(label) |>
+#     (function(x) x[!is.na(x)])()
+#   
+#   splits_info <- splits_info |>
+#     dplyr::mutate(label = labels)
+#   
+#   # ── Handle rev_levels if requested ──
+#   if (rev_levels) {
+#     splits_info <- splits_info |>
+#       dplyr::arrange(dplyr::desc(dplyr::row_number())) |>
+#       dplyr::mutate(
+#         new_idx = dplyr::row_number(),
+#         label = paste0(new_idx, "-", stringr::str_remove(label, "^\\d+-"))
+#       ) |>
+#       dplyr::select(-new_idx) |>
+#       dplyr::arrange(min_val)
+#     
+#     labels <- splits_info |>
+#       dplyr::pull(label)
+#   }
+#   
+#   list(
+#     breaks = breaks,
+#     cutpoints = breaks[-c(1, length(breaks))],
+#     n_bins = nrow(splits_info),
+#     labels = labels,
+#     zero_separated = zero_bin,
+#     breaks_explicit = splits_info |>
+#       dplyr::select(min_val, max_val, n, label),
+#     rev_levels = rev_levels
+#   )
+# }
+# 
+# # ── Helper functions ──
+# 
+# #' Get Jenks Natural Breaks
+# #'
+# #' @param x Numeric vector of sorted values
+# #' @param n_bins Numeric target number of bins
+# #' @param sep_zero Logical whether to separate zero
+# #' @param zero_bin Logical whether zero bin was created
+# #'
+# #' @return Numeric vector of break points
+# #'
+# #' @keywords internal
+# 
+# .get_jenks_breaks <- function(x, n_bins, sep_zero, zero_bin) {
+#   
+#   if (sep_zero && zero_bin) {
+#     x_nonzero <- x[x > 0]
+#     if (length(unique(x_nonzero)) <= 1) {
+#       return(c(-Inf, 0.5, Inf))
+#     }
+#     n_unique <- length(unique(x_nonzero))
+#     k_start <- min(n_bins + 3, n_unique - 1)
+#     breaks_nonzero <- .try_jenks_breaks(x_nonzero, k_start)
+#     if (!is.null(breaks_nonzero)) {
+#       return(c(-Inf, 0.5, breaks_nonzero[-1], Inf))
+#     }
+#   }
+#   
+#   n_unique <- length(unique(x))
+#   k_start <- min(n_bins + 5, n_unique - 1)
+#   .try_jenks_breaks(x, k_start)
+# }
+# 
+# #' Try Jenks with Decreasing k
+# #'
+# #' @param x Numeric vector of sorted values
+# #' @param k_start Integer starting number of breaks
+# #'
+# #' @return Numeric vector of break points or NULL if unsuccessful
+# #'
+# #' @keywords internal
+# 
+# .try_jenks_breaks <- function(x, k_start) {
+#   for (attempt_k in seq(k_start, 1, -1)) {
+#     tryCatch(
+#       {
+#         candidate <- BAMMtools::getJenksBreaks(x, k = attempt_k) |> unique()
+#         if (length(candidate) > 2) return(candidate)
+#       },
+#       error = function(e) NULL
+#     )
+#   }
+#   NULL
+# }
+# 
+# #' Get Manual Break Points
+# #'
+# #' @param cutpoints Numeric vector of cutpoints
+# #' @param zero_bin Logical whether to include zero bin
+# #'
+# #' @return Numeric vector of break points
+# #'
+# #' @keywords internal
+# 
+# .get_manual_breaks <- function(cutpoints, zero_bin) {
+#   cutpoints <- cutpoints[cutpoints > 0]
+#   if (zero_bin) {
+#     c(-Inf, 0.5, cutpoints, Inf)
+#   } else {
+#     c(-Inf, cutpoints, Inf)
+#   } |>
+#     unique() |>
+#     sort()
+# }
+# 
+# #' Get Discretization Breaks from chi-square Methods
+# #'
+# #' @param chi_data Data frame with numeric and categorical columns
+# #' @param method Character string naming the discretization method
+# #' @param alpha Numeric significance level
+# #' @param n_bins Numeric target number of bins
+# #'
+# #' @return Numeric vector of break points or NULL if unsuccessful
+# #'
+# #' @keywords internal
+# 
+# .get_discretization_breaks <- function(chi_data, method, alpha, n_bins) {
+#   
+#   result <- tryCatch(
+#     {
+#       if (method == "chiM") {
+#         discretization::chiM(chi_data, alpha = alpha)
+#       } else if (method == "mdlp") {
+#         discretization::mdlp(chi_data)
+#       } else if (method == "caim") {
+#         discretization::disc.Topdown(chi_data, method = 1)
+#       } else if (method == "cacc") {
+#         discretization::disc.Topdown(chi_data, method = 2)
+#       } else if (method == "ameva") {
+#         discretization::disc.Topdown(chi_data, method = 3)
+#       } else if (method == "modChi2") {
+#         discretization::modChi2(chi_data, alp = alpha)
+#       }
+#     },
+#     error = function(e) {
+#       cat("Error in ", method, ": ", e$message, "\n", sep = "")
+#       NULL
+#     }
+#   )
+#   
+#   if (is.null(result)) return(NULL)
+#   
+#   # Extract and clean cutpoints
+#   cutp <- result$cutp[[1]]
+#   c(-Inf, cutp, Inf) |>
+#     as.numeric() |>
+#     unique() |>
+#     sort()
+# }
+# 
+# #' Adaptive Merge of Underfull Bins
+# #'
+# #' @description
+# #' Merges bins with fewer observations than min_n with their neighbors.
+# #' Preserves zero bin if separated. Repeats until all bins meet minimum size
+# #' or single bin remains.
+# #'
+# #' @param x Numeric vector of original values
+# #' @param breaks Numeric vector of break points
+# #' @param min_n Numeric minimum bin size
+# #' @param zero_bin Logical whether zero bin is separated
+# #' @param num_var Character variable name (for warnings)
+# #'
+# #' @return Numeric vector of adjusted break points
+# #'
+# #' @keywords internal
+# 
+# .adaptive_merge_breaks <- function(x, breaks, min_n, zero_bin, num_var) {
+#   
+#   repeat {
+#     bin_assignments <- cut(x, breaks = breaks, include.lowest = TRUE)
+#     bin_counts <- table(bin_assignments)
+#     underfull <- which(bin_counts < min_n)
+#     
+#     if (length(underfull) == 0) break
+#     
+#     # Never merge zero bin if separated
+#     if (zero_bin && 1 %in% underfull) {
+#       underfull <- underfull[-which(underfull == 1)]
+#       if (length(underfull) == 0) break
+#     }
+#     
+#     first_underfull <- min(underfull)
+#     
+#     # Merge with closer neighbor by count
+#     if (first_underfull == 1) {
+#       breaks <- breaks[-2]
+#     } else if (first_underfull == length(breaks) - 1) {
+#       breaks <- breaks[-(length(breaks) - 1)]
+#     } else {
+#       left_count <- bin_counts[first_underfull - 1]
+#       right_count <- bin_counts[first_underfull + 1]
+#       if (left_count <= right_count) {
+#         breaks <- breaks[-(first_underfull)]
+#       } else {
+#         breaks <- breaks[-(first_underfull + 1)]
+#       }
+#     }
+#     
+#     if (length(breaks) <= 2) {
+#       cat(
+#         "Warning: ", num_var,
+#         " - reduced to single bin to satisfy min_n = ", min_n, "\n",
+#         sep = ""
+#       )
+#       break
+#     }
+#   }
+#   
+#   breaks
+# }
+# 
+# #' Test for Zero-Inflation
+# #'
+# #' @description
+# #' Tests whether a numeric variable has statistically significant zero-inflation
+# #' using a Vuong test comparing zero-inflated Poisson to standard Poisson.
+# #'
+# #' @param x Numeric vector
+# #' @param alpha Numeric significance level. Default: 0.05
+# #' @param verbose Logical. If TRUE, prints results. Default: FALSE
+# #'
+# #' @return Logical. TRUE if zero-inflation is statistically significant.
+# #'
+# #' @details
+# #' Uses pscl::zeroinfl() and pscl::vuong() to test H0: regular Poisson
+# #' vs H1: zero-inflated Poisson. Positive z-statistic indicates zero-inflation.
+# #'
+# 
+# is_zero_special <- function(x, alpha = 0.05, verbose = FALSE) {
+#   
+#   x_clean <- as.numeric(na.omit(x))
+#   
+#   if (sum(x_clean == 0) == 0) {
+#     if (verbose) cat("No zeros found\n")
+#     return(FALSE)
+#   }
+#   
+#   # Fit models
+#   zip_fit <- pscl::zeroinfl(x_clean ~ 1 | 1, dist = "poisson")
+#   pois_fit <- stats::glm(x_clean ~ 1, family = poisson)
+#   
+#   # Capture printed output
+#   vuong_text <- capture.output(pscl::vuong(zip_fit, pois_fit))
+#   
+#   # Find Raw line (starts with "Raw")
+#   raw_idx <- which(grepl("^Raw", vuong_text))
+#   
+#   if (length(raw_idx) == 0) {
+#     if (verbose) cat("Could not parse Vuong output\n")
+#     return(FALSE)
+#   }
+#   
+#   raw_line <- vuong_text[raw_idx[1]]
+#   
+#   # Extract all numbers from Raw line
+#   numbers <- as.numeric(
+#     stringr::str_extract_all(raw_line, "-?\\d+\\.\\d+|\\d+")[[1]]
+#   )
+#   
+#   if (length(numbers) < 2) {
+#     if (verbose) cat("Could not extract values from Vuong output\n")
+#     return(FALSE)
+#   }
+#   
+#   z_stat <- numbers[1]
+#   p_value <- numbers[length(numbers)]
+#   
+#   is_special <- z_stat > 0 && p_value < alpha
+#   
+#   if (verbose) {
+#     prop_zero <- sum(x_clean == 0) / length(x_clean)
+#     cat(sprintf(
+#       "prop_zero=%.1f%% | z=%.3f | p=%.6f | %s\n",
+#       prop_zero * 100,
+#       z_stat,
+#       p_value,
+#       ifelse(is_special, "SPECIAL", "regular")
+#     ))
+#   }
+#   
+#   is_special
+# }
+# 
+# #' Multivariate Adaptive Binning Wrapper
+# #'
+# #' @description
+# #' Discretizes multiple numeric variables simultaneously with automatic or
+# #' specified parameters per variable. Supports supervised and unsupervised
+# #' methods. Returns data frame with new categorical variables (named VAR#,
+# #' where # is the number of categories) and formatted discretization summary.
+# #'
+# #' @param data A data frame containing the variables to discretize
+# #' @param num_vars Character vector of numeric variable names to discretize.
+# #'   Required.
+# #' @param method Character or character vector of discretization methods.
+# #'   Recycled to length of num_vars. Options: "jenks", "chiM", "caim", "cacc",
+# #'   "ameva", "mdlp", "modChi2", "manual". Default: "jenks"
+# #' @param target_vars Character or character vector of categorical target
+# #'   variables for supervised methods. Use NA for unsupervised. Recycled to
+# #'   length of num_vars. Default: NULL (all unsupervised)
+# #' @param conf_level Numeric or numeric vector of significance levels for
+# #'   supervised methods. Recycled to length of num_vars. Default: 0.05
+# #' @param cutpoints List or list of numeric vectors. For method="manual",
+# #'   provide list of cutpoint vectors. Recycled to length of num_vars.
+# #'   Default: NULL
+# #' @param bins Numeric or numeric vector of target bin counts. Recycled to
+# #'   length of num_vars. Default: 3
+# #' @param min_n Numeric or numeric vector of minimum bin sizes. Recycled to
+# #'   length of num_vars. Default: 30
+# #' @param sep_zero Logical or logical vector indicating whether to separate
+# #'   zero values. Recycled to length of num_vars. Default: TRUE
+# #' @param rev_levels Logical or logical vector. If TRUE, reverses the order of
+# #'   factor levels numerically (levels numbered 1-N, then reversed; factor
+# #'   levels reordered alphanumerically with forcats::fct_relevel). Recycled to
+# #'   length of num_vars. Default: FALSE
+# #'
+# #' @return A data frame (tibble) containing the original data plus new variables
+# #'   named as VAR# (where # is the number of categories, e.g., LIVEFREQ_CONCERT3).
+# #'   Original numeric variables are retained. New categorical variables are
+# #'   labeled with variable label and category count. When rev_levels = TRUE,
+# #'   factor levels are sorted alphanumerically.
+# #'
+# #' @details
+# #' Vectorized arguments are recycled to match length of num_vars using
+# #' vctrs::vec_recycle(). Automatically adjusts min_n downward if insufficient
+# #' non-dominant values exist to create 2 bins. Prints formatted discretization
+# #' summary showing bin labels, counts, and cutpoints for each variable.
+# #'
+# #' Level numbering:
+# #' - Starts from 0 only when first bin contains exactly 0: c("0-0", "1-1 à 3", ...)
+# #' - Starts from 1 in all other cases: c("1-Moins de 2", "2-2 à 3", ...)
+# #'
+# #' @examples
+# #' \dontrun{
+# #' result <- multicut(
+# #'   data = survey_data,
+# #'   num_vars = c("income", "age", "spending"),
+# #'   method = c("jenks", "jenks", "manual"),
+# #'   cutpoints = list(NA, NA, c(500, 1500)),
+# #'   bins = 3,
+# #'   min_n = 30,
+# #'   sep_zero = TRUE,
+# #'   rev_levels = FALSE
+# #' )
+# #' }
+# 
+# multicut <- function(
+#     data,
+#     num_vars,
+#     method = "jenks",
+#     target_vars = NULL,
+#     conf_level = 0.05,
+#     cutpoints = NULL,
+#     bins = 3,
+#     min_n = 30,
+#     sep_zero = TRUE,
+#     rev_levels = FALSE) {
+#   
+#   n_vars <- length(num_vars)
+#   
+#   # Recycle arguments
+#   method <- vctrs::vec_recycle(method, n_vars)
+#   bins <- vctrs::vec_recycle(bins, n_vars)
+#   min_n <- vctrs::vec_recycle(min_n, n_vars)
+#   sep_zero <- vctrs::vec_recycle(sep_zero, n_vars)
+#   conf_level <- vctrs::vec_recycle(conf_level, n_vars)
+#   rev_levels <- vctrs::vec_recycle(rev_levels, n_vars)
+#   
+#   if (is.null(target_vars)) {
+#     target_vars <- rep(NA_character_, n_vars)
+#   } else if (is.character(target_vars)) {
+#     target_vars <- vctrs::vec_recycle(target_vars, n_vars)
+#   }
+#   
+#   if (is.null(cutpoints)) {
+#     cutpoints <- rep(list(NA), n_vars)
+#   } else {
+#     cutpoints <- vctrs::vec_recycle(cutpoints, n_vars)
+#   }
+#   
+#   result <- dplyr::as_tibble(data)
+#   cuts_details <- list()
+#   
+#   # Process each variable
+#   for (i in seq_along(num_vars)) {
+#     var_name <- num_vars[i]
+#     x_clean <- na.omit(data[[var_name]])
+#     
+#     # Count dominant value directly
+#     dominant_count <- max(table(x_clean))
+#     non_dominant_count <- length(x_clean) - dominant_count
+#     
+#     # Detect and adjust
+#     adjusted_min_n <- min_n[i]
+#     min_n_warning <- ""
+#     
+#     if (non_dominant_count > 0 && non_dominant_count < min_n[i]) {
+#       adjusted_min_n <- non_dominant_count
+#       min_n_warning <- sprintf(
+#         " (warning: set to min_n = %d to ensure 2 bins)",
+#         adjusted_min_n
+#       )
+#     }
+#     
+#     # Call cut_adaptive with adjusted min_n
+#     cut_result <- suppressWarnings(
+#       cut_adaptive(
+#         data = data,
+#         num_var = var_name,
+#         method = method[i],
+#         n_bins = bins[i],
+#         min_n = adjusted_min_n,
+#         sep_zero = sep_zero[i],
+#         target_var = target_vars[i],
+#         cutpoints = cutpoints[[i]],
+#         alpha = conf_level[i],
+#         rev_levels = rev_levels[i]
+#       )
+#     )
+#     
+#     if (is.null(cut_result)) {
+#       cat("Warning: ", var_name, " could not be discretized\n", sep = "")
+#       next
+#     }
+#     
+#     # Create new variable name: VAR# (no "cat" suffix, no underscore)
+#     new_var_name <- paste0(var_name, cut_result$n_bins)
+#     
+#     if (new_var_name %in% names(result)) {
+#       cat("Warning: ", new_var_name, " already exists, replacing\n", sep = "")
+#     }
+#     
+#     # Create categorical variable
+#     x_cut <- cut(
+#       data[[var_name]],
+#       breaks = cut_result$breaks,
+#       labels = cut_result$labels,
+#       include.lowest = TRUE
+#     )
+#     
+#     # Apply fct_relevel with sort if rev_levels is TRUE
+#     if (rev_levels[i]) {
+#       x_cut <- forcats::fct_relevel(x_cut, sort)
+#     }
+#     
+#     result[[new_var_name]] <- x_cut
+#     
+#     # Add label with category count
+#     if (!is.null(attr(data[[var_name]], "label"))) {
+#       old_label <- attr(data[[var_name]], "label")
+#       new_label <- paste0(old_label, " en ", cut_result$n_bins, " catégories")
+#       labelled::var_label(result[[new_var_name]]) <- new_label
+#     } else {
+#       labelled::var_label(result[[new_var_name]]) <-
+#         paste0(var_name, " en ", cut_result$n_bins, " catégories")
+#     }
+#     
+#     # Store details for summary
+#     cuts_details[[i]] <- list(
+#       var_name = var_name,
+#       method = method[i],
+#       target = target_vars[i],
+#       breaks_explicit = cut_result$breaks_explicit,
+#       cutpoints = cut_result$cutpoints,
+#       min_n_warning = min_n_warning,
+#       rev_levels = cut_result$rev_levels
+#     )
+#   }
+#   
+#   # Print formatted summary
+#   cat("\n")
+#   cat("═════════════════════════════════════════════════════════════\n")
+#   cat("DISCRETIZATION SUMMARY\n")
+#   cat("═════════════════════════════════════════════════════════════\n\n")
+#   
+#   for (detail in cuts_details) {
+#   
+#     # Method line with target if applicable (only for supervised methods)
+#     method_str <- detail$method
+#     supervised_methods <- c("chiM", "caim", "cacc", "ameva", "mdlp", "modChi2")
+#     if (!is.na(detail$target) && detail$method %in% supervised_methods) {
+#       method_str <- paste0(method_str, " over ", detail$target)
+#     }
+#     
+#     # # Add rev_levels indicator if applicable
+#     # rev_indicator <- ""
+#     # if (detail$rev_levels) {
+#     #   rev_indicator <- " [levels reversed & sorted]"
+#     # }
+#     
+#     cat(sprintf(
+#       "%s: %s%s\n",
+#       detail$var_name,
+#       method_str,
+#       #rev_indicator,
+#       detail$min_n_warning
+#     ))
+#     
+#     # Build table: label, n, cutpoints
+#     tbl <- detail$breaks_explicit
+#     cutpts <- detail$cutpoints
+#     
+#     # Format columns
+#     labels_col <- format(tbl$label, justify = "left")
+#     n_col <- format(tbl$n, justify = "right")
+#     
+#     # Cutpoints: align with each row
+#     cutpoints_col <- character(nrow(tbl))
+#     if (length(cutpts) > 0) {
+#       for (j in seq_along(cutpts)) {
+#         cutpoints_col[j + 1] <- as.character(cutpts[j])
+#       }
+#     }
+#     cutpoints_col <- format(cutpoints_col, justify = "right")
+#     
+#     # Print header
+#     cat(
+#       "  ", format("label", width = 20, justify = "left"),
+#       format("n", width = 6, justify = "right"),
+#       format("cutpoints", width = 12, justify = "right"),
+#       "\n",
+#       sep = ""
+#     )
+#     
+#     # Print rows
+#     for (j in seq_len(nrow(tbl))) {
+#       cat(
+#         "  ", format(labels_col[j], width = 20, justify = "left"),
+#         format(n_col[j], width = 6, justify = "right"),
+#         format(cutpoints_col[j], width = 12, justify = "right"),
+#         "\n",
+#         sep = ""
+#       )
+#     }
+#     
+#     cat("\n")
+#   }
+#   
+#   cat("═════════════════════════════════════════════════════════════\n\n")
+#   
+#   result
+# }
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# ## Test cut functions
+# # install.packages("BAMMtools", "discretization", "pscl") # "pscl" for zero inflation test
+# 
+# # # Multiples cuts usage exemple
+# # multicut(
+# #   data = L325,
+# #   num_vars = c("LIVEFREQ_CONCERT", "LIVEFREQ_SOIREE", "LIVEFREQ_BARMUS",
+# #                "CINEEQUIP", "REPASTPS"),
+# #   method = c("jenks","jenks", "chiM", "manual", "jenks"), # vectorized over vars
+# #   cutpoints = list(NA, NA, NA, c(450, 1400), NA),        # vectorized over vars
+# #   target_vars = c(NA, NA, "AGE4P1", NA, NA),              # vectorized over vars
+# #   bins = 3,                                             # vectorized over vars
+# #   min_n = c(30, 30, 30, 30, 20),                          # vectorized over vars
+# #   sep_zero = c( TRUE, TRUE, TRUE, FALSE, FALSE)      # vectorized over vars
+# #   # alpha = 0.05,
+# # )
+# 
+# # # Unique function 
+# # # Use 1 : like cut_chimerge_adaptive() 
+# # cut_adaptive(
+# #   L325,
+# #   var_name = "LIVEFREQ_CONCERT",
+# #   method = "caim", # "chiM", "caim", "mdlp", "modChi2"
+# #   maxvar_with = "DIPLOMP1", 
+# #   n_bins = 3, min_n = 30, # alpha = 0.05
+# #   separate_zero = TRUE
+# # )
+# # 
+# # # Use 2: like cut_jenks_adaptive()
+# # cut_adaptive(
+# #   L325, 
+# #   var_name = "LIVEFREQ_CONCERT",
+# #   method = "jenks", 
+# #   n_bins = 2, min_n = 30 #, separate_zero = TRUE
+# # )
+# # 
+# # # Use 3: like cut_manual() 
+# # cut_adaptive(
+# #   L325,
+# #   var_name = "CINEEQUIP",
+# #   method = "manual",
+# #   cut_points = c(450, 1400),
+# #   min_n = 30, separate_zero = FALSE
+# # )
+# 
+# # # Past functions
+# # cut_jenks_adaptive(L325, "LIVEFREQ_CONCERT", n_bins = 2, min_n = 25)
+# # cut_jenks_adaptive(L325, "LIVEFREQ_BOITE", n_bins = 3, min_n = 10)
+# # cut_jenks_adaptive(L325, "REPASTPS", n_bins = 3, min_n = 30)
+# # 
+# # 
+# # cut_chimerge_adaptive(
+# #   L325,
+# #   var_name = "CINEEQUIP",
+# #   maxvar_with = "PCS_MENAGE", 
+# #   method = "caim",    # "chiM", "mdlp", "caim", "modChi2"
+# #   n_bins = 5, min_n = 20, # alpha = 0.05
+# #   separate_zero = FALSE
+# # )
+# # 
+# # cut_chimerge_adaptive(
+# #   L325,
+# #   var_name = "LIVEFREQ_CONCERT",
+# #   maxvar_with = "DIPLOMP1", 
+# #   method = "caim",    # "chiM", "mdlp", "caim", "modChi2"
+# #   n_bins = 4, min_n = 30, # alpha = 0.05
+# #    separate_zero = FALSE
+# #  )
+# #  
+# # cut_manual(
+# #    L325,
+# #    var_name = "CINEEQUIP",
+# #    cut_points = c(450, 1400),
+# #    min_n = 30,
+# #    separate_zero = FALSE
+# #  )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Whisper speech-to-text ----
+
+
+format_stream <- function(txt) {
+  hallu <- c(
+    "Merci d'avoir regardé cette vidéo", 
+    "Abonne-toi à notre chaîne", 
+    "Sous-titres réalisés"
+  ) |>
+    paste0(collapse = "|")
+  
+  #data <- 
+    tibble::tibble(txt = txt) |>
+    dplyr::mutate(
+      txt =  txt |> stringr::str_squish(), # |> stringr::str_replace_all("\n", " ") 
+    ) |>
+    dplyr::filter(!stringr::str_detect(txt, "^\\[|^ *\\*") & 
+                    !stringr::str_detect(txt, hallu)) |>
+    dplyr::mutate(lag1 = txt == dplyr::lag(txt, default = "")) |>
+    dplyr::filter(!lag1) |>
+    dplyr::mutate(sentence = #stringr::str_detect(txt, "\\.\\.\\.$") & 
+                    stringr::str_detect(dplyr::lead(txt, default = ""), "^\\.\\.\\."), 
+                  new_group = dplyr::lag(!sentence, default = TRUE), 
+                  gr = cumsum(new_group)
+                  ) |>
+      dplyr::group_by(gr) |>
+      dplyr::summarise(txt = paste(stringr::str_remove_all(txt, "\\.\\.\\."), 
+                                   collapse = ", ")) |>
+      dplyr::pull(txt) |>
+      stringr::str_replace_all("\\.,", ",") |>
+      stringr::str_replace(", *$", ".")
+  
+  # txt <- txt |> stringr::str_squish() # |> stringr::str_replace_all("\n", " ") 
+  # txt <- txt[!stringr::str_detect(txt, "^\\[|^ *\\*")]
+  # txt <- txt[!stringr::str_detect(txt, hallu)]
+  # lag1 <- txt == dplyr::lag(txt, default = "")
+  # if (any(lag1)) txt <- txt[!lag1]
+}
+
+
+save_whisper <- function(path = "~/Data/Whisper/whisper_mf.txt", 
+                         paragraph = TRUE, clip = FALSE) {
+  txt <- readLines("~/Data/Whisper/whisper_text.txt", warn = FALSE) |> 
+    format_stream()
+  
+  if (paragraph) txt <- paste0(txt, collapse = " ") |> stringr::str_squish()
+  
+  if (missing(path) | clip) {
+    txt |>
+      #stringi::stri_conv(from = "UTF-8", to = "ISO-8859-1") |> 
+      writeClipboard(format = 13)
+    
+  } 
+  
+  if (!missing(path)) {
+    txt |> writeLines(path)
+    file.show(path)
+  }
+  
+}
 
 
 # ggplot themes ----
@@ -1498,6 +4491,7 @@ PCS_create <- function(.data, var = "PCS", EMP_ADM_ENT,
                       fct_recode(
                         "NULL" = "0",
                         "NULL" = "ZZ",
+                        "10-Agriculteurs"="10",
                         "11-Agriculteurs petite exploitation"="11",
                         "12-Agriculteurs moyenne exploitation"="12",
                         "13-Agriculteurs grande exploitation"="13",
@@ -7076,6 +10070,7 @@ set_pred(
 multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, wt = NULL,
                         nb_questions, 
                         odds_ratios = TRUE, marginal_effects = FALSE, signif = TRUE,
+                        base_pct = FALSE, empirical_odds_ratio = FALSE, 
                         inverse_two_level_factors = TRUE, 
                         subtext = "") {
   variables_list <- c(outcomes, 
@@ -7083,6 +10078,8 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
                  split_var, wt
                  )
 
+  stop("latest in logit_functions.R")
+  
   data <- dplyr::select(data, all_of(variables_list))
 
   outcomes_class <- map_chr(data[outcomes], class)
@@ -7139,15 +10136,15 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
   }
 
   
-  reference_population <- 
-    paste0( #"Population de réference (modèle complet): ",
-      paste0(
-        unique(purrr::flatten_chr(predictors_sequence)) %>%
-        purrr::keep(purrr::map_lgl(., ~ dplyr::pull(data, .) |> is.factor() )) |>
-        purrr::map_chr(~ dplyr::pull(data, .) |> levels() |> dplyr::first()), 
-             collapse = ", "), 
-      " (modèle complet)"
-    )
+  reference_population <- ""
+    # paste0( #"Population de réference (modèle complet): ",
+    #   paste0(
+    #     unique(purrr::flatten_chr(predictors_sequence)) %>%
+    #     purrr::keep(purrr::map_lgl(., ~ dplyr::pull(data, .) |> is.factor() )) |>
+    #     purrr::map_chr(~ dplyr::pull(data, .) |> levels() |> dplyr::first()), 
+    #          collapse = ", "), 
+    #   " (modèle complet)"
+    # )
   
   predictors <- predictors_sequence |> purrr::flatten_chr() |> unique()
   
@@ -7156,17 +10153,27 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
   data <- data |> dplyr::filter(!NA_pred) |> dplyr::select(-NA_pred)
   
   if (!is.null(wt)) {
-    data <- data |> dplyr::mutate(!!sym(wt) := hardhat::importance_weights(!!sym(wt)))
+    data <- data |> dplyr::mutate(
+      base_wt    = !!rlang::sym(wt), 
+      !!rlang::sym(wt) := hardhat::importance_weights(!!rlang::sym(wt))
+      )
   }
   
   
   # Specify the models
   if (is.null(split_var)) {
-    models_vars <- tidyr::crossing(outcome    = forcats::as_factor(outcomes), 
-                                   predictors = predictors_sequence,
-                                   data        = list(data)
-                                   ) |> 
-      dplyr::mutate(split_var = "")
+    models_vars <- tidyr::crossing(
+      outcome    = forcats::as_factor(outcomes), 
+      predictors = predictors_sequence,
+      data       = list(data)
+    ) |> 
+      dplyr::mutate(
+        lv1  = purrr::map2(
+          data, predictors, 
+          ~ purrr::map_chr(.y, function(.pred) dplyr::first(levels(dplyr::pull(.x, .pred))) )
+        ), 
+        split_var = ""
+      )
     
   } else {
     data_split <- data |> 
@@ -7178,8 +10185,17 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
     models_vars <- tidyr::crossing(outcome    = forcats::as_factor(outcomes), 
                                    predictors = predictors_sequence,
                                    split_var  = data_split$split_var) |> 
-      dplyr::left_join(data_split, by = "split_var")
+      dplyr::left_join(data_split, by = "split_var") |> 
+      dplyr::mutate(
+        lv1  = purrr::map2(
+          data, predictors, 
+          ~ map_chr(.y, function(.pred) dplyr::first(levels(dplyr::pull(.x, .pred))) )
+        ), 
+      )
+
   }
+  
+
   
   if (is.null(wt)) {
     glm_model <- 
@@ -7224,6 +10240,32 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
                   
     )
     
+    models_vars <- models_vars |> 
+      dplyr::mutate(
+        empirical_OR = purrr::pmap(
+          list(data, predictors, outcome, names(model_type)), 
+          ~ if (..4 == "bin" & (empirical_odds_ratio | base_pct) ) {
+            tabs <- tabxplor::tab_many(..1, all_of(..2), all_of(..3), 
+                                       pct = "row", OR = "or", na = "drop", add_n = FALSE
+            )
+
+          } else {
+            NULL
+          }
+        ), 
+      )   
+    # models_vars$empirical_OR
+    
+    models_vars <- models_vars |> 
+      dplyr::mutate(
+        empirical_OR = purrr::pmap(
+          list(data, predictors, outcome), 
+          ~ tabxplor::tab_many(..1, all_of(..2), all_of(outcome), 
+                               pct = "row", OR = "or", na = "drop", add_n = FALSE
+          )
+        ), 
+      )
+    
   } else { # with survey weights
     # dw <- survey::svydesign(ids = ~ 1, data = data, weights = ~ pondqaa)
     
@@ -7234,16 +10276,16 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
       )
     
     binary_model <- 
-       parsnip::logistic_reg() |> 
-       parsnip::set_engine("svglm2", family = stats::quasibinomial(link = "logit")#, 
-                           #weights = as.formula(paste0("~", wt ))
-       )
-     
-     models_vars <- models_vars |> 
-       dplyr::mutate(model_type = dplyr::if_else(factors_2lv[outcome], 
-                                                 list("bin" = binary_model), 
-                                                 list("glm" = glm_model)), 
-                     nb_questions = nb_questions[outcome],
+      parsnip::logistic_reg() |> 
+      parsnip::set_engine("svglm2", family = stats::quasibinomial(link = "logit") #, 
+                          #weights = as.formula(paste0("~", wt ))
+      )
+    
+    models_vars <- models_vars |> 
+      dplyr::mutate(model_type = dplyr::if_else(factors_2lv[outcome], 
+                                                list("bin" = binary_model), 
+                                                list("glm" = glm_model)), 
+                    nb_questions = nb_questions[outcome],
                     
                     wflow = pmap(list(data, outcome, predictors, model_type), 
                                  function(.dat, .outcome, .pred, .model)
@@ -7251,14 +10293,59 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
                                    add_model(.model) |> 
                                    add_variables(outcome    = all_of(.outcome), 
                                                  predictors = all_of(.pred)    ) |>
-                                   add_case_weights(wt)
+                                   add_case_weights(!!rlang::sym(wt))
                     ), 
                     
                     
       )
+    
+    models_vars <- models_vars |> 
+      dplyr::mutate(
+        empirical_OR = purrr::pmap(
+          list(data, predictors, outcome, names(model_type)), 
+          ~ if (..4 == "bin" & (empirical_odds_ratio | base_pct) ) {
+            tabs <- tabxplor::tab_many(..1, all_of(..2), all_of(..3), 
+                                       pct = "row", OR = "or", na = "drop", add_n = FALSE,
+                                       wt = base_wt
+            )
+          } else {
+            NULL
+          }
+        ), 
+      )   
+    # models_vars$empirical_OR
   }
   
 
+  models_vars <- models_vars |> 
+    dplyr::mutate(
+      empirical_OR = purrr::pmap(
+        list(empirical_OR, outcome, names(model_type)), 
+        ~ if (..3 == "bin" & (empirical_odds_ratio | base_pct) ) {
+          tabs <- purrr::map(
+            ..1, 
+            ~ dplyr::mutate(.,
+                            var = factor(names(.)[[1]]), 
+                            .before = 1                 ) |>
+              dplyr::rename_with(~"levels", .cols = 2)
+          ) |> 
+            dplyr::bind_rows()
+          
+          tabs <- dplyr::filter(tabs, !is_totrow(tabs))
+          
+          # tabs <- dplyr::mutate(tabs, ref = tabxplor::is_refrow(tabs))
+          
+          tabs |> 
+            dplyr::select(-3) |> 
+            dplyr::rename_with(~ "Empirical OR", .cols = where(is_fmt)) # function(.var) as.character(..2)
+
+        } else {
+          NULL
+        }
+      ), 
+    )   
+  # models_vars$empirical_OR
+  
 
   
   
@@ -7289,8 +10376,13 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
                                                                      "p" = "prob")), 
                                                 signif)), 
       
-      model_name = paste0(names(predictors), ":by:", split_var) #|>
-      #stringr::str_remove(":by:$")
+      model_name = dplyr::if_else(split_var == "", 
+                                  true  = names(predictors), 
+                                  false = paste0(names(predictors), ":by:", split_var)
+      )
+
+      #   paste0(names(predictors), ":by:", split_var) |>
+      # stringr::str_remove("\\:by\\:$")
     )
   
   
@@ -7340,7 +10432,7 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
   # Odds-ratio tables
   if (odds_ratios) {
     OR <- models |> 
-      dplyr::select(outcome, model_name, OR) |> 
+      dplyr::select(outcome, model_name, OR, predictors) |> 
       dplyr::mutate(
         OR = purrr::map2(
           OR, model_name, 
@@ -7350,7 +10442,8 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
           )
         ) ) |> 
       dplyr::group_by(outcome) |> 
-      dplyr::group_split()
+      dplyr::group_split() 
+    
     
     OR <- OR |>
       purrr::set_names(purrr::map_chr(OR, ~ as.character(.$outcome[1]))) |> 
@@ -7368,50 +10461,141 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
           purrr::map(~ predictors[which(.)]) |> 
           purrr::map(~ if (length(.) == 0) {"Constante (population de référence)"} else {.}) |>
           purrr::flatten_chr() |> 
-          as_factor() |> forcats::fct_relevel(c("Constante (population de référence)", 
-                                                predictors)), 
+          forcats::as_factor() |> 
+          forcats::fct_relevel(c("Constante (population de référence)", 
+                                 predictors)), 
         
-        levels = as_factor(dplyr::if_else(
-          condition = str_detect(parameter, "Intercept"), 
+        levels = forcats::as_factor(dplyr::if_else(
+          condition = stringr::str_detect(parameter, "Intercept"), 
           true      = reference_population,  
-          false     = str_remove(parameter, as.character(var))
-        ))
+          false     = stringr::str_remove(parameter, as.character(var))
+        )), 
+        
+        ref         = var == "Constante (population de référence)"
       ) |> 
         dplyr::select(var, levels, tidyselect::everything(), -parameter)
       )
+    # OR[[1]]
     
-    OR <-  OR |> 
-      purrr::map(~  dplyr::mutate(
-        ., 
-        dplyr::across(where(is.double), 
-                      ~ fmt(
-                        0, 
-                        type      = "mean", 
-                        digits    = 1L, 
-                        mean      = ., 
-                        diff      = dplyr::if_else(
-                          !str_detect(replace_na(eval_tidy(sym(str_replace(cur_column(),
-                                                                           "^OR_", "s_"))), ""),
-                                      "/*" # in gray when not in 90% ci
-                          ) | var == "Constante (population de référence)", 
-                          true  = 0, 
-                          false = .), 
-                        
-                        diff_type = "1", 
-                        color     = "diff", 
-                        #in_totrow = row_number() == 1,
-                        in_refrow = dplyr::row_number() == 1, 
-                        col_var = dplyr::cur_column() |> stringr::str_remove("^OR_") |>
-                          stringr::str_remove(":by:.*$"), 
-                        comp_all = FALSE, 
-                      ))
-      ) |> 
-        dplyr::rename_with(~ stringr::str_replace(., ":by:", " ") |> 
-                             stringr::str_replace("^OR_", "OR ") ) #|>
-        #dplyr::rename_with(~ str_remove(., "^OR_")) |>
-        #dplyr::arrange(var) |>
-        #new_tab()
+    OR <- 
+      purrr::pmap(list(OR, models$predictors, models$lv1, 
+                       models$empirical_OR, names(models$model_type) ), 
+                  ~ {
+                    rename_vect <- purrr::set_names(..2, ..3)
+                    
+                    new_data <- dplyr::select(..1, -levels) |> 
+                      dplyr::filter(var != "Constante (population de référence)") |>
+                      dplyr::distinct(var, .keep_all = TRUE) |>
+                      dplyr::mutate(
+                        dplyr::across(tidyselect::starts_with("OR_"), ~ 1    ), 
+                        dplyr::across(tidyselect::starts_with("s_" ), ~ "   "),
+                        levels = forcats::fct_recode(var, !!!rename_vect)     ,
+                        ref    = TRUE
+                      )  |>
+                      dplyr::select(var, levels, tidyselect::everything())
+                    
+                    tabs <- dplyr::bind_rows(new_data, ..1) |> dplyr::arrange(var)
+                    
+                    if (..5 == "bin" & (empirical_odds_ratio | base_pct) ) {
+                      tabs <- tabs |> dplyr::left_join(..4, by = c("var", "levels"))
+                    } 
+                    
+                    tabs
+                  }
       )
+    
+    OR <-  
+    purrr::map2(OR, names(models$model_type),  # models$outcome
+                ~ (if (.y == "bin" & (empirical_odds_ratio | base_pct) ) {
+                  dplyr::mutate(
+                    .x, 
+                    
+                    # !!rlang::sym(..3) := 
+                     pct = `Empirical OR` |> 
+                      set_display("pct") |> 
+                      set_color("diff"), 
+                    
+                    `Empirical OR` = `Empirical OR` |> 
+                      set_color("OR") |> 
+                      set_col_var("Empirical OR") |>
+                      dplyr::mutate(pct = rep(NA_real_, length(pct))),
+                    
+                    dplyr::across(where(is.double), 
+                                  ~ fmt(
+                                    n    = `Empirical OR`$n, 
+                                    wn   = `Empirical OR`$wn,
+                                    # pct  = dplyr::if_else(
+                                    #   var == "Constante (population de référence)", 
+                                    #   true  = stats::weighted.mean(`Empirical OR`$pct, 
+                                    #                                w = `Empirical OR`$wn, 
+                                    #                                na.rm = TRUE), 
+                                    #   false = `Empirical OR`$pct),
+                                    # diff = dplyr::if_else(
+                                    #   var == "Constante (population de référence)", 
+                                    #   true  = 0, 
+                                    #   false = `Empirical OR`$diff),
+                                    type      = "row", 
+                                    digits    = 2L, 
+                                    or        = .x, 
+                                    display   = "or", 
+                                    # diff      = dplyr::if_else(
+                                    #   !str_detect(replace_na(eval_tidy(sym(str_replace(cur_column(),
+                                    #                                                    "^OR_", "s_"))), ""),
+                                    #               "/*" # in gray when not in 90% ci
+                                    #   ) | var == "Constante (population de référence)", 
+                                    #   true  = 0, 
+                                    #   false = .), 
+                                    
+                                    ref       = "1", 
+                                    color     = "OR", 
+                                    #in_totrow = row_number() == 1,
+                                    in_refrow = ref, # dplyr::row_number() == 1, 
+                                    col_var = dplyr::cur_column() |> stringr::str_remove("^OR_") |>
+                                      stringr::str_remove(":by:.*$"), 
+                                    comp_all = FALSE, 
+                                  ))
+                  )
+                  
+                } else {
+                  dplyr::mutate(
+                    .x, 
+                    dplyr::across(where(is.double), 
+                                  ~ fmt(
+                                    n = rep(0, length(.x)), 
+                                    type      = "row", 
+                                    digits    = 2L, 
+                                    or        = .x, 
+                                    display   = "or", 
+                                    ref       = "1", 
+                                    color     = "OR", 
+                                    #in_totrow = row_number() == 1,
+                                    in_refrow = ref, # dplyr::row_number() == 1, 
+                                    col_var = dplyr::cur_column() |> stringr::str_remove("^OR_") |>
+                                      stringr::str_remove(":by:.*$"), 
+                                    comp_all = FALSE, 
+                                  ))
+                  )
+                }) |> 
+                  dplyr::rename_with(~ stringr::str_replace(., ":by:", " ") |> 
+                                       stringr::str_replace("^OR_", "OR ") ) |>
+                  dplyr::select(-tidyselect::any_of(c("ref"))) |>
+                  dplyr::select(var, levels, any_of(c("pct", "Empirical OR")), 
+                                tidyselect:: everything()) # |>
+                #dplyr::rename_with(~ str_remove(., "^OR_")) |>
+                #dplyr::arrange(var) |>
+                #new_tab()
+    )
+    
+    
+    if (!base_pct) {
+      OR <- OR |> 
+        map(~ dplyr::select(., -tidyselect::any_of(c("pct"))))
+    }
+    
+    if (!empirical_odds_ratio) {
+      OR <- OR |> 
+        map(~ dplyr::select(., -tidyselect::any_of(c("Empirical OR"))))
+    }
     
     if (signif) {
       OR <- OR |>purrr::map(
@@ -7473,9 +10657,9 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
         where(is.double) & starts_with("ME_"), 
         ~ fmt(
           0, 
-          type      = "mean", 
+          type      = "OR", 
           digits    = 2L, 
-          mean      = dplyr::if_else(
+          or        = dplyr::if_else(
             var == "Constante (population de référence)", 
             true  = replace_na(eval_tidy(sym(str_replace(cur_column(),
                                                          "^ME_", "p_"))), 0), 
@@ -7490,7 +10674,7 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
             false = replace_na(eval_tidy(sym(str_replace(cur_column(),
                                                          "^ME_", "OR_"))), 1) ), 
           
-          diff_type = "1", 
+          ref       = "1", 
           color     = "diff", 
           #in_totrow = row_number() == 1,
           in_refrow = dplyr::row_number() == 1, 
@@ -7529,6 +10713,23 @@ multi_logit <- function(data, outcomes, predictors_sequence, split_var = NULL, w
 
 
 
+
+tab_logit <- function(data, outcome, predictors, split_var = NULL, wt = NULL,
+                      inverse_two_level_factors = TRUE, subtext = "") { # nb_questions
+  stopifnot(length(outcome) == 1)
+  
+  tabs <- multi_logit(data = data,
+              outcomes = outcome, 
+              predictors_sequence = list("model" = predictors),
+              split_var = split_var, 
+              wt = wt,
+              odds_ratios = TRUE, marginal_effects = FALSE, signif = TRUE,
+              base_pct = TRUE, empirical_odds_ratio = TRUE, 
+              inverse_two_level_factors = inverse_two_level_factors, 
+              subtext = subtext) 
+  
+  tabs[[1]]
+}
 
 
 
@@ -8126,9 +11327,11 @@ chronogramme <- function(data, seq_var, groups = NULL, name,
 
 
 
-agregate_partitions_at_main_level <- function(partitions) {
+agregate_partitions_at_main_level <- function(partitions, groups = "new_clust") {
+  groups <- ensym(groups)
+  
   partitions |>
-    group_by(description, field, time_var, analysis_group, part_level, new_clust) |>
+    group_by(description, field, time_var, analysis_group, part_level, !!groups) |>
     arrange(.by_group = TRUE) |> 
     summarise(
       across(starts_with("SM_NETR") & ends_with("_sd"), 
@@ -8155,6 +11358,8 @@ agregate_partitions_at_main_level <- function(partitions) {
       
       clust = list2(clust),
       
+      new_clust2 = first(new_clust), 
+      
       .groups = "drop"
       
     ) |> 
@@ -8166,8 +11371,13 @@ agregate_partitions_at_main_level <- function(partitions) {
                          ~ sum(., na.rm = TRUE)),
                   .groups = "drop")
     )) |> 
+    mutate(new_clust = 
+             if (as_name(groups) == "new_clust") {new_clust} else {new_clust2} 
+    ) |>
+    select(-any_of("new_clust2")) |> 
     select(description, field, time_var, analysis_group, part_level, 
-           new_clust, chrono, n, wn, !ends_with("_sd"), everything()) |> 
+           any_of(unique(c(as_name(groups), "new_clust"))), chrono, n, wn, 
+           !ends_with("_sd"), everything()) |> 
     group_nest(description, field, time_var, analysis_group, 
                .key = "partitions", keep = TRUE) |>
     mutate(partitions = map(
@@ -8340,7 +11550,7 @@ make_imbricated_partitions <- function(id_small = NA_character_, hierarchy, part
 chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE, 
                         na = c("keep", "drop"), remove_na_after, na_cap_below,
                         salary_vars_prefix = "SM_NETR", salary_sd = FALSE, 
-                        clust_desc_vars = NULL, max_time, allow_second_legend = TRUE,
+                        clust_desc_vars = NULL, max_time, allow_second_legend = FALSE,
                         clust_names = TRUE, cluster_hierarchy = TRUE, chrono = "chrono", 
                         reverse_facets = FALSE, cleannames = TRUE, no_patterns = FALSE,
                         text_size = 1.5, legend_text_size = 10, 
@@ -8467,12 +11677,12 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
   
   scales_for_pattern <- 
     list(                                                                     # =>>>>>>>>>
-      if ("pattern" %in% names(pattern_params)) {scale_pattern_manual("",         values = set_names(pattern_params$pattern, pattern_params$state_in_seq), guide = guide_legend(order = 2))} else {NULL},
-      if ("patfill" %in% names(pattern_params)) {scale_pattern_fill_manual("",    values = set_names(pattern_params$patfill, pattern_params$state_in_seq), guide = guide_legend(order = 2))} else {NULL},
-      if ("density" %in% names(pattern_params)) {scale_pattern_density_manual("", values = set_names(pattern_params$density, pattern_params$state_in_seq), guide = guide_legend(order = 2))} else {NULL}, 
-      if ("spacing" %in% names(pattern_params)) {scale_pattern_spacing_manual("", values = set_names(pattern_params$spacing, pattern_params$state_in_seq), guide = guide_legend(order = 2))} else {NULL}, 
-      if ("angle"   %in% names(pattern_params)) {scale_pattern_angle_manual("",   values = set_names(pattern_params$angle  , pattern_params$state_in_seq), guide = guide_legend(order = 2))} else {NULL},
-      if ("type"    %in% names(pattern_params)) {scale_pattern_type_manual("",    values = set_names(pattern_params$type   , pattern_params$state_in_seq), guide = guide_legend(order = 2))} else {NULL}#,
+      if ("pattern" %in% names(pattern_params)) {scale_pattern_manual("state_in_seq",         values = set_names(pattern_params$pattern, pattern_params$state_in_seq), guide = guide_legend(title = NULL, order = 2))} else {NULL},
+      if ("patfill" %in% names(pattern_params)) {scale_pattern_fill_manual("state_in_seq",    values = set_names(pattern_params$patfill, pattern_params$state_in_seq), guide = guide_legend(title = NULL, order = 2))} else {NULL},
+      if ("density" %in% names(pattern_params)) {scale_pattern_density_manual("state_in_seq", values = set_names(pattern_params$density, pattern_params$state_in_seq), guide = guide_legend(title = NULL, order = 2))} else {NULL}, 
+      if ("spacing" %in% names(pattern_params)) {scale_pattern_spacing_manual("state_in_seq", values = set_names(pattern_params$spacing, pattern_params$state_in_seq), guide = guide_legend(title = NULL, order = 2))} else {NULL}, 
+      if ("angle"   %in% names(pattern_params)) {scale_pattern_angle_manual("state_in_seq",   values = set_names(pattern_params$angle  , pattern_params$state_in_seq), guide = guide_legend(title = NULL, order = 2))} else {NULL},
+      if ("type"    %in% names(pattern_params)) {scale_pattern_type_manual("state_in_seq",    values = set_names(pattern_params$type   , pattern_params$state_in_seq), guide = guide_legend(title = NULL, order = 2))} else {NULL}#,
     )
   scales_for_pattern <- discard(scales_for_pattern, map_lgl(scales_for_pattern, is.null))
   
@@ -8639,15 +11849,19 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
     
     clust_desc_data <- clust_desc_data |> 
       mutate(# color    = tabxplor:::fmt_get_color_code(value), 
-             # value    = format(value), 
-             variable = as_factor(variable) |> # => levels in order of appearance
-               fct_relevel("name"), 
-             
-             # up from the graph
-             y_coord  = 1 + space_from_graph + clust_text_space*nlevels(variable) - clust_text_space*as.integer(variable), #  + 1/(4*nlevels(variable)
-             ## right from the graph
-             # y_coord  = 1 - 1/nlevels(variable) * as.integer(variable) + 1/(2*nlevels(variable)), 
-             # offset   = 1/(2*nlevels(variable))
+        # value    = format(value), 
+        variable = as_factor(variable) |> # => levels in order of appearance
+          fct_relevel("name"), 
+        
+        # up from the graph (n on line 1 if no variables)
+        y_coord  = if (identical(sort(unique(whole_var)), c("clust", "n") ) ) {
+          1 + space_from_graph 
+        } else {
+          1 + space_from_graph + clust_text_space*nlevels(variable) - clust_text_space*as.integer(variable)
+        }, #  + 1/(4*nlevels(variable)
+        ## right from the graph
+        # y_coord  = 1 - 1/nlevels(variable) * as.integer(variable) + 1/(2*nlevels(variable)), 
+        # offset   = 1/(2*nlevels(variable))
       )
     # clust_desc_data |> print(n = 40)
     
@@ -8678,6 +11892,20 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
       mutate(x_coord = if_else(whole_var == "n" & type == "value", min_time, x_coord),  # - 0.5
              hjust   = if_else(whole_var == "n" & type == "value", 0  , hjust), 
              
+             # effectif en haut à droite si aucune variable (go at line 2)
+             x_coord = if_else(whole_var == "n" & type == "value" & 
+                                 identical(sort(unique(whole_var)), c("clust", "n") ), 
+                               true  = max_time_max + 1, 
+                               false = x_coord),  # - 0.5
+             y_coord = if_else(whole_var == "n" & type == "value" & 
+                                 identical(sort(unique(whole_var)), c("clust", "n") ), 
+                               true  = y_coord_name, 
+                               false = y_coord), 
+             hjust   = if_else(whole_var == "n" & type == "value" & 
+                                 identical(sort(unique(whole_var)), c("clust", "n") ), 
+                               true  = 1, 
+                               false = hjust), 
+             
              x_coord = if_else(whole_var == "SEXE" & type == "value", max_time_max + 1, x_coord), # 0.5
              y_coord = if_else(whole_var == "SEXE" & type == "value", 
                                true  = y_coord_n, 
@@ -8693,6 +11921,7 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
              fontface= if_else(whole_var %in% c("clust", "appear"), "bold", fontface),
              
       )
+    # print(clust_desc_data)
     
     # Remove clust name if they are already on facet_grid, when many analysis groups
     if ("analysis_group" %in% names(data)) {
@@ -8741,7 +11970,7 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
         geom_text(data = clust_desc_data, 
                   aes(x = x_coord, y = y_coord, 
                       label = text, color = color, fontface = fontface, hjust = hjust), 
-                  vjust = 0.5, size = text_size
+                  vjust = 1, size = text_size
         ), 
         
         scale_color_identity()
@@ -8857,7 +12086,8 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
          #          linewidth = 0.1),
          
          geom_rect(
-           data = data.frame(order = factor(levels(chrono_data$order)[1], levels = levels(chrono_data$order)),
+           data = data.frame(order = factor(levels(chrono_data$order)[1], 
+                                            levels = levels(chrono_data$order)),
                              xmin = -Inf #  ff = factor(0)
            ), 
            aes(xmin = xmin), # aes(color = ff),
@@ -8999,8 +12229,9 @@ chrono_plot <- function(data, pattern_params, agregate_states, grayscale = FALSE
         ~ as.character(round(., 1)) 
       }
     ) + 
-    scale_fill_manual("", values = set_names(pattern_params$fill, pattern_params$state_in_seq), 
-                      guide = guide_legend(order = 2)) +
+    scale_fill_manual("state_in_seq", values = set_names(pattern_params$fill, 
+                                             pattern_params$state_in_seq), 
+                      guide = guide_legend(title = NULL, order = 2)) + # title = "NULL"
     scales_for_pattern + 
     salary_graph_and_scale_y + 
     clust_desc_graph +
