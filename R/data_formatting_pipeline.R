@@ -206,6 +206,10 @@ import_survey <- function(
 #'                        metadata_apply_labels_json().  Works for both full API
 #'                        results and dry_run stats-only files (which restore
 #'                        counts/freqs but leave new_labels unchanged).
+#' @param varnames_json   Optional path to a JSON file produced by
+#'                        ai_suggest_varnames().  When supplied, new_name (and
+#'                        optionally new_labels/level_counts/level_freqs) are
+#'                        merged back via metadata_apply_varnames_json().
 #'
 #' @return A tibble with columns:
 #'   var_name, var_label, r_class, n_distinct, detected_role, desc,
@@ -230,7 +234,8 @@ extract_survey_metadata <- function(
     max_levels_cat  = 20,
     detected_roles  = NULL,
     desc_overrides  = NULL,
-    labels_json     = NULL
+    labels_json     = NULL,
+    varnames_json   = NULL
 ) {
   default_yes <- c("oui", "choisi", "yes", "vrai", "true",
                    "présent", "actif", "sélectionné", "concerné",
@@ -390,7 +395,8 @@ extract_survey_metadata <- function(
     message("    Run ai_classify_roles(meta) to get suggested detected_roles/desc_overrides vectors.")
   }
 
-  if (!is.null(labels_json)) meta <- metadata_apply_labels_json(meta, labels_json)
+  if (!is.null(labels_json))   meta <- metadata_apply_labels_json(meta, labels_json)
+  if (!is.null(varnames_json)) meta <- metadata_apply_varnames_json(meta, varnames_json)
   meta
 }
 
@@ -2494,6 +2500,7 @@ ai_suggest_varnames <- function(
     output_path    = NULL,
     chunk_size     = 300L,
     max_new_labels = 4L,
+    max_tokens     = 20000L,
     use_batch      = FALSE,
     dry_run        = FALSE,
     api_key        = Sys.getenv("ANTHROPIC_API_KEY"),
@@ -2647,23 +2654,37 @@ ai_suggest_varnames <- function(
   }
 
   # ---------- API calls -----------------------------------------------------
+  cache_dir  <- file.path(tempdir(), "varnames_cache")
+  dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
+
   if (!use_batch) {
     message("ai_suggest_varnames: synchronous (", nrow(target), " vars, ",
             length(prompts), " chunk(s))")
     results_text <- purrr::imap(prompts, function(p, i) {
       message("  Chunk ", i, "/", length(prompts))
       resp <- ai_call_claude(p, model = model, api_key = api_key,
-                             system = system_prompt)
-      resp$content[[1]]$text
+                             system = system_prompt, max_tokens = max_tokens)
+      txt <- resp$content[[1]]$text
+      # Cache raw response for debugging
+      cache_file <- file.path(cache_dir, paste0("chunk_", i, "_raw.txt"))
+      writeLines(enc2utf8(if (is.null(txt)) "" else txt), cache_file, useBytes = TRUE)
+      message("  Raw response cached: ", cache_file)
+      txt
     })
   } else {
     message("ai_suggest_varnames: batch mode (", nrow(target), " vars)")
     requests <- purrr::imap(prompts, ~ list(custom_id = paste0("varnames_", .y),
                                             prompt     = .x))
     batch <- ai_batch_submit(requests, model = model, api_key = api_key,
-                             system = system_prompt)
+                             system = system_prompt, max_tokens = max_tokens)
     message("Batch submitted. ID: ", batch$id)
     raw   <- ai_batch_retrieve(batch$id, api_key = api_key)
+    # Cache raw batch responses
+    purrr::iwalk(raw, function(txt, nm) {
+      cache_file <- file.path(cache_dir, paste0("batch_", nm, "_raw.txt"))
+      writeLines(enc2utf8(if (is.null(txt)) "" else txt), cache_file, useBytes = TRUE)
+    })
+    message("Raw batch responses cached in: ", cache_dir)
     results_text <- purrr::map(purrr::set_names(names(raw)), ~ raw[[.x]])
   }
 
@@ -2675,11 +2696,8 @@ ai_suggest_varnames <- function(
     return(invisible(output_path))
   }
 
-  # Build structured map and write JSON
-  out_map <- purrr::set_names(
-    purrr::map(names(names_map), ~ list(new_name = unname(names_map[[.x]]))),
-    names(names_map)
-  )
+  # Build structured map enriched with metadata (new_labels, counts, freqs)
+  out_map <- .build_varnames_map(target, names_map)
   .write_varnames_json(out_map, output_path)
   message("ai_suggest_varnames: ", length(out_map), " variable(s) written to: ",
           output_path)
@@ -2693,22 +2711,98 @@ ai_suggest_varnames <- function(
 # 11b. ai_suggest_varnames() helpers
 # ============================================================
 
+# ---------------------------------------------------------------------------
 # Parse flat {"ORIG": "NEW"} JSON from each chunk response.
+# Robust to: markdown code fences, leading/trailing prose, truncated responses.
+# Strategy: try valid JSON first; on failure, regex-extract all complete
+# "key": "value" pairs from the raw text (handles truncation gracefully).
 # Merges chunks, then deduplicates by appending _2, _3, ... (in variable order).
 .parse_varnames_json_responses <- function(results_text, all_var_names) {
   raw_map <- list()
 
+  # Extract all complete "key": "value" string pairs from arbitrary text.
+  # Works on truncated JSON, prose-wrapped JSON, and fenced code blocks.
+  .extract_kv_pairs <- function(txt) {
+    # Pattern: "key": "value" — both strings, value may contain escaped chars
+    # Uses a non-backtracking approach: find all matches of the pattern
+    m <- gregexpr(
+      '"((?:[^"\\\\]|\\\\.)*)"\\.?:\\s*"((?:[^"\\\\]|\\\\.)*)"',
+      txt, perl = TRUE
+    )
+    if (m[[1]][[1]] == -1L) return(list())
+
+    starts  <- m[[1]]
+    lengths <- attr(m[[1]], "match.length")
+    pairs   <- list()
+
+    for (i in seq_along(starts)) {
+      chunk <- substr(txt, starts[[i]], starts[[i]] + lengths[[i]] - 1L)
+      # Split on the first ": " to get key and value
+      colon_pos <- regexpr('":\\s*"', chunk, perl = TRUE)
+      if (colon_pos == -1L) next
+      key_raw <- substr(chunk, 2L, colon_pos - 1L)
+      val_raw <- substr(chunk,
+                        colon_pos + attr(colon_pos, "match.length"),
+                        nchar(chunk) - 1L)
+      # Unescape basic JSON escapes
+      unescape <- function(s) {
+        s <- gsub('\\\\"', '"',  s, fixed = TRUE)
+        s <- gsub("\\\\n", "\n", s, fixed = TRUE)
+        s <- gsub("\\\\t", "\t", s, fixed = TRUE)
+        s <- gsub("\\\\\\\\", "\\", s, fixed = TRUE)
+        s
+      }
+      key <- unescape(key_raw)
+      val <- unescape(val_raw)
+      if (nzchar(key) && nzchar(trimws(val)))
+        pairs[[key]] <- trimws(val)
+    }
+    pairs
+  }
+
   for (txt in results_text) {
     if (is.null(txt) || !nzchar(txt)) next
+
+    # Detect truncation: response ends without a closing brace anywhere after the
+    # opening brace (trailing prose after } is fine — only flag when no } exists).
+    first_open  <- regexpr("\\{", txt, perl = TRUE)[[1]]
+    has_close   <- grepl("\\}", txt, perl = TRUE)
+    is_truncated <- first_open > 0L && !has_close
+    if (is_truncated)
+      warning("ai_suggest_varnames: response appears truncated (no closing '}').",
+              " Only fully parsed pairs will be used. Increase max_tokens or chunk_size.")
+
     tryCatch({
-      json_str <- stringr::str_extract(txt, '(?s)\\{[^{}]*\\}')
-      if (is.na(json_str)) stop("No JSON object found")
-      parsed <- jsonlite::fromJSON(json_str, simplifyVector = TRUE)
-      # parsed is a named character vector (or list)
-      for (vname in names(parsed)) {
-        val <- parsed[[vname]]
-        if (is.character(val) && length(val) == 1 && nzchar(val))
-          raw_map[[vname]] <- val
+      # --- Strategy 1: parse as complete valid JSON ---
+      stripped <- gsub("```(?:json)?\\s*\\n?|\\n?```", "", txt, perl = TRUE)
+      # Find outermost { ... } by position of first { and last }
+      first_brace <- regexpr("\\{", stripped, perl = TRUE)[[1]]
+      last_brace  <- tail(gregexpr("\\}", stripped, perl = TRUE)[[1]], 1L)
+
+      parsed_ok <- FALSE
+      if (first_brace > 0L && last_brace > first_brace) {
+        json_str <- substr(stripped, first_brace, last_brace)
+        tryCatch({
+          parsed <- jsonlite::fromJSON(json_str, simplifyVector = FALSE)
+          for (vname in names(parsed)) {
+            val <- parsed[[vname]]
+            v   <- if (is.list(val) && length(val) == 1L) val[[1]] else val
+            if (is.character(v) && length(v) == 1L && nzchar(trimws(v)))
+              raw_map[[vname]] <- trimws(v)
+          }
+          parsed_ok <- TRUE
+        }, error = function(e) NULL)
+      }
+
+      # --- Strategy 2 (fallback / truncation): regex extract all "K":"V" pairs ---
+      if (!parsed_ok || is_truncated) {
+        pairs <- .extract_kv_pairs(txt)
+        for (k in names(pairs)) {
+          if (!k %in% names(raw_map))   # don't overwrite clean parse results
+            raw_map[[k]] <- pairs[[k]]
+        }
+        if (!parsed_ok && length(pairs) == 0L)
+          stop("No JSON object and no key-value pairs found")
       }
     }, error = function(e) {
       warning("ai_suggest_varnames: parse error: ", conditionMessage(e))
@@ -2745,30 +2839,90 @@ ai_suggest_varnames <- function(
   new_names  # named character vector: orig_name -> new_name
 }
 
+# ---------------------------------------------------------------------------
+# Build the on-disk map for ai_suggest_varnames(): one entry per variable with
+# new_name plus any available metadata (new_labels, level_counts, level_freqs).
+# Returns a named list suitable for .write_varnames_json().
+#
+# @param target    Filtered metadata tibble (rows for variables being renamed).
+# @param names_map Named character vector: orig_name -> new_name (from AI).
+.build_varnames_map <- function(target, names_map) {
+  has_new_labels <- "new_labels"    %in% names(target)
+  has_counts     <- "level_counts"  %in% names(target)
+  has_freqs      <- "level_freqs"   %in% names(target)
+
+  purrr::imap(names_map, function(new_name, orig_name) {
+    row <- target[target$var_name == orig_name, ]
+
+    entry <- list(new_name = unname(new_name))
+
+    if (nrow(row) == 1L) {
+      if (has_new_labels) {
+        nls <- row$new_labels[[1]]
+        if (length(nls) > 0) entry[["new_labels"]] <- as.list(nls)
+      }
+      if (has_counts) {
+        cts <- row$level_counts[[1]]
+        if (length(cts) > 0) entry[["level_counts"]] <- as.list(cts)
+      }
+      if (has_freqs) {
+        fqs <- row$level_freqs[[1]]
+        if (length(fqs) > 0) entry[["level_freqs"]] <- as.list(fqs)
+      }
+    }
+
+    entry
+  })
+}
+
 
 # Write the varnames map to a pretty-printed JSON file.
-# map: named list of lists, each with a $new_name character element.
+# map: named list of lists, each with a $new_name character element and
+#      optionally $new_labels, $level_counts, $level_freqs list columns.
+#
+# Format (one variable per block, arrays on one line):
+#   "ORIG_VAR": { "new_name": "NEW_VAR", "new_labels": ["A","B"], "level_counts": [10,20], "level_freqs": [33,67] }
+#   "STUB_VAR": {}
 .write_varnames_json <- function(map, path) {
   if (length(map) == 0) {
-    writeLines("{}", con = path)
+    writeLines("{}", con = path, useBytes = FALSE)
     return(invisible(path))
   }
 
-  esc     <- function(x) gsub("\\", "\\\\", x, fixed = TRUE) |>
+  esc   <- function(x) gsub("\\", "\\\\", x, fixed = TRUE) |>
     (\(s) gsub('"', '\\"', s, fixed = TRUE))()
-  w_key   <- max(nchar(names(map))) + 4L  # key width for alignment
+  w_key <- max(nchar(names(map))) + 4L
 
-  lines <- c("{")
+  # Serialize a list/vector of scalars as a compact JSON array
+  arr_str <- function(v) {
+    if (is.null(v) || length(v) == 0) return("[]")
+    elems <- vapply(v, function(x) {
+      if (is.na(x))         "null"
+      else if (is.numeric(x)) as.character(as.integer(x))
+      else                   paste0('"', esc(as.character(x)), '"')
+    }, character(1))
+    paste0("[", paste(elems, collapse = ", "), "]")
+  }
+
+  lines  <- c("{")
   vnames <- names(map)
   for (i in seq_along(vnames)) {
-    vn       <- vnames[[i]]
-    entry    <- map[[vn]]
-    comma    <- if (i < length(vnames)) "," else ""
-    key_str  <- paste0('"', esc(vn), '"')
-    pad      <- strrep(" ", w_key - nchar(key_str))
+    vn      <- vnames[[i]]
+    entry   <- map[[vn]]
+    comma   <- if (i < length(vnames)) "," else ""
+    key_str <- paste0('"', esc(vn), '"')
+    pad     <- strrep(" ", w_key - nchar(key_str))
 
-    if (!is.null(entry[["new_name"]]) && nzchar(entry[["new_name"]])) {
-      val_str <- paste0('{"new_name": "', esc(entry[["new_name"]]), '"}')
+    nn <- entry[["new_name"]]
+    if (!is.null(nn) && nzchar(nn)) {
+      fields <- paste0('"new_name": "', esc(nn), '"')
+      if (!is.null(entry[["new_labels"]]) && length(entry[["new_labels"]]) > 0)
+        fields <- paste0(fields, ', "new_labels": ', arr_str(entry[["new_labels"]]))
+      if (!is.null(entry[["level_counts"]]) && length(entry[["level_counts"]]) > 0)
+        fields <- paste0(fields, ', "level_counts": ', arr_str(entry[["level_counts"]]))
+      if (!is.null(entry[["level_freqs"]]) && length(entry[["level_freqs"]]) > 0)
+        fields <- paste0(fields, ', "level_freqs": ', arr_str(entry[["level_freqs"]]))
+      val_str <- paste0("{ ", fields, " }")
     } else {
       val_str <- "{}"
     }
@@ -2776,15 +2930,16 @@ ai_suggest_varnames <- function(
   }
   lines <- c(lines, "}")
 
-  writeLines(lines, con = path, useBytes = FALSE)
+  writeLines(enc2utf8(paste(lines, collapse = "\n")), con = path, useBytes = TRUE)
   invisible(path)
 }
 
 
-#' Apply a varnames JSON file to update metadata$new_name
+#' Apply a varnames JSON file to update metadata
 #'
-#' Reads the JSON produced by `ai_suggest_varnames()` and updates the
-#' `new_name` column of `metadata` for matched variables.
+#' Reads the JSON produced by `ai_suggest_varnames()` and updates:
+#' - `new_name` for all matched variables
+#' - `new_labels`, `level_counts`, `level_freqs` when present in the JSON
 #'
 #' @param metadata  Varmod tibble.
 #' @param json_path Path to the `_varnames.json` file.
@@ -2796,7 +2951,8 @@ metadata_apply_varnames_json <- function(metadata, json_path) {
 
   raw <- jsonlite::fromJSON(json_path, simplifyVector = FALSE)
 
-  update_rows <- purrr::imap_dfr(raw, function(entry, vname) {
+  # --- new_name updates (always) ---
+  update_name <- purrr::imap_dfr(raw, function(entry, vname) {
     nn <- entry[["new_name"]]
     if (!is.null(nn) && nzchar(nn))
       tibble::tibble(var_name = vname, new_name = nn)
@@ -2804,15 +2960,31 @@ metadata_apply_varnames_json <- function(metadata, json_path) {
       NULL
   })
 
-  if (nrow(update_rows) == 0) {
+  if (nrow(update_name) == 0) {
     message("metadata_apply_varnames_json: no new_name entries found in JSON.")
     return(metadata)
   }
 
-  update_rows <- dplyr::filter(update_rows, var_name %in% metadata$var_name)
+  update_name <- dplyr::filter(update_name, var_name %in% metadata$var_name)
   message("metadata_apply_varnames_json: updating new_name for ",
-          nrow(update_rows), " variable(s).")
+          nrow(update_name), " variable(s).")
+  metadata <- dplyr::rows_update(metadata, update_name,
+                                 by = "var_name", unmatched = "ignore")
 
-  dplyr::rows_update(metadata, update_rows, by = "var_name", unmatched = "ignore")
+  # --- optional: restore new_labels / level_counts / level_freqs ---
+  for (col in c("new_labels", "level_counts", "level_freqs")) {
+    entries_with_col <- purrr::keep(raw, ~ !is.null(.x[[col]]) && length(.x[[col]]) > 0)
+    if (length(entries_with_col) == 0 || !col %in% names(metadata)) next
+
+    for (vname in names(entries_with_col)) {
+      if (!vname %in% metadata$var_name) next
+      idx <- which(metadata$var_name == vname)
+      metadata[[col]][[idx]] <- unlist(entries_with_col[[vname]][[col]])
+    }
+    message("metadata_apply_varnames_json: restored ", col,
+            " for ", length(entries_with_col), " variable(s).")
+  }
+
+  metadata
 }
 
