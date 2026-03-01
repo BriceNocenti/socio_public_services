@@ -1758,14 +1758,24 @@ ai_suggest_missing <- function(
 #' @param metadata     Varmod tibble.
 #' @param df           Optional original survey tibble.  Used for two purposes:
 #'                     (1) auto-compute level stats if missing; (2) derive the
-#'                     default output_path from the df's file path attribute.
+#'                     default output directory and stem from the df's file path
+#'                     attribute (set by import_survey()).
 #' @param vars         Optional character vector of var_name to restrict to.
 #' @param ordinal_desc Logical. If TRUE, send factor_ordinal labels to Haiku in
 #'                     descending (high->low) order.  Default FALSE = stored order.
-#' @param output_path  Path of the JSON file to write.  Defaults to
-#'                     "{df_folder}/{df_stem}_new_labels.json" when df has a
-#'                     "path" attribute (set by import_survey()), otherwise
-#'                     "new_labels.json" in the working directory.
+#' @param output_path   Where to write the JSON file.  Three accepted forms:
+#'                     \itemize{
+#'                       \item \code{NULL} (default): use the same directory as
+#'                         the source file (from \code{attr(df, "path")}), or
+#'                         \code{getwd()} if unavailable.
+#'                       \item A **directory path** (no \code{.json} suffix):
+#'                         the JSON is named \code{{stem}_labels.json} and
+#'                         written into that directory.
+#'                       \item A **full file path** ending in \code{.json}:
+#'                         used as-is (overrides stem logic entirely).
+#'                     }
+#'                     The directory is created automatically if it does not
+#'                     exist.  Existing files are silently overwritten.
 #' @param chunk_size   Variables per API request.  Default 30.
 #' @param use_batch    Logical. Use the Anthropic Message Batch API (cheaper,
 #'                     async).  Default FALSE.
@@ -1774,14 +1784,14 @@ ai_suggest_missing <- function(
 #' @param api_key      ANTHROPIC_API_KEY env var by default.
 #' @param model        Default: Haiku 4.5.
 #'
-#' @return Invisibly returns the output_path.  In dry_run mode: invisibly
-#'         returns a list of the prompt strings.
+#' @return Invisibly returns the resolved output path.  In dry_run mode:
+#'         invisibly returns a list of the prompt strings.
 ai_suggest_labels <- function(
     metadata,
     df            = NULL,
     vars          = NULL,
     ordinal_desc  = FALSE,
-    output_path   = NULL,
+    output_path    = NULL,
     chunk_size    = 30L,
     use_batch     = FALSE,
     dry_run       = FALSE,
@@ -1789,15 +1799,58 @@ ai_suggest_labels <- function(
     model         = "claude-haiku-4-5"
 ) {
   # ---------- resolve output path -----------------------------------------
-  if (is.null(output_path)) {
-    df_path <- if (!is.null(df)) attr(df, "path") else NULL
-    output_path <- if (!is.null(df_path) && nzchar(df_path)) {
-      stem <- tools::file_path_sans_ext(df_path)
-      paste0(stem, "_new_labels.json")
+  # output_path can be:
+  #   NULL              -> same dir + stem as df source file, or getwd()
+  #   a data file path  -> treated as NULL: use its dir + stem
+  #   a directory path  -> use it; stem from df source file
+  #   a .json path      -> used verbatim (full override)
+  df_path     <- if (!is.null(df)) attr(df, "path") else NULL
+  df_has_path <- !is.null(df_path) && nzchar(df_path)
+
+  # Regex covering common survey data formats plus generic non-json files
+  .data_ext_re <- "\\.(dta|sas7bdat|sav|por|xpt|parquet|feather|arrow|csv|tsv|rds|rda|rdata|xlsx|xls|ods)$"
+
+  if (!is.null(output_path) && grepl("\\.json$", output_path, ignore.case = TRUE)) {
+    # Full .json path — use verbatim after normalisation.
+    output_path <- enc2utf8(normalizePath(output_path, winslash = "/", mustWork = FALSE))
+  } else {
+    # Determine source for dir + stem:
+    #   1. If output_path looks like a data file, use it as the source.
+    #   2. If output_path is a plain directory, use it for dir and df for stem.
+    #   3. If output_path is NULL, use df path (or getwd()).
+    src_path <- if (!is.null(output_path) &&
+                    grepl(.data_ext_re, output_path, ignore.case = TRUE)) {
+      output_path          # treat data file path exactly like df path
+    } else if (df_has_path) {
+      df_path
     } else {
-      "new_labels.json"
+      NULL
     }
+
+    out_dir <- if (!is.null(output_path) &&
+                   nzchar(output_path) &&
+                   !grepl(.data_ext_re, output_path, ignore.case = TRUE)) {
+      # Plain directory explicitly supplied
+      enc2utf8(normalizePath(output_path, winslash = "/", mustWork = FALSE))
+    } else if (!is.null(src_path)) {
+      enc2utf8(normalizePath(dirname(src_path), winslash = "/", mustWork = FALSE))
+    } else {
+      enc2utf8(normalizePath(getwd(), winslash = "/", mustWork = FALSE))
+    }
+
+    stem <- if (!is.null(src_path)) {
+      tools::file_path_sans_ext(basename(src_path))
+    } else {
+      "survey"
+    }
+
+    output_path <- file.path(out_dir, paste0(stem, "_labels.json"))
   }
+
+  # Ensure the output directory exists (handles accented / Unicode paths)
+  out_dir_final <- dirname(output_path)
+  if (!dir.exists(out_dir_final))
+    dir.create(out_dir_final, recursive = TRUE, showWarnings = FALSE)
 
   # ---------- level stats ---------------------------------------------------
   needs_stats <- !all(c("level_counts", "level_freqs") %in% names(metadata))
@@ -1933,12 +1986,18 @@ ai_suggest_labels <- function(
 
   # ---------- dry run -------------------------------------------------------
   if (dry_run) {
+    # Replace "_labels.json" -> "_labels_dry_run.json", or fall back generically.
+    dry_path <- if (grepl("_labels\\.json$", output_path)) {
+      sub("_labels\\.json$", "_labels_dry_run.json", output_path)
+    } else {
+      sub("\\.json$", "_dry_run.json", output_path)
+    }
+
     message(strrep("=", 60))
     message("DRY RUN — no API call made")
     message(strrep("=", 60))
     message("Variables: ", nrow(target), "  |  Chunks: ", length(prompts),
-            "  |  Route: ", if (use_batch) "batch" else "synchronous",
-            "  |  Output would go to: ", output_path)
+            "  |  Route: ", if (use_batch) "batch" else "synchronous")
     purrr::iwalk(prompts, function(p, i) {
       message("\n", strrep("-", 60))
       message("PROMPT ", i, "/", length(prompts))
@@ -1946,6 +2005,16 @@ ai_suggest_labels <- function(
       cat(p, "\n")
     })
     message(strrep("=", 60))
+
+    # Write stats-only JSON (no AI labels) so counts/freqs survive the session.
+    # The "labels" entry is left empty; only counts + freqs are populated.
+    stats_map <- .build_stats_only_map(target)
+    if (length(stats_map) > 0) {
+      jsonlite::write_json(stats_map, dry_path, auto_unbox = FALSE, pretty = TRUE)
+      message("ai_suggest_labels dry_run: ", length(stats_map),
+              " variable(s) written to: ", dry_path)
+    }
+
     return(invisible(prompts))
   }
 
@@ -1975,6 +2044,11 @@ ai_suggest_labels <- function(
     warning("ai_suggest_labels: No valid responses to write.")
     return(invisible(output_path))
   }
+
+  # Enrich parsed_map with level_counts/level_freqs for ALL factor types
+  # (binary and nominal were not sent to Haiku but stats are still useful).
+  # Stored in original metadata order (parallel to labels / new_labels).
+  parsed_map <- .enrich_labels_map_with_stats(parsed_map, target)
 
   jsonlite::write_json(parsed_map, output_path, auto_unbox = FALSE, pretty = TRUE)
   message("ai_suggest_labels: ", length(parsed_map), " variable(s) written to: ", output_path)
@@ -2043,6 +2117,48 @@ ai_suggest_labels <- function(
 }
 
 # ---------------------------------------------------------------------------
+# Wrap each entry in parsed_map (list of char vectors) into the rich format:
+#   {labels: [...], counts: [...], freqs: [...]}
+# counts/freqs come from `target` (original metadata order, full length incl. NULLs).
+# Works for all factor types — binary and nominal were not sent to Haiku but
+# their stats are still recorded.
+.enrich_labels_map_with_stats <- function(parsed_map, target) {
+  purrr::imap(parsed_map, function(label_list, vname) {
+    row <- target[target$var_name == vname, ]
+    counts <- if (nrow(row) > 0 && "level_counts" %in% names(row) &&
+                  length(row$level_counts[[1]]) > 0)
+      as.list(row$level_counts[[1]]) else list()
+    freqs  <- if (nrow(row) > 0 && "level_freqs"  %in% names(row) &&
+                  length(row$level_freqs[[1]])  > 0)
+      as.list(row$level_freqs[[1]])  else list()
+    list(labels = label_list, counts = counts, freqs = freqs)
+  })
+}
+
+# ---------------------------------------------------------------------------
+# Build a stats-only map for ALL target variables (dry_run output).
+# No AI labels: the "labels" field is an empty list. counts/freqs are in
+# original metadata order (full length, including NULL-coded positions).
+.build_stats_only_map <- function(target) {
+  has_counts <- "level_counts" %in% names(target)
+  has_freqs  <- "level_freqs"  %in% names(target)
+  purrr::pmap(
+    list(
+      vname  = target$var_name,
+      counts = if (has_counts) target$level_counts else vector("list", nrow(target)),
+      freqs  = if (has_freqs)  target$level_freqs  else vector("list", nrow(target))
+    ),
+    function(vname, counts, freqs) {
+      list(
+        labels = list(),
+        counts = if (length(counts) > 0) as.list(counts) else list(),
+        freqs  = if (length(freqs)  > 0) as.list(freqs)  else list()
+      )
+    }
+  ) |> purrr::set_names(target$var_name)
+}
+
+# ---------------------------------------------------------------------------
 # Apply a saved ai_suggest_labels() JSON file to a metadata table.
 # Called internally by extract_survey_metadata() when labels_json != NULL.
 # Also exported for direct use.
@@ -2056,8 +2172,19 @@ metadata_apply_labels_json <- function(metadata, labels_json) {
 
   saved <- jsonlite::read_json(labels_json, simplifyVector = FALSE)
 
-  update_rows <- purrr::imap(saved, function(labels_list, vname) {
+  update_rows <- purrr::imap(saved, function(entry, vname) {
+    # Support both old flat format  {varname: ["l1","l2"]}
+    # and new rich format           {varname: {labels: [...], counts: [...], freqs: [...]}}
+    # A dry_run JSON has labels = list() — skip applying labels but keep entry valid.
+    if (is.list(entry) && !is.null(entry$labels)) {
+      labels_list <- entry$labels          # rich format
+    } else {
+      labels_list <- entry                 # old flat format
+    }
+
     new_labs <- unlist(labels_list)
+    if (length(new_labs) == 0) return(NULL)  # stats-only (dry_run) entry — nothing to apply
+
     row <- metadata[metadata$var_name == vname, ]
     if (nrow(row) == 0) {
       warning("metadata_apply_labels_json: var '", vname, "' not in metadata. Skipped.")
