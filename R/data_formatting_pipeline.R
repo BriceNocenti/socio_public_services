@@ -71,22 +71,29 @@
 
 #' Auto-detect file format and import a survey dataset
 #'
-#' @param path         Path to the data file.
-#' @param format       Optional override: "sas", "dta", "parquet", "sav", "rds".
-#' @param catalog_file Optional SAS catalog file (.sas7bcat).
-#' @param encoding     Character encoding. NULL = haven default (usually correct).
-#'                     Try "latin1" if accents are garbled in SAS files.
+#' @param path            Path to the data file.
+#' @param format          Optional override: "sas", "dta", "parquet", "sav", "rds".
+#' @param catalog_file    Optional SAS catalog file (.sas7bcat).
+#' @param encoding        Character encoding. NULL = haven default (usually correct).
+#'                        Try "latin1" if accents are garbled in SAS files.
+#' @param upper_names     If TRUE (default), convert all variable names to
+#'                        UPPER_SNAKE_CASE via `toupper()`.
+#' @param remove_prefixes Character vector of prefixes to strip from variable
+#'                        names after uppercasing (default: none). Applied in
+#'                        the order provided, case-insensitively.
 #'
-#' @return A tibble with preserved labels. No transformation applied.
+#' @return A tibble with preserved labels. No transformation applied to data.
 import_survey <- function(
     path,
-    format       = NULL,
-    catalog_file = NULL,
-    encoding     = NULL
+    format          = NULL,
+    catalog_file    = NULL,
+    encoding        = NULL,
+    upper_names     = TRUE,
+    remove_prefixes = character(0)
 ) {
   ext <- if (!is.null(format)) format else tolower(tools::file_ext(path))
 
-  switch(
+  df <- switch(
     ext,
     "sas7bdat" = ,
     "sas"      = haven::read_sas(path, catalog_file = catalog_file,
@@ -97,6 +104,19 @@ import_survey <- function(
     "rds"      = readRDS(path),
     stop("Unrecognised format: '", ext, "'. Use sas/dta/sav/parquet/rds.")
   )
+
+  if (isTRUE(upper_names)) {
+    names(df) <- toupper(names(df))
+  }
+
+  if (length(remove_prefixes) > 0) {
+    pfx_upper <- toupper(remove_prefixes)
+    for (pfx in pfx_upper) {
+      names(df) <- sub(paste0("^", pfx), "", names(df))
+    }
+  }
+
+  df
 }
 
 
@@ -2446,107 +2466,353 @@ metadata_apply_labels_json <- function(metadata, labels_json) {
 # 11. ai_suggest_varnames()
 # ============================================================
 
-#' Use Haiku to suggest short R variable names and documentation strings
+#' Use Haiku to suggest short UPPER_SNAKE_CASE R variable names
 #'
-#' @param metadata         Varmod tibble.
-#' @param vars             Optional character vector of var_name to restrict.
-#' @param examples_text    Optional: paste of a previous _recode.R for style.
-#' @param api_key          ANTHROPIC_API_KEY env var by default.
-#' @param model            Default: Haiku 4.5.
-#' @param chunk_size       Variables per API request. Default 80.
-#' @param batch_threshold  Above this n_vars, use batch mode. Default 60.
+#' Calls the Anthropic API (synchronous or batch) to propose new names for all
+#' variables in `metadata`. Results are written to a JSON file; apply with
+#' `metadata_apply_varnames_json()`.
 #'
-#' @return metadata with new_name and doc_note updated. Review before apply!
+#' @param metadata       Varmod tibble from `extract_survey_metadata()`.
+#' @param vars           Optional character vector of `var_name` to restrict.
+#' @param output_path    Path for the output `.json`. NULL = same dir/stem as
+#'                       `attr(metadata, "path")` or `getwd()`.
+#' @param chunk_size     Variables per API request. Default 300L (large enough
+#'                       to handle most datasets in one call; dedup handles
+#'                       cross-chunk name collisions automatically).
+#' @param max_new_labels Max number of non-NULL new labels sent per variable to
+#'                       help the model understand the content. Default 4L.
+#' @param use_batch      If TRUE, use the Anthropic batch API. Default FALSE.
+#' @param dry_run        If TRUE, print prompts without calling the API.
+#' @param api_key        Anthropic API key. Default: `ANTHROPIC_API_KEY` env var.
+#' @param model          Model to use. Default `"claude-haiku-4-5"`.
+#'
+#' @return Invisibly: the `output_path` where results were written (or the list
+#'   of prompts in dry_run mode). Apply with `metadata_apply_varnames_json()`.
 ai_suggest_varnames <- function(
     metadata,
-    vars            = NULL,
-    examples_text   = NULL,
-    api_key         = Sys.getenv("ANTHROPIC_API_KEY"),
-    model           = "claude-haiku-4-5", # "claude-haiku-4-5-20251001"
-    chunk_size      = 80,
-    batch_threshold = 60
+    vars           = NULL,
+    output_path    = NULL,
+    chunk_size     = 300L,
+    max_new_labels = 4L,
+    use_batch      = FALSE,
+    dry_run        = FALSE,
+    api_key        = Sys.getenv("ANTHROPIC_API_KEY"),
+    model          = "claude-haiku-4-5"
 ) {
+  # ---------- output path resolution (same logic as ai_suggest_labels) ------
+  df_path     <- attr(metadata, "path")
+  df_has_path <- !is.null(df_path) && nzchar(df_path)
+
+  .data_ext_re <- "\\.(dta|sas7bdat|sav|por|xpt|parquet|feather|arrow|csv|tsv|rds|rda|rdata|xlsx|xls|ods)$"
+
+  if (!is.null(output_path) && grepl("\\.json$", output_path, ignore.case = TRUE)) {
+    output_path <- enc2utf8(normalizePath(output_path, winslash = "/", mustWork = FALSE))
+  } else {
+    src_path <- if (!is.null(output_path) &&
+                    grepl(.data_ext_re, output_path, ignore.case = TRUE)) {
+      output_path
+    } else if (df_has_path) {
+      df_path
+    } else {
+      NULL
+    }
+
+    out_dir <- if (!is.null(output_path) &&
+                   nzchar(output_path) &&
+                   !grepl(.data_ext_re, output_path, ignore.case = TRUE)) {
+      enc2utf8(normalizePath(output_path, winslash = "/", mustWork = FALSE))
+    } else if (!is.null(src_path)) {
+      enc2utf8(normalizePath(dirname(src_path), winslash = "/", mustWork = FALSE))
+    } else {
+      enc2utf8(normalizePath(getwd(), winslash = "/", mustWork = FALSE))
+    }
+
+    stem <- if (!is.null(src_path)) {
+      tools::file_path_sans_ext(basename(src_path))
+    } else {
+      "survey"
+    }
+
+    output_path <- file.path(out_dir, paste0(stem, "_varnames.json"))
+  }
+
+  out_dir_final <- dirname(output_path)
+  if (!dir.exists(out_dir_final))
+    dir.create(out_dir_final, recursive = TRUE, showWarnings = FALSE)
+
+  # ---------- filter target variables ---------------------------------------
   target <- metadata
   if (!is.null(vars)) target <- dplyr::filter(target, var_name %in% vars)
-  if (nrow(target) == 0) { message("No variables to name."); return(metadata) }
+  if (nrow(target) == 0) {
+    message("ai_suggest_varnames: No variables to process.")
+    return(invisible(output_path))
+  }
 
-  chunks     <- split(target, ceiling(seq_len(nrow(target)) / chunk_size))
-  ex_section <- if (!is.null(examples_text))
-    paste0("\n\nEXAMPLE NAMING STYLE:\n```r\n", examples_text, "\n```\n") else ""
-
-  build_prompt <- function(chunk_df) {
-    rows <- purrr::pmap_chr(chunk_df, function(var_name, var_label,
-                                                new_labels, ...) {
-      first2 <- paste0('"', head(new_labels, 2), '"', collapse = ", ")
-      sprintf('  list(var_name="%s", label="%s", first_levels=c(%s))',
-              var_name, substr(var_label, 1, 80), first2)
-    })
+  # ---------- system prompt -------------------------------------------------
+  .pkg_name <- utils::packageName()
+  .prompt_md_path <- if (!is.null(.pkg_name) && nzchar(.pkg_name)) {
+    system.file("instructions/varnames_prompt.md", package = .pkg_name)
+  } else {
+    ""
+  }
+  if (!nzchar(.prompt_md_path) || !file.exists(.prompt_md_path)) {
+    .prompt_md_path <- file.path(getwd(), "instructions", "varnames_prompt.md")
+  }
+  system_prompt <- if (file.exists(.prompt_md_path)) {
+    paste(readLines(.prompt_md_path, encoding = "UTF-8", warn = FALSE),
+          collapse = "\n")
+  } else {
+    warning("ai_suggest_varnames: instructions/varnames_prompt.md not found; ",
+            "using minimal inline prompt.")
     paste0(
-      'Name R variables for French survey analysis.\n',
-      'For each: new_name (UPPERCASE_SNAKE_CASE, ≤20 chars, French abbrevs: ',
-      'DIPL, PCS, ETUDE, AGE, SEXE, etc.) and ',
-      'doc_note (one-line French desc, ≤80 chars).\n',
-      ex_section,
-      '\nDATA:\n', paste(rows, collapse = "\n"),
-      '\n\nReply ONLY as tribble:\n',
-      'tribble(\n  ~var_name, ~new_name, ~doc_note,\n',
-      '  "OLD", "NEW", "Description"\n)\nNo explanation.'
+      "Rename French survey variables to UPPER_SNAKE_CASE R names (max 25 chars).\n",
+      'Reply ONLY as a flat JSON object: {"ORIG": "NEW", ...}\n',
+      "No comments, no markdown."
     )
   }
 
-  if (nrow(target) <= batch_threshold) {
-    message("ai_suggest_varnames: synchronous (", nrow(target), " vars)")
-    results_text <- purrr::imap(chunks, function(chunk, i) {
-      message("  Chunk ", i, "/", length(chunks))
-      resp <- ai_call_claude(build_prompt(chunk), model = model, api_key = api_key)
+  # ---------- user message builder for one chunk ----------------------------
+  has_new_labels <- "new_labels" %in% names(target)
+  has_labels     <- "labels"     %in% names(target)
+
+  build_prompt <- function(chunk_df) {
+    esc <- function(x) gsub('"', '\\"', x, fixed = TRUE)
+
+    objs <- purrr::pmap(chunk_df, function(var_name, var_label, ...) {
+      dots <- list(...)
+
+      # Prefer new_labels over original labels, limited to max_new_labels non-NULL
+      display_labels <- NULL
+      if (has_new_labels) {
+        nls <- dots[["new_labels"]]
+        non_null <- nls[!is.na(nls) & nls != "NULL"]
+        if (length(non_null) > 0)
+          display_labels <- head(non_null, max_new_labels)
+      }
+      if (is.null(display_labels) && has_labels) {
+        lbs <- dots[["labels"]]
+        if (length(lbs) > 0)
+          display_labels <- head(lbs[!is.na(lbs)], max_new_labels)
+      }
+
+      desc_short <- esc(substr(var_label, 1, 150))
+      obj <- paste0('{"var":"', esc(var_name), '","desc":"', desc_short, '"')
+      if (!is.null(display_labels) && length(display_labels) > 0) {
+        labs_json <- paste0('["', paste(esc(display_labels), collapse = '","'), '"]')
+        obj <- paste0(obj, ',"new_labels":', labs_json)
+      }
+      paste0(obj, "}")
+    })
+
+    paste0("[\n", paste(objs, collapse = ",\n"), "\n]")
+  }
+
+  chunks  <- split(target, ceiling(seq_len(nrow(target)) / chunk_size))
+  prompts <- purrr::map(chunks, build_prompt)
+
+  # ---------- dry run -------------------------------------------------------
+  if (dry_run) {
+    dry_path <- if (grepl("_varnames\\.json$", output_path)) {
+      sub("_varnames\\.json$", "_varnames_dry_run.json", output_path)
+    } else {
+      sub("\\.json$", "_dry_run.json", output_path)
+    }
+
+    message(strrep("=", 60))
+    message("DRY RUN — no API call made")
+    message(strrep("=", 60))
+    message("Variables: ", nrow(target), "  |  Chunks: ", length(prompts),
+            "  |  Route: ", if (use_batch) "batch" else "synchronous")
+    message("\n", strrep("-", 60))
+    message("SYSTEM PROMPT")
+    message(strrep("-", 60))
+    cat(system_prompt, "\n")
+    purrr::iwalk(prompts, function(p, i) {
+      message("\n", strrep("-", 60))
+      message("USER MESSAGE ", i, "/", length(prompts))
+      message(strrep("-", 60))
+      cat(p, "\n")
+    })
+    message(strrep("=", 60))
+
+    # Write stub JSON (empty entries, no AI names)
+    stub <- purrr::set_names(
+      purrr::map(target$var_name, ~ list()),
+      target$var_name
+    )
+    .write_varnames_json(stub, dry_path)
+    message("ai_suggest_varnames dry_run: stub written to: ", dry_path)
+
+    return(invisible(prompts))
+  }
+
+  # ---------- API calls -----------------------------------------------------
+  if (!use_batch) {
+    message("ai_suggest_varnames: synchronous (", nrow(target), " vars, ",
+            length(prompts), " chunk(s))")
+    results_text <- purrr::imap(prompts, function(p, i) {
+      message("  Chunk ", i, "/", length(prompts))
+      resp <- ai_call_claude(p, model = model, api_key = api_key,
+                             system = system_prompt)
       resp$content[[1]]$text
     })
   } else {
     message("ai_suggest_varnames: batch mode (", nrow(target), " vars)")
-    requests <- purrr::imap(chunks, function(chunk, i)
-      list(custom_id = paste0("names_", i), prompt = build_prompt(chunk)))
-    batch    <- ai_batch_submit(requests, model = model, api_key = api_key)
+    requests <- purrr::imap(prompts, ~ list(custom_id = paste0("varnames_", .y),
+                                            prompt     = .x))
+    batch <- ai_batch_submit(requests, model = model, api_key = api_key,
+                             system = system_prompt)
     message("Batch submitted. ID: ", batch$id)
-    raw      <- ai_batch_retrieve(batch$id, api_key = api_key)
+    raw   <- ai_batch_retrieve(batch$id, api_key = api_key)
     results_text <- purrr::map(purrr::set_names(names(raw)), ~ raw[[.x]])
   }
 
-  metadata <- .parse_and_merge_varnames(metadata, results_text)
+  # ---------- parse + dedup + write to disk ---------------------------------
+  names_map <- .parse_varnames_json_responses(results_text, target$var_name)
 
-  dups <- metadata |>
-    dplyr::filter(new_name != var_name & new_name != "") |>
-    dplyr::count(new_name) |>
-    dplyr::filter(n > 1)
-  if (nrow(dups) > 0) {
-    warning("Duplicate new_name values: ", paste(dups$new_name, collapse = ", "),
-            "\nFix before apply_survey_formats().")
+  if (length(names_map) == 0) {
+    warning("ai_suggest_varnames: No valid responses to write.")
+    return(invisible(output_path))
   }
 
-  message("Review metadata$new_name and $doc_note before applying.")
-  metadata
+  # Build structured map and write JSON
+  out_map <- purrr::set_names(
+    purrr::map(names(names_map), ~ list(new_name = unname(names_map[[.x]]))),
+    names(names_map)
+  )
+  .write_varnames_json(out_map, output_path)
+  message("ai_suggest_varnames: ", length(out_map), " variable(s) written to: ",
+          output_path)
+  message("Apply with metadata_apply_varnames_json(metadata, \"", output_path, "\")")
+
+  invisible(output_path)
 }
 
-.parse_and_merge_varnames <- function(metadata, results_text) {
-  parsed_list <- purrr::map(results_text, function(txt) {
-    tryCatch({
-      tribble_text <- stringr::str_extract(txt, "(?s)tribble\\(.*?\\)")
-      if (is.na(tribble_text)) stop("No tribble found")
-      eval(parse(text = tribble_text))
-    }, error = function(e) {
-      warning("Could not parse AI response: ", conditionMessage(e))
-      NULL
-    })
-  }) |> purrr::compact() |> dplyr::bind_rows()
 
-  if (nrow(parsed_list) == 0) {
-    warning("No valid AI responses parsed. metadata unchanged.")
+# ============================================================
+# 11b. ai_suggest_varnames() helpers
+# ============================================================
+
+# Parse flat {"ORIG": "NEW"} JSON from each chunk response.
+# Merges chunks, then deduplicates by appending _2, _3, ... (in variable order).
+.parse_varnames_json_responses <- function(results_text, all_var_names) {
+  raw_map <- list()
+
+  for (txt in results_text) {
+    if (is.null(txt) || !nzchar(txt)) next
+    tryCatch({
+      json_str <- stringr::str_extract(txt, '(?s)\\{[^{}]*\\}')
+      if (is.na(json_str)) stop("No JSON object found")
+      parsed <- jsonlite::fromJSON(json_str, simplifyVector = TRUE)
+      # parsed is a named character vector (or list)
+      for (vname in names(parsed)) {
+        val <- parsed[[vname]]
+        if (is.character(val) && length(val) == 1 && nzchar(val))
+          raw_map[[vname]] <- val
+      }
+    }, error = function(e) {
+      warning("ai_suggest_varnames: parse error: ", conditionMessage(e))
+    })
+  }
+
+  if (length(raw_map) == 0) return(character(0))
+
+  # Keep only variables that were in the target
+  raw_map <- raw_map[names(raw_map) %in% all_var_names]
+
+  # Deduplicate: for any new_name appearing more than once, append _2, _3 ...
+  # in the order variables appear in all_var_names (stable ordering)
+  ordered_keys <- all_var_names[all_var_names %in% names(raw_map)]
+  new_names    <- unlist(raw_map[ordered_keys])  # character vector, named by orig
+
+  dup_vals <- names(which(table(new_names) > 1))
+  if (length(dup_vals) > 0) {
+    counters <- integer(length(dup_vals))
+    names(counters) <- dup_vals
+    for (i in seq_along(new_names)) {
+      nm <- new_names[[i]]
+      if (nm %in% dup_vals) {
+        counters[[nm]] <- counters[[nm]] + 1L
+        if (counters[[nm]] > 1L)
+          new_names[[i]] <- paste0(nm, "_", counters[[nm]])
+      }
+    }
+    warning("ai_suggest_varnames: ", length(dup_vals),
+            " duplicate name(s) detected and disambiguated with numeric suffix: ",
+            paste(dup_vals, collapse = ", "))
+  }
+
+  new_names  # named character vector: orig_name -> new_name
+}
+
+
+# Write the varnames map to a pretty-printed JSON file.
+# map: named list of lists, each with a $new_name character element.
+.write_varnames_json <- function(map, path) {
+  if (length(map) == 0) {
+    writeLines("{}", con = path)
+    return(invisible(path))
+  }
+
+  esc     <- function(x) gsub("\\", "\\\\", x, fixed = TRUE) |>
+    (\(s) gsub('"', '\\"', s, fixed = TRUE))()
+  w_key   <- max(nchar(names(map))) + 4L  # key width for alignment
+
+  lines <- c("{")
+  vnames <- names(map)
+  for (i in seq_along(vnames)) {
+    vn       <- vnames[[i]]
+    entry    <- map[[vn]]
+    comma    <- if (i < length(vnames)) "," else ""
+    key_str  <- paste0('"', esc(vn), '"')
+    pad      <- strrep(" ", w_key - nchar(key_str))
+
+    if (!is.null(entry[["new_name"]]) && nzchar(entry[["new_name"]])) {
+      val_str <- paste0('{"new_name": "', esc(entry[["new_name"]]), '"}')
+    } else {
+      val_str <- "{}"
+    }
+    lines <- c(lines, paste0("  ", key_str, ":", pad, val_str, comma))
+  }
+  lines <- c(lines, "}")
+
+  writeLines(lines, con = path, useBytes = FALSE)
+  invisible(path)
+}
+
+
+#' Apply a varnames JSON file to update metadata$new_name
+#'
+#' Reads the JSON produced by `ai_suggest_varnames()` and updates the
+#' `new_name` column of `metadata` for matched variables.
+#'
+#' @param metadata  Varmod tibble.
+#' @param json_path Path to the `_varnames.json` file.
+#'
+#' @return Updated metadata tibble.
+metadata_apply_varnames_json <- function(metadata, json_path) {
+  if (!file.exists(json_path))
+    stop("metadata_apply_varnames_json: file not found: ", json_path)
+
+  raw <- jsonlite::fromJSON(json_path, simplifyVector = FALSE)
+
+  update_rows <- purrr::imap_dfr(raw, function(entry, vname) {
+    nn <- entry[["new_name"]]
+    if (!is.null(nn) && nzchar(nn))
+      tibble::tibble(var_name = vname, new_name = nn)
+    else
+      NULL
+  })
+
+  if (nrow(update_rows) == 0) {
+    message("metadata_apply_varnames_json: no new_name entries found in JSON.")
     return(metadata)
   }
 
-  update_df <- parsed_list |>
-    dplyr::filter(var_name %in% metadata$var_name) |>
-    dplyr::select(var_name, new_name, doc_note)
+  update_rows <- dplyr::filter(update_rows, var_name %in% metadata$var_name)
+  message("metadata_apply_varnames_json: updating new_name for ",
+          nrow(update_rows), " variable(s).")
 
-  dplyr::rows_update(metadata, update_df, by = "var_name")
+  dplyr::rows_update(metadata, update_rows, by = "var_name", unmatched = "ignore")
 }
 
