@@ -36,7 +36,9 @@
 #   5. meta <- metadata_fix_binary(meta)
 #   6. export_metadata_excel(meta, "meta_review.xlsx")
 #      # Open Excel, check orange rows (factor_binary/nominal/integer), iterate
-#   7. [optional] meta <- ai_suggest_labels(meta)
+#   6b.[optional] meta <- metadata_add_level_stats(meta, df)
+#      # Adds level_counts/level_freqs for ordinal merging in ai_suggest_labels()
+#   7. [optional] meta <- ai_suggest_labels(meta, df)
 #                 meta <- ai_suggest_varnames(meta)
 #                 export_metadata_excel(meta, "meta_review2.xlsx")
 #   8. df_out <- apply_survey_formats(df, meta)
@@ -57,7 +59,8 @@
 #   ai_call_claude()            — synchronous single call (httr2)
 #   ai_batch_submit()           — submit Message Batch job (httr2)
 #   ai_batch_retrieve()         — poll + retrieve batch results (httr2)
-#   ai_suggest_labels()         — shorten French factor level labels
+#   metadata_add_level_stats()  — add level_counts/level_freqs to metadata
+#   ai_suggest_labels()         — shorten labels + merge small ordinal levels (JSON)
 #   ai_suggest_varnames()       — propose short R variable names + doc strings
 # ============================================================
 
@@ -176,6 +179,11 @@ import_survey <- function(
 #'                        For factor_binary: TRUE = positive level is first.
 #'                        For factor_ordinal: TRUE = descending (high→low).
 #'                        Paste output of ai_classify_roles() here after editing.
+#' @param labels_json     Optional path to a JSON file produced by
+#'                        ai_suggest_labels().  When supplied, the saved labels
+#'                        are applied to new_labels at the end of this call via
+#'                        metadata_apply_labels_json().  Lets you persist Haiku
+#'                        results across R sessions without re-running the API.
 #'
 #' @return A tibble with columns:
 #'   var_name, var_label, r_class, n_distinct, detected_role, desc,
@@ -199,7 +207,8 @@ extract_survey_metadata <- function(
     no_labels       = NULL,
     max_levels_cat  = 20,
     detected_roles  = NULL,
-    desc_overrides  = NULL
+    desc_overrides  = NULL,
+    labels_json     = NULL
 ) {
   default_yes <- c("oui", "choisi", "yes", "vrai", "true",
                    "présent", "actif", "sélectionné", "concerné",
@@ -359,6 +368,7 @@ extract_survey_metadata <- function(
     message("    Run ai_classify_roles(meta) to get suggested detected_roles/desc_overrides vectors.")
   }
 
+  if (!is.null(labels_json)) meta <- metadata_apply_labels_json(meta, labels_json)
   meta
 }
 
@@ -447,6 +457,111 @@ extract_survey_metadata <- function(
 
   NA
 }
+
+
+# ============================================================
+# 2b. metadata_add_level_stats()
+# ============================================================
+
+#' Add per-level count and frequency columns to metadata
+#'
+#' Computes, for each factor variable, the count and non-missing frequency
+#' of each level.  Call this AFTER extract_survey_metadata() has settled on
+#' correct role assignments and BEFORE ai_suggest_labels().
+#'
+#' Two list-columns are added (or replaced if they already exist):
+#'   - `level_counts`  : integer vector, one element per label (including "NULL")
+#'   - `level_freqs`   : numeric vector, percent 0-100 rounded to 0 decimals.
+#'                       Missing values (NULL-coded rows) are excluded from the
+#'                       denominator, so the non-NULL entries sum to 100.
+#'
+#' Non-factor roles get empty integer(0) / numeric(0) vectors.
+#' Uses data.table for fast tabulation across all factor columns at once.
+#'
+#' @param metadata  Varmod tibble from extract_survey_metadata().
+#' @param df        The original survey tibble (from import_survey()).
+#'
+#' @return metadata with two new list-columns: level_counts, level_freqs.
+metadata_add_level_stats <- function(metadata, df) {
+  factor_roles <- c("factor_binary", "factor_nominal", "factor_ordinal")
+
+  # Restrict to factor variables present in df
+  fac_meta <- metadata[
+    metadata$detected_role %in% factor_roles &
+    metadata$var_name      %in% names(df) &
+    lengths(metadata$values) > 0, ]
+
+  if (nrow(fac_meta) == 0) {
+    # Nothing to count — attach empty columns and return
+    metadata$level_counts <- vector("list", nrow(metadata))
+    metadata$level_counts[] <- list(integer(0))
+    metadata$level_freqs  <- vector("list", nrow(metadata))
+    metadata$level_freqs[]  <- list(numeric(0))
+    return(metadata)
+  }
+
+  # Cast relevant columns to character once, stack into a long data.table,
+  # then tabulate with a single groupby — O(n_obs * n_factor_vars) but done
+  # in one C-level pass by data.table.
+  var_names <- fac_meta$var_name
+  dt_long   <- data.table::rbindlist(
+    lapply(var_names, function(vn) {
+      data.table::data.table(
+        var_name = vn,
+        val      = as.character(df[[vn]])
+      )
+    })
+  )
+
+  # Count NA separately then drop — we only count coded values
+  counts_dt <- dt_long[!is.na(val),
+                       .(n = .N),
+                       by = .(var_name, val)]
+
+  # Build named-vector lookup: var_name -> (value -> count)
+  counts_by_var <- split(counts_dt, by = "var_name", keep.by = FALSE)
+  lookup <- lapply(counts_by_var, function(d) {
+    v <- d$n
+    names(v) <- d$val
+    v
+  })
+
+  # Compute level_counts and level_freqs per factor row
+  compute_stats <- function(vname, vals, nls) {
+    tab  <- lookup[[vname]]
+    cnts <- purrr::map_int(as.character(vals), function(v) {
+      if (!is.null(tab) && v %in% names(tab)) tab[[v]] else 0L
+    })
+    non_null_mask <- nls != "NULL"
+    total_valid   <- sum(cnts[non_null_mask])
+    freqs         <- rep(NA_real_, length(cnts))
+    if (total_valid > 0)
+      freqs[non_null_mask] <- round(cnts[non_null_mask] / total_valid * 100, 0)
+    list(counts = cnts, freqs = freqs)
+  }
+
+  stats_list <- purrr::pmap(
+    list(fac_meta$var_name, fac_meta$values, fac_meta$new_labels),
+    compute_stats
+  )
+
+  # Write back into a full-length result (non-factor rows get empty vectors)
+  result_counts <- vector("list", nrow(metadata))
+  result_freqs  <- vector("list", nrow(metadata))
+  result_counts[] <- list(integer(0))
+  result_freqs[]  <- list(numeric(0))
+
+  fac_idx <- match(fac_meta$var_name, metadata$var_name)
+  for (i in seq_along(fac_idx)) {
+    result_counts[[fac_idx[i]]] <- stats_list[[i]]$counts
+    result_freqs[[fac_idx[i]]]  <- stats_list[[i]]$freqs
+  }
+
+  metadata$level_counts <- result_counts
+  metadata$level_freqs  <- result_freqs
+  metadata
+}
+
 
 
 # ============================================================
@@ -1600,122 +1715,373 @@ ai_suggest_missing <- function(
 # 11. ai_suggest_labels()
 # ============================================================
 
-#' Use Haiku to suggest concise French factor level labels
+#' Use Haiku to suggest concise French factor level labels and merge ordinal levels
 #'
-#' Sends factor variables to Claude and asks it to shorten labels to
-#' ≤ 25 characters while preserving numeric prefix and meaning.
-#' Ordinal variables (detected_role = "factor_ordinal"): labels are shortened but NOT reordered.
+#' Sends factor variables to Claude (as JSON) and asks it to:
+#'   - Shorten all factor level labels to <= 30 characters.
+#'   - For factor_ordinal only: merge very small contiguous levels
+#'     (freq < 5% AND count < 30) by giving them the same new label.
 #'
-#' Routes to synchronous (<= batch_threshold vars) or batch API (cheaper).
-#' Output MUST be reviewed before applying — especially ordinal variables.
+#' Numeric label prefixes ("1-", "01-") are NOT sent to Haiku — they are rebuilt
+#' after merging based on the number of remaining distinct levels.
 #'
-#' @param metadata         Varmod tibble.
-#' @param vars             Optional character vector of var_name to restrict to.
-#' @param examples_text    Optional: paste of a previous _recode.R showing style.
-#' @param api_key          ANTHROPIC_API_KEY env var by default.
-#' @param model            Default: Haiku 4.5.
-#' @param chunk_size       Variables per API request. Default 50.
-#' @param batch_threshold  Above this n_vars, use batch mode. Default 60.
+#' ## Ordering sent to Haiku
+#'   - factor_binary, desc=FALSE  : positive sent first (swap stored order);
+#'     result is un-swapped before saving.
+#'   - factor_binary, desc=TRUE or desc=NA : sent in stored order.
+#'   - factor_ordinal, ordinal_desc=TRUE : non-NULL labels sent in reversed order;
+#'     un-reversed before saving.
+#'   - factor_ordinal, ordinal_desc=FALSE (default) : sent in STORED order as-is.
+#'   - factor_nominal : always sent in stored order, never reordered.
 #'
-#' @return metadata with new_labels updated. Review before apply_survey_formats()!
+#' ## chunk_size vs use_batch
+#'   chunk_size controls how many variables go into one API request.  Smaller
+#'   chunks (default 30) give Haiku more focus and produce better labels, at the
+#'   cost of more sequential calls.  Larger values (up to 80) reduce call count.
+#'   use_batch=TRUE submits everything as a single Anthropic Message Batch job
+#'   (cheaper, but asynchronous — requires polling to retrieve results and can
+#'   take minutes).  Keep use_batch=FALSE (default) for interactive use; set it
+#'   to TRUE only for very large surveys (200+ factor variables).
+#'
+#' ## Output
+#'   Results are written to a JSON file on disk (default path derived from
+#'   the df path).  The metadata table is NOT modified here.  Load the JSON
+#'   back via the labels_json argument of extract_survey_metadata().
+#'
+#' ## Dry run
+#'   dry_run=TRUE prints every prompt that would be sent without making any
+#'   API call.  Use this to validate prompts before spending tokens.
+#'
+#' Requires level_counts and level_freqs columns for ordinal merging.  Pass
+#' df= to compute them automatically, or call metadata_add_level_stats() first.
+#'
+#' @param metadata     Varmod tibble.
+#' @param df           Optional original survey tibble.  Used for two purposes:
+#'                     (1) auto-compute level stats if missing; (2) derive the
+#'                     default output_path from the df's file path attribute.
+#' @param vars         Optional character vector of var_name to restrict to.
+#' @param ordinal_desc Logical. If TRUE, send factor_ordinal labels to Haiku in
+#'                     descending (high->low) order.  Default FALSE = stored order.
+#' @param output_path  Path of the JSON file to write.  Defaults to
+#'                     "{df_folder}/{df_stem}_new_labels.json" when df has a
+#'                     "path" attribute (set by import_survey()), otherwise
+#'                     "new_labels.json" in the working directory.
+#' @param chunk_size   Variables per API request.  Default 30.
+#' @param use_batch    Logical. Use the Anthropic Message Batch API (cheaper,
+#'                     async).  Default FALSE.
+#' @param dry_run      If TRUE, print the prompt(s) that would be sent and
+#'                     return invisibly without calling the API.  Default FALSE.
+#' @param api_key      ANTHROPIC_API_KEY env var by default.
+#' @param model        Default: Haiku 4.5.
+#'
+#' @return Invisibly returns the output_path.  In dry_run mode: invisibly
+#'         returns a list of the prompt strings.
 ai_suggest_labels <- function(
     metadata,
-    vars            = NULL,
-    examples_text   = NULL,
-    api_key         = Sys.getenv("ANTHROPIC_API_KEY"),
-    model           = "claude-haiku-4-5", # "claude-haiku-4-5-20251001"
-    chunk_size      = 50,
-    batch_threshold = 60
+    df            = NULL,
+    vars          = NULL,
+    ordinal_desc  = FALSE,
+    output_path   = NULL,
+    chunk_size    = 30L,
+    use_batch     = FALSE,
+    dry_run       = FALSE,
+    api_key       = Sys.getenv("ANTHROPIC_API_KEY"),
+    model         = "claude-haiku-4-5"
 ) {
+  # ---------- resolve output path -----------------------------------------
+  if (is.null(output_path)) {
+    df_path <- if (!is.null(df)) attr(df, "path") else NULL
+    output_path <- if (!is.null(df_path) && nzchar(df_path)) {
+      stem <- tools::file_path_sans_ext(df_path)
+      paste0(stem, "_new_labels.json")
+    } else {
+      "new_labels.json"
+    }
+  }
+
+  # ---------- level stats ---------------------------------------------------
+  needs_stats <- !all(c("level_counts", "level_freqs") %in% names(metadata))
+  if (needs_stats && !is.null(df)) {
+    message("ai_suggest_labels: computing level stats via metadata_add_level_stats().")
+    metadata <- metadata_add_level_stats(metadata, df)
+  } else if (needs_stats) {
+    message("ai_suggest_labels: level_counts/level_freqs missing. ",
+            "Ordinal merging disabled. Pass df= to enable.")
+  }
+
+  # ---------- filter target variables --------------------------------------
   target <- metadata |>
     dplyr::filter(detected_role %in% c("factor_binary", "factor_nominal",
                                         "factor_ordinal"))
   if (!is.null(vars)) target <- dplyr::filter(target, var_name %in% vars)
   if (nrow(target) == 0) {
-    message("ai_suggest_labels: No factor variables to label.")
-    return(metadata)
+    message("ai_suggest_labels: No factor variables to process.")
+    return(invisible(output_path))
   }
 
-  chunks     <- split(target, ceiling(seq_len(nrow(target)) / chunk_size))
-  ex_section <- if (!is.null(examples_text))
-    paste0("\n\nEXAMPLE STYLE:\n```r\n", examples_text, "\n```\n") else ""
+  # ---------- compute send_order permutation --------------------------------
+  # send_order[i] = j means stored position i is sent at position j.
+  # NULL-coded levels keep their index so they can be re-inserted exactly.
+  # ordinal_desc=FALSE => identity permutation (stored order kept as-is).
+  target <- target |>
+    dplyr::mutate(
+      .send_order = purrr::pmap(
+        list(detected_role, desc, new_labels),
+        function(role, dsc, nls) {
+          idx <- seq_along(nls)
+          if (role == "factor_binary" && isFALSE(dsc)) {
+            # positive is stored second among non-NULL; swap to first
+            non_null <- which(nls != "NULL")
+            if (length(non_null) >= 2) {
+              tmp              <- idx[non_null[1]]
+              idx[non_null[1]] <- idx[non_null[2]]
+              idx[non_null[2]] <- tmp
+            }
+          } else if (role == "factor_ordinal" && isTRUE(ordinal_desc)) {
+            non_null      <- which(nls != "NULL")
+            idx[non_null] <- rev(idx[non_null])
+          }
+          idx  # ordinal_desc=FALSE or nominal => untouched identity permutation
+        }
+      )
+    )
 
+  # ---------- JSON builder for one variable ---------------------------------
+  .build_var_json <- function(var_name, var_label, detected_role, desc,
+                               labels, new_labels, send_order,
+                               level_counts, level_freqs) {
+    labels_ord     <- labels[send_order]
+    new_labels_ord <- new_labels[send_order]
+    counts_ord     <- if (length(level_counts) > 0) level_counts[send_order] else integer(0)
+    freqs_ord      <- if (length(level_freqs)  > 0) level_freqs[send_order]  else numeric(0)
+
+    keep        <- new_labels_ord != "NULL"
+    labels_send <- labels_ord[keep]
+    counts_send <- counts_ord[keep]
+    freqs_send  <- freqs_ord[keep]
+
+    if (length(labels_send) == 0) return(NULL)
+
+    type_str <- switch(detected_role,
+      factor_binary  = "binary",
+      factor_ordinal = "ordinal",
+      factor_nominal = "nominal",
+      "nominal"
+    )
+
+    esc       <- function(x) gsub('"', '\\"', x, fixed = TRUE)
+    labs_json <- paste0('["', paste(esc(labels_send), collapse = '", "'), '"]')
+    obj       <- paste0('{"var":"', esc(var_name), '","type":"', type_str,
+                        '","desc":"', esc(substr(var_label, 1, 120)), '",',
+                        '"labels":', labs_json)
+
+    if (detected_role == "factor_ordinal" &&
+        length(counts_send) == length(labels_send) &&
+        !any(is.na(counts_send))) {
+      obj <- paste0(obj,
+                    ',"counts":[', paste(counts_send, collapse = ","), ']',
+                    ',"freqs":[',  paste(freqs_send,  collapse = ","), ']')
+    }
+    paste0(obj, "}")
+  }
+
+  # ---------- prompt builder for a chunk ------------------------------------
   build_prompt <- function(chunk_df) {
-    rows <- purrr::pmap_chr(chunk_df, function(var_name, var_label, labels,
-                                                detected_role, ...) {
-      ord_note <- if (detected_role == "factor_ordinal")
-        " [ORDINAL: keep order, do not rearrange]" else ""
-      labs_str <- paste0('"', labels, '"', collapse = ", ")
-      sprintf('  list(var_name="%s", label="%s"%s, levels=c(%s))',
-              var_name, substr(var_label, 1, 60), ord_note, labs_str)
-    })
+    json_objects <- purrr::pmap(
+      dplyr::select(chunk_df, var_name, var_label, detected_role, desc,
+                    labels, new_labels, .send_order,
+                    dplyr::any_of(c("level_counts", "level_freqs"))),
+      function(var_name, var_label, detected_role, desc,
+               labels, new_labels, .send_order,
+               level_counts = integer(0), level_freqs = numeric(0)) {
+        .build_var_json(var_name, var_label, detected_role, desc,
+                        labels, new_labels, .send_order,
+                        level_counts, level_freqs)
+      }
+    ) |> purrr::compact()
+
+    if (length(json_objects) == 0) return(NULL)
+
+    vars_array <- paste0("[\n", paste(json_objects, collapse = ",\n"), "\n]")
+
     paste0(
-      'You format French social survey data.\n',
-      'Shorten each factor level label to ≤25 chars. Keep numeric prefix (e.g. "1-"). ',
-      'Do not change meaning. Keep "NULL" as-is. ',
-      'For [ORDINAL] variables: only shorten text, never reorder.\n',
-      ex_section,
-      '\nDATA:\n', paste(rows, collapse = "\n"),
-      '\n\nReply ONLY as an R tribble:\n',
-      'tribble(\n  ~var_name, ~new_labels,\n',
-      '  "DIPL", list(c("1-Aucun", "2-CEP"))\n)\n',
-      'No explanation, no markdown.'
+      "Tu es un assistant de recodage de labels de variables d'enquete en sociologie.\n",
+      "Pour chaque variable du tableau JSON, produis des nouveaux labels courts.\n\n",
+      "## Regles\n",
+      "- Labels courts : 15-30 caracteres idealement\n",
+      "- Ecriture neutre (pas de 'je'), inclusive avec point median (salarie.e)\n",
+      "- Symboles bienvenus : >, +, -, h, min, /sem\n",
+      "- PAS de prefixe numerique ('1-', '2-', etc.) dans les labels\n",
+      "- Pour 'binary' : remplacer 'Oui' par un syntagme court tire de desc ; garder 'Non'\n",
+      "- Pour 'ordinal' : premiere modalite seulement, prefixer avec contexte de desc suivi de ':'\n",
+      "- Pour 'ordinal' avec counts/freqs : fusionner les modalites CONTIGUËS trop petites\n",
+      "  (freq < 5 ET count < 30) en leur donnant le meme nouveau label. Fusionner le strict minimum.\n",
+      "  Ne jamais fusionner deux modalites toutes deux suffisamment grandes (freq >= 5 ET count >= 30)\n",
+      "- Pour 'nominal' : condenser ; PAS de fusion\n",
+      "- Meme nombre de labels en sortie qu'en entree (si fusion : labels identiques pour modalites fusionnees)\n\n",
+      "## Format de sortie\n",
+      'Reponds UNIQUEMENT avec un objet JSON :\n',
+      '{"VARNAME1": ["label A", "label B"], "VARNAME2": ["label X"]}\n',
+      "Aucun commentaire ni markdown.\n\n",
+      "## Variables\n",
+      vars_array
     )
   }
 
-  if (nrow(target) <= batch_threshold) {
-    message("ai_suggest_labels: synchronous (", nrow(target), " vars)")
-    results_text <- purrr::imap(chunks, function(chunk, i) {
-      message("  Chunk ", i, "/", length(chunks))
-      resp <- ai_call_claude(build_prompt(chunk), model = model, api_key = api_key)
+  chunks  <- split(target, ceiling(seq_len(nrow(target)) / chunk_size))
+  prompts <- purrr::map(chunks, build_prompt) |> purrr::compact()
+
+  # ---------- dry run -------------------------------------------------------
+  if (dry_run) {
+    message(strrep("=", 60))
+    message("DRY RUN — no API call made")
+    message(strrep("=", 60))
+    message("Variables: ", nrow(target), "  |  Chunks: ", length(prompts),
+            "  |  Route: ", if (use_batch) "batch" else "synchronous",
+            "  |  Output would go to: ", output_path)
+    purrr::iwalk(prompts, function(p, i) {
+      message("\n", strrep("-", 60))
+      message("PROMPT ", i, "/", length(prompts))
+      message(strrep("-", 60))
+      cat(p, "\n")
+    })
+    message(strrep("=", 60))
+    return(invisible(prompts))
+  }
+
+  # ---------- API calls -----------------------------------------------------
+  if (!use_batch) {
+    message("ai_suggest_labels: synchronous (", nrow(target), " vars, ",
+            length(prompts), " chunk(s))")
+    results_text <- purrr::imap(prompts, function(p, i) {
+      message("  Chunk ", i, "/", length(prompts))
+      resp <- ai_call_claude(p, model = model, api_key = api_key)
       resp$content[[1]]$text
     })
   } else {
     message("ai_suggest_labels: batch mode (", nrow(target), " vars)")
-    requests <- purrr::imap(chunks, function(chunk, i)
-      list(custom_id = paste0("labels_", i), prompt = build_prompt(chunk)))
+    requests <- purrr::imap(prompts, ~ list(custom_id = paste0("labels_", .y),
+                                            prompt     = .x))
     batch    <- ai_batch_submit(requests, model = model, api_key = api_key)
     message("Batch submitted. ID: ", batch$id)
     raw      <- ai_batch_retrieve(batch$id, api_key = api_key)
     results_text <- purrr::map(purrr::set_names(names(raw)), ~ raw[[.x]])
   }
 
-  metadata <- .parse_and_merge_labels(metadata, results_text)
-  message("Review metadata$new_labels before apply_survey_formats().")
-  metadata
+  # ---------- parse + write to disk -----------------------------------------
+  parsed_map <- .parse_labels_json_responses(results_text, target)
+
+  if (length(parsed_map) == 0) {
+    warning("ai_suggest_labels: No valid responses to write.")
+    return(invisible(output_path))
+  }
+
+  jsonlite::write_json(parsed_map, output_path, auto_unbox = FALSE, pretty = TRUE)
+  message("ai_suggest_labels: ", length(parsed_map), " variable(s) written to: ", output_path)
+  message("Load with extract_survey_metadata(..., labels_json = \"", output_path, "\")")
+
+  invisible(output_path)
 }
 
-.parse_and_merge_labels <- function(metadata, results_text) {
-  parsed_list <- purrr::map(results_text, function(txt) {
+# ---------------------------------------------------------------------------
+# Parse JSON responses from ai_suggest_labels() into a var_name -> labels map.
+# Returns a named list suitable for jsonlite::write_json().
+# target: filtered tibble with .send_order column.
+.parse_labels_json_responses <- function(results_text, target) {
+  # Step 1: collect raw AI outputs into a flat var_name -> char-vector map
+  raw_map <- list()
+  for (txt in results_text) {
+    if (is.null(txt) || !nzchar(txt)) next
     tryCatch({
-      tribble_text <- stringr::str_extract(txt, "(?s)tribble\\(.*?\\)")
-      if (is.na(tribble_text)) stop("No tribble found")
-      eval(parse(text = tribble_text))
+      json_str <- stringr::str_extract(
+        txt,
+        "(?s)\\{(?:[^{}]|\\[[^\\[\\]]*\\])*\\}"
+      )
+      if (is.na(json_str)) stop("No JSON object found")
+      parsed <- jsonlite::fromJSON(json_str, simplifyVector = FALSE)
+      for (vname in names(parsed)) {
+        val <- parsed[[vname]]
+        if (is.character(val) ||
+            (is.list(val) && all(purrr::map_lgl(val, is.character)))) {
+          raw_map[[vname]] <- unlist(val)
+        }
+      }
     }, error = function(e) {
-      warning("Could not parse AI response: ", conditionMessage(e))
-      NULL
+      warning("ai_suggest_labels: parse error: ", conditionMessage(e))
     })
+  }
+
+  if (length(raw_map) == 0) return(list())
+
+  # Step 2: un-permute each variable back to original metadata order,
+  # validate length, re-insert NULL placeholders.
+  out <- purrr::imap(raw_map, function(ai_labels, vname) {
+    row <- target[target$var_name == vname, ]
+    if (nrow(row) == 0) return(NULL)
+
+    orig_new_labels <- row$new_labels[[1]]
+    send_order      <- row$.send_order[[1]]
+
+    orig_reordered <- orig_new_labels[send_order]
+    keep_mask      <- orig_reordered != "NULL"
+    n_keep         <- sum(keep_mask)
+
+    if (length(ai_labels) != n_keep) {
+      warning("ai_suggest_labels: length mismatch for ", vname,
+              " (expected ", n_keep, ", got ", length(ai_labels), "). Skipped.")
+      return(NULL)
+    }
+
+    result_in_send_order            <- orig_reordered
+    result_in_send_order[keep_mask] <- ai_labels
+
+    inv_order <- order(send_order)
+    as.list(result_in_send_order[inv_order])  # list so JSON keeps arrays
+  }) |> purrr::compact()
+
+  out
+}
+
+# ---------------------------------------------------------------------------
+# Apply a saved ai_suggest_labels() JSON file to a metadata table.
+# Called internally by extract_survey_metadata() when labels_json != NULL.
+# Also exported for direct use.
+#
+# @param metadata    Varmod tibble.
+# @param labels_json Path to a JSON file produced by ai_suggest_labels().
+# @return metadata with new_labels updated.
+metadata_apply_labels_json <- function(metadata, labels_json) {
+  if (!file.exists(labels_json))
+    stop("labels_json file not found: ", labels_json)
+
+  saved <- jsonlite::read_json(labels_json, simplifyVector = FALSE)
+
+  update_rows <- purrr::imap(saved, function(labels_list, vname) {
+    new_labs <- unlist(labels_list)
+    row <- metadata[metadata$var_name == vname, ]
+    if (nrow(row) == 0) {
+      warning("metadata_apply_labels_json: var '", vname, "' not in metadata. Skipped.")
+      return(NULL)
+    }
+    orig <- row$new_labels[[1]]
+    if (length(new_labs) != length(orig)) {
+      warning("metadata_apply_labels_json: length mismatch for '", vname,
+              "' (", length(new_labs), " vs ", length(orig), "). Skipped.")
+      return(NULL)
+    }
+    tibble::tibble(var_name = vname, new_labels = list(new_labs))
   }) |> purrr::compact() |> dplyr::bind_rows()
 
-  if (nrow(parsed_list) == 0) {
-    warning("No valid AI responses parsed. metadata unchanged.")
+  if (nrow(update_rows) == 0) {
+    warning("metadata_apply_labels_json: nothing applied.")
     return(metadata)
   }
 
-  parsed_list <- parsed_list |>
-    dplyr::inner_join(dplyr::select(metadata, var_name, labels),
-                      by = "var_name", suffix = c("", "_orig")) |>
-    dplyr::filter(purrr::map2_lgl(new_labels, labels,
-                                   ~ length(.x) == length(.y)))
-
-  if (nrow(parsed_list) == 0) {
-    warning("All AI responses had mismatched label lengths. metadata unchanged.")
-    return(metadata)
-  }
-
-  dplyr::rows_update(metadata, dplyr::select(parsed_list, var_name, new_labels),
-                     by = "var_name")
+  message("metadata_apply_labels_json: ", nrow(update_rows), " variable(s) updated.")
+  dplyr::rows_update(metadata, update_rows, by = "var_name", unmatched = "ignore")
 }
+
+
 
 
 # ============================================================
@@ -1825,7 +2191,4 @@ ai_suggest_varnames <- function(
 
   dplyr::rows_update(metadata, update_df, by = "var_name")
 }
-
-
-
 
