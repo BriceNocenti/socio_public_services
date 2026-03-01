@@ -180,10 +180,12 @@ import_survey <- function(
 #'                        For factor_ordinal: TRUE = descending (high→low).
 #'                        Paste output of ai_classify_roles() here after editing.
 #' @param labels_json     Optional path to a JSON file produced by
-#'                        ai_suggest_labels().  When supplied, the saved labels
-#'                        are applied to new_labels at the end of this call via
-#'                        metadata_apply_labels_json().  Lets you persist Haiku
-#'                        results across R sessions without re-running the API.
+#'                        ai_suggest_labels().  When supplied, new_labels and
+#'                        level_counts/level_freqs stored in the JSON are merged
+#'                        back into the metadata table via
+#'                        metadata_apply_labels_json().  Works for both full API
+#'                        results and dry_run stats-only files (which restore
+#'                        counts/freqs but leave new_labels unchanged).
 #'
 #' @return A tibble with columns:
 #'   var_name, var_label, r_class, n_distinct, detected_role, desc,
@@ -1127,14 +1129,14 @@ ai_batch_submit <- function(
 ) {
   if (api_key == "") stop("ANTHROPIC_API_KEY not set.")
 
-  batch_requests <- purrr::map(requests, function(req) {
+  batch_requests <- unname(purrr::map(requests, function(req) {
     params <- list(model = model, max_tokens = max_tokens,
                    messages = list(list(role = "user", content = req$prompt)))
     if (!is.null(system)) params$system <- system
     list(custom_id = req$custom_id, params = params)
-  })
+  }))
 
-  httr2::request("https://api.anthropic.com/v1/messages/batches") |>
+  resp <- httr2::request("https://api.anthropic.com/v1/messages/batches") |>
     httr2::req_headers("x-api-key" = api_key,
                        "anthropic-version" = "2023-06-01",
                        "content-type"      = "application/json") |>
@@ -1142,6 +1144,15 @@ ai_batch_submit <- function(
     httr2::req_error(is_error = function(resp) FALSE) |>
     httr2::req_perform() |>
     httr2::resp_body_json()
+
+  if (!is.null(resp$type) && resp$type == "error") {
+    stop("Batch submit failed [", resp$error$type, "]: ", resp$error$message)
+  }
+  if (is.null(resp$id)) {
+    stop("Batch submit returned unexpected response (no $id): ",
+         jsonlite::toJSON(resp, auto_unbox = TRUE))
+  }
+  resp
 }
 
 
@@ -1169,6 +1180,10 @@ ai_batch_retrieve <- function(
       httr2::resp_body_json()
 
     proc_status <- status_resp$processing_status
+    if (is.null(proc_status)) {
+      stop("Batch status check failed for '", batch_id, "': ",
+           jsonlite::toJSON(status_resp, auto_unbox = TRUE))
+    }
     message("Batch ", batch_id, " \u2014 status: ", proc_status)
     if (proc_status == "ended") break
     Sys.sleep(poll_interval)
@@ -1938,7 +1953,33 @@ ai_suggest_labels <- function(
     paste0(obj, "}")
   }
 
-  # ---------- prompt builder for a chunk ------------------------------------
+  # ---------- system prompt (loaded once from .md file) ---------------------
+  # Search order: (1) installed package, (2) project root relative to getwd().
+  .pkg_name <- utils::packageName()
+  .prompt_md_path <- if (!is.null(.pkg_name) && nzchar(.pkg_name)) {
+    system.file("instructions/levels_rename_prompt_JSON.md", package = .pkg_name)
+  } else {
+    ""
+  }
+  if (!nzchar(.prompt_md_path) || !file.exists(.prompt_md_path)) {
+    .prompt_md_path <- file.path(getwd(), "instructions",
+                                 "levels_rename_prompt_JSON.md")
+  }
+  system_prompt <- if (file.exists(.prompt_md_path)) {
+    paste(readLines(.prompt_md_path, encoding = "UTF-8", warn = FALSE),
+          collapse = "\n")
+  } else {
+    warning("ai_suggest_labels: instructions/levels_rename_prompt_JSON.md not found; ",
+            "falling back to inline rules.")
+    paste0(
+      "Tu es un assistant de recodage de labels de variables d'enquete en sociologie.\n",
+      "Reponds UNIQUEMENT avec un objet JSON : ",
+      '{"VARNAME1": ["label A", "label B"], "VARNAME2": ["label X"]}\n',
+      "Aucun commentaire ni markdown."
+    )
+  }
+
+  # ---------- user message builder for a chunk (data only) ------------------
   build_prompt <- function(chunk_df) {
     json_objects <- purrr::pmap(
       dplyr::select(chunk_df, var_name, var_label, detected_role, desc,
@@ -1955,30 +1996,7 @@ ai_suggest_labels <- function(
 
     if (length(json_objects) == 0) return(NULL)
 
-    vars_array <- paste0("[\n", paste(json_objects, collapse = ",\n"), "\n]")
-
-    paste0(
-      "Tu es un assistant de recodage de labels de variables d'enquete en sociologie.\n",
-      "Pour chaque variable du tableau JSON, produis des nouveaux labels courts.\n\n",
-      "## Regles\n",
-      "- Labels courts : 15-30 caracteres idealement\n",
-      "- Ecriture neutre (pas de 'je'), inclusive avec point median (salarie.e)\n",
-      "- Symboles bienvenus : >, +, -, h, min, /sem\n",
-      "- PAS de prefixe numerique ('1-', '2-', etc.) dans les labels\n",
-      "- Pour 'binary' : remplacer 'Oui' par un syntagme court tire de desc ; garder 'Non'\n",
-      "- Pour 'ordinal' : premiere modalite seulement, prefixer avec contexte de desc suivi de ':'\n",
-      "- Pour 'ordinal' avec counts/freqs : fusionner les modalites CONTIGUËS trop petites\n",
-      "  (freq < 5 ET count < 30) en leur donnant le meme nouveau label. Fusionner le strict minimum.\n",
-      "  Ne jamais fusionner deux modalites toutes deux suffisamment grandes (freq >= 5 ET count >= 30)\n",
-      "- Pour 'nominal' : condenser ; PAS de fusion\n",
-      "- Meme nombre de labels en sortie qu'en entree (si fusion : labels identiques pour modalites fusionnees)\n\n",
-      "## Format de sortie\n",
-      'Reponds UNIQUEMENT avec un objet JSON :\n',
-      '{"VARNAME1": ["label A", "label B"], "VARNAME2": ["label X"]}\n',
-      "Aucun commentaire ni markdown.\n\n",
-      "## Variables\n",
-      vars_array
-    )
+    paste0("[\n", paste(json_objects, collapse = ",\n"), "\n]")
   }
 
   chunks  <- split(target, ceiling(seq_len(nrow(target)) / chunk_size))
@@ -1998,19 +2016,22 @@ ai_suggest_labels <- function(
     message(strrep("=", 60))
     message("Variables: ", nrow(target), "  |  Chunks: ", length(prompts),
             "  |  Route: ", if (use_batch) "batch" else "synchronous")
+    message("\n", strrep("-", 60))
+    message("SYSTEM PROMPT")
+    message(strrep("-", 60))
+    cat(system_prompt, "\n")
     purrr::iwalk(prompts, function(p, i) {
       message("\n", strrep("-", 60))
-      message("PROMPT ", i, "/", length(prompts))
+      message("USER MESSAGE ", i, "/", length(prompts))
       message(strrep("-", 60))
       cat(p, "\n")
     })
     message(strrep("=", 60))
 
     # Write stats-only JSON (no AI labels) so counts/freqs survive the session.
-    # The "labels" entry is left empty; only counts + freqs are populated.
     stats_map <- .build_stats_only_map(target)
     if (length(stats_map) > 0) {
-      jsonlite::write_json(stats_map, dry_path, auto_unbox = FALSE, pretty = TRUE)
+      .write_labels_json(stats_map, dry_path)
       message("ai_suggest_labels dry_run: ", length(stats_map),
               " variable(s) written to: ", dry_path)
     }
@@ -2024,14 +2045,16 @@ ai_suggest_labels <- function(
             length(prompts), " chunk(s))")
     results_text <- purrr::imap(prompts, function(p, i) {
       message("  Chunk ", i, "/", length(prompts))
-      resp <- ai_call_claude(p, model = model, api_key = api_key)
+      resp <- ai_call_claude(p, model = model, api_key = api_key,
+                             system = system_prompt)
       resp$content[[1]]$text
     })
   } else {
     message("ai_suggest_labels: batch mode (", nrow(target), " vars)")
     requests <- purrr::imap(prompts, ~ list(custom_id = paste0("labels_", .y),
                                             prompt     = .x))
-    batch    <- ai_batch_submit(requests, model = model, api_key = api_key)
+    batch    <- ai_batch_submit(requests, model = model, api_key = api_key,
+                                system = system_prompt)
     message("Batch submitted. ID: ", batch$id)
     raw      <- ai_batch_retrieve(batch$id, api_key = api_key)
     results_text <- purrr::map(purrr::set_names(names(raw)), ~ raw[[.x]])
@@ -2050,11 +2073,120 @@ ai_suggest_labels <- function(
   # Stored in original metadata order (parallel to labels / new_labels).
   parsed_map <- .enrich_labels_map_with_stats(parsed_map, target)
 
-  jsonlite::write_json(parsed_map, output_path, auto_unbox = FALSE, pretty = TRUE)
+  .write_labels_json(parsed_map, output_path)
   message("ai_suggest_labels: ", length(parsed_map), " variable(s) written to: ", output_path)
   message("Load with extract_survey_metadata(..., labels_json = \"", output_path, "\")")
 
   invisible(output_path)
+}
+
+# ---------------------------------------------------------------------------
+# Write the labels map produced by .build_levels_map() to disk as UTF-8 JSON.
+#
+# Format: outer structure is pretty-printed (one variable per block), but each
+# level entry is collapsed to a single line for human readability, e.g.:
+#
+#   "prfc1_Q1": {
+#     "role": "factor_binary",
+#     "levels": {
+#       "1": { "label": "Oui, choisie", "new_label": "Choisie", "n": 451, "pct": 61 },
+#       "9": { "label": "NSP",          "null_coded": true }
+#     }
+#   }
+#
+# Scalars are unboxed (no spurious [brackets]). UTF-8 written with useBytes.
+.write_labels_json <- function(labels_map, path) {
+  esc <- function(s) gsub("\\", "\\\\", gsub('"', '\\"', as.character(s), fixed = TRUE), fixed = TRUE)
+  # Right-pad a string to width w (nchar in Unicode code points).
+  rpad <- function(s, w) {
+    n <- nchar(s, type = "chars")
+    if (n < w) paste0(s, strrep(" ", w - n)) else s
+  }
+
+  var_blocks <- purrr::imap_chr(labels_map, function(var_entry, vname) {
+    role_str <- esc(as.character(var_entry$role[[1]]))
+    levels   <- var_entry$levels
+    n_lev    <- length(levels)
+    if (n_lev == 0L) {
+      return(paste0('  "', esc(vname), '": {\n    "role": "', role_str, '",\n    "levels": {}\n  }'))
+    }
+
+    # ---- per-level raw field strings (unpadded) ----------------------------
+    has_new_label <- any(purrr::map_lgl(levels, ~ !is.null(.x$new_label)))
+    has_null      <- any(purrr::map_lgl(levels, ~ isTRUE(.x$null_coded)))
+    has_n         <- any(purrr::map_lgl(levels, ~ !is.null(.x$n)))
+    has_pct       <- any(purrr::map_lgl(levels, ~ !is.null(.x$pct)))
+
+    val_keys   <- names(levels)
+    f_key      <- paste0('"', purrr::map_chr(val_keys, esc), '"')
+    f_label    <- purrr::map_chr(levels, function(lev)
+                    paste0('"', esc(lev$label), '"'))
+    f_new_lbl  <- if (has_new_label) purrr::map_chr(levels, function(lev)
+                    if (!is.null(lev$new_label)) paste0('"', esc(lev$new_label), '"') else '""') else NULL
+    f_n        <- if (has_n) purrr::map_chr(levels, function(lev)
+                    if (!is.null(lev$n)) as.character(as.integer(lev$n)) else "") else NULL
+    f_pct      <- if (has_pct) purrr::map_chr(levels, function(lev)
+                    if (!is.null(lev$pct)) as.character(as.integer(lev$pct)) else "") else NULL
+
+    # ---- column widths (max across all levels of this variable) ------------
+    w_key   <- max(nchar(f_key,   type = "chars"))
+    w_label <- max(nchar(f_label, type = "chars"))
+    w_new   <- if (has_new_label) max(nchar(f_new_lbl, type = "chars")) else 0L
+    # null_coded is always 4 chars ("true") when present; no variable width needed
+    w_n     <- if (has_n)   max(nchar(f_n,   type = "chars")) else 0L
+    w_pct   <- if (has_pct) max(nchar(f_pct, type = "chars")) else 0L
+
+    # ---- assemble one line per level ---------------------------------------
+    # Each field is padded to the column-max width for this variable.
+    # null_coded rows omit n/pct; real rows omit null_coded — no blank gaps.
+    level_lines <- character(n_lev)
+    for (i in seq_len(n_lev)) {
+      lev     <- levels[[i]]
+      is_null <- isTRUE(lev$null_coded)
+
+      tokens <- character(0)
+      # label — always present, padded to column width
+      tokens <- c(tokens, paste0('"label": ', rpad(f_label[[i]], w_label)))
+      # new_label — present only when at least one level has it
+      if (has_new_label)
+        tokens <- c(tokens, paste0('"new_label": ', rpad(f_new_lbl[[i]], w_new)))
+      # null_coded — only emitted on null rows (no blank placeholder on real rows,
+      # so n/pct stay directly after label on real rows without a gap)
+      if (is_null) {
+        tokens <- c(tokens, '"null_coded": true')
+      } else {
+        # n and pct: right-aligned to their column width
+        if (has_n && !is.null(lev$n))
+          tokens <- c(tokens, paste0('"n": ', formatC(f_n[[i]], width = w_n, flag = " ")))
+        if (has_pct && !is.null(lev$pct))
+          tokens <- c(tokens, paste0('"pct": ', formatC(f_pct[[i]], width = w_pct, flag = " ")))
+      }
+
+      level_lines[[i]] <- paste0(
+        '      ', rpad(f_key[[i]], w_key), ': { ',
+        paste(tokens, collapse = ", "),
+        ' }'
+      )
+    }
+
+    # trailing comma on all but the last line
+    for (i in seq_len(n_lev - 1L))
+      level_lines[[i]] <- paste0(level_lines[[i]], ",")
+
+    levels_body <- paste(level_lines, collapse = "\n")
+
+    paste0(
+      '  "', esc(vname), '": {\n',
+      '    "role": "', role_str, '",\n',
+      '    "levels": {\n',
+      levels_body, '\n',
+      '    }\n',
+      '  }'
+    )
+  })
+
+  json_str <- paste0("{\n", paste(var_blocks, collapse = ",\n"), "\n}\n")
+  writeLines(enc2utf8(json_str), con = path, useBytes = TRUE)
 }
 
 # ---------------------------------------------------------------------------
@@ -2117,45 +2249,88 @@ ai_suggest_labels <- function(
 }
 
 # ---------------------------------------------------------------------------
-# Wrap each entry in parsed_map (list of char vectors) into the rich format:
-#   {labels: [...], counts: [...], freqs: [...]}
-# counts/freqs come from `target` (original metadata order, full length incl. NULLs).
-# Works for all factor types — binary and nominal were not sent to Haiku but
-# their stats are still recorded.
-.enrich_labels_map_with_stats <- function(parsed_map, target) {
-  purrr::imap(parsed_map, function(label_list, vname) {
-    row <- target[target$var_name == vname, ]
-    counts <- if (nrow(row) > 0 && "level_counts" %in% names(row) &&
-                  length(row$level_counts[[1]]) > 0)
-      as.list(row$level_counts[[1]]) else list()
-    freqs  <- if (nrow(row) > 0 && "level_freqs"  %in% names(row) &&
-                  length(row$level_freqs[[1]])  > 0)
-      as.list(row$level_freqs[[1]])  else list()
-    list(labels = label_list, counts = counts, freqs = freqs)
-  })
+# Build the on-disk JSON structure for one or all variables.
+#
+# Each variable entry has the form:
+#   { "role": "factor_binary",
+#     "levels": {
+#       "1": { "label": "Oui — choisie",  "new_label": "Choisie", "n": 451, "pct": 61 },
+#       "9": { "label": "NSP / NR",       "null_coded": true }
+#     }
+#   }
+#
+# `new_label` is omitted when ai_labels is NULL (dry_run / stats-only).
+# `n` / `pct`  are omitted when stats are absent.
+# Value codes are the keys — stable join key, never touches AI output.
+#
+# @param target      Filtered metadata tibble (with .send_order, level_counts,
+#                    level_freqs columns).
+# @param ai_map      Named list varname -> char vector of AI labels in original
+#                    metadata order (full length, NULLs kept).  NULL = dry_run.
+.build_levels_map <- function(target, ai_map = NULL) {
+  has_counts <- "level_counts" %in% names(target)
+  has_freqs  <- "level_freqs"  %in% names(target)
+  has_values <- "values"       %in% names(target)
+  has_labels <- "labels"       %in% names(target)
+
+  purrr::pmap(
+    list(
+      vname   = target$var_name,
+      role    = target$detected_role,
+      vals    = if (has_values) target$values     else vector("list", nrow(target)),
+      orig_lb = if (has_labels) target$labels     else vector("list", nrow(target)),
+      new_lb  = target$new_labels,
+      counts  = if (has_counts) target$level_counts else vector("list", nrow(target)),
+      freqs   = if (has_freqs)  target$level_freqs  else vector("list", nrow(target))
+    ),
+    function(vname, role, vals, orig_lb, new_lb, counts, freqs) {
+      n_lev  <- length(new_lb)
+      # ai_labels in original metadata order (NULL-coded positions kept as "NULL")
+      ai_vec <- ai_map[[vname]]   # NULL when dry_run
+
+      levels_obj <- purrr::imap(
+        seq_len(n_lev),
+        function(i, ...) {
+          val_key  <- if (length(vals)   >= i) as.character(vals[[i]])   else as.character(i)
+          cur_lbl  <- if (length(orig_lb) >= i) as.character(orig_lb[[i]]) else ""
+          is_null  <- identical(new_lb[[i]], "NULL")
+          has_n    <- length(counts) >= i && !is.na(counts[[i]])
+          has_p    <- length(freqs)  >= i && !is.na(freqs[[i]])
+
+          entry <- list()
+          entry[["label"]] <- cur_lbl
+          if (!is.null(ai_vec) && !is_null)
+            entry[["new_label"]] <- as.character(ai_vec[[i]])
+          if (is_null)
+            entry[["null_coded"]] <- TRUE
+          if (has_n && !is_null) entry[["n"]]   <- as.integer(counts[[i]])
+          if (has_p && !is_null) entry[["pct"]] <- as.integer(freqs[[i]])
+          entry
+        }
+      )
+      # Name the levels list by value code (the stable join key)
+      val_keys <- purrr::map_chr(seq_len(n_lev), function(i)
+        if (length(vals) >= i) as.character(vals[[i]]) else as.character(i))
+      names(levels_obj) <- val_keys
+
+      list(role = role, levels = levels_obj)
+    }
+  ) |> purrr::set_names(target$var_name)
 }
 
 # ---------------------------------------------------------------------------
-# Build a stats-only map for ALL target variables (dry_run output).
-# No AI labels: the "labels" field is an empty list. counts/freqs are in
-# original metadata order (full length, including NULL-coded positions).
+# Wrap parsed_map (varname -> char vector in original order) into the
+# on-disk rich format by calling .build_levels_map with the AI results.
+.enrich_labels_map_with_stats <- function(parsed_map, target) {
+  # parsed_map has only successfully parsed variables; restrict target to those
+  sub_target <- target[target$var_name %in% names(parsed_map), ]
+  .build_levels_map(sub_target, ai_map = parsed_map)
+}
+
+# ---------------------------------------------------------------------------
+# Stats-only map for dry_run: same structure but no new_label fields.
 .build_stats_only_map <- function(target) {
-  has_counts <- "level_counts" %in% names(target)
-  has_freqs  <- "level_freqs"  %in% names(target)
-  purrr::pmap(
-    list(
-      vname  = target$var_name,
-      counts = if (has_counts) target$level_counts else vector("list", nrow(target)),
-      freqs  = if (has_freqs)  target$level_freqs  else vector("list", nrow(target))
-    ),
-    function(vname, counts, freqs) {
-      list(
-        labels = list(),
-        counts = if (length(counts) > 0) as.list(counts) else list(),
-        freqs  = if (length(freqs)  > 0) as.list(freqs)  else list()
-      )
-    }
-  ) |> purrr::set_names(target$var_name)
+  .build_levels_map(target, ai_map = NULL)
 }
 
 # ---------------------------------------------------------------------------
@@ -2172,39 +2347,95 @@ metadata_apply_labels_json <- function(metadata, labels_json) {
 
   saved <- jsonlite::read_json(labels_json, simplifyVector = FALSE)
 
+  # Build one update-row per variable in the JSON.
+  # Each row may carry: new_labels (if present), level_counts, level_freqs.
+  # Matching is by value code — never by position — so ordering is irrelevant.
   update_rows <- purrr::imap(saved, function(entry, vname) {
-    # Support both old flat format  {varname: ["l1","l2"]}
-    # and new rich format           {varname: {labels: [...], counts: [...], freqs: [...]}}
-    # A dry_run JSON has labels = list() — skip applying labels but keep entry valid.
-    if (is.list(entry) && !is.null(entry$labels)) {
-      labels_list <- entry$labels          # rich format
-    } else {
-      labels_list <- entry                 # old flat format
-    }
-
-    new_labs <- unlist(labels_list)
-    if (length(new_labs) == 0) return(NULL)  # stats-only (dry_run) entry — nothing to apply
 
     row <- metadata[metadata$var_name == vname, ]
     if (nrow(row) == 0) {
       warning("metadata_apply_labels_json: var '", vname, "' not in metadata. Skipped.")
       return(NULL)
     }
-    orig <- row$new_labels[[1]]
-    if (length(new_labs) != length(orig)) {
-      warning("metadata_apply_labels_json: length mismatch for '", vname,
-              "' (", length(new_labs), " vs ", length(orig), "). Skipped.")
-      return(NULL)
+
+    # ---- detect format -------------------------------------------------------
+    if (is.list(entry) && !is.null(entry$levels)) {
+      # Rich format: { role, levels: { val_code: { label, new_label?, n?, pct? } } }
+      meta_vals  <- as.character(row$values[[1]])
+      levels_obj <- entry$levels
+
+      # -- new_labels (omit entirely if none present, i.e. dry_run file) -------
+      has_new <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$new_label)))
+      new_labs <- if (has_new) {
+        nls <- row$new_labels[[1]]
+        for (i in seq_along(meta_vals)) {
+          lev <- levels_obj[[meta_vals[[i]]]]
+          if (!is.null(lev) && !is.null(lev$new_label))
+            nls[[i]] <- as.character(lev$new_label)
+        }
+        nls
+      } else NULL
+
+      # -- level_counts / level_freqs (matched by value code) ------------------
+      has_stats <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$n)))
+      counts <- if (has_stats) {
+        purrr::map_int(meta_vals, function(v) {
+          lev <- levels_obj[[v]]
+          if (!is.null(lev) && !is.null(lev$n)) as.integer(lev$n) else NA_integer_
+        })
+      } else NULL
+      freqs <- if (has_stats) {
+        purrr::map_dbl(meta_vals, function(v) {
+          lev <- levels_obj[[v]]
+          if (!is.null(lev) && !is.null(lev$pct)) as.double(lev$pct) else NA_real_
+        })
+      } else NULL
+
+      if (is.null(new_labs) && is.null(counts)) return(NULL)
+
+      out <- tibble::tibble(var_name = vname)
+      if (!is.null(new_labs)) out$new_labels   <- list(new_labs)
+      if (!is.null(counts))   out$level_counts  <- list(counts)
+      if (!is.null(freqs))    out$level_freqs   <- list(freqs)
+      out
+
+    } else {
+      # Legacy flat format: entry is a plain list of label strings
+      new_labs <- unlist(entry)
+      if (length(new_labs) == 0) return(NULL)
+      orig <- row$new_labels[[1]]
+      if (length(new_labs) != length(orig)) {
+        warning("metadata_apply_labels_json: length mismatch for '", vname,
+                "' (", length(new_labs), " vs ", length(orig), "). Skipped.")
+        return(NULL)
+      }
+      tibble::tibble(var_name = vname, new_labels = list(new_labs))
     }
-    tibble::tibble(var_name = vname, new_labels = list(new_labs))
   }) |> purrr::compact() |> dplyr::bind_rows()
 
   if (nrow(update_rows) == 0) {
-    warning("metadata_apply_labels_json: nothing applied.")
+    message("metadata_apply_labels_json: stats-only (dry_run) JSON — no labels to apply.")
     return(metadata)
   }
 
-  message("metadata_apply_labels_json: ", nrow(update_rows), " variable(s) updated.")
+  # Ensure metadata has level_counts / level_freqs columns before rows_update,
+  # initialising missing ones with empty vectors for non-factor rows.
+  if ("level_counts" %in% names(update_rows) &&
+      !"level_counts" %in% names(metadata)) {
+    metadata$level_counts <- vector("list", nrow(metadata))
+    metadata$level_counts[] <- list(integer(0))
+  }
+  if ("level_freqs" %in% names(update_rows) &&
+      !"level_freqs" %in% names(metadata)) {
+    metadata$level_freqs <- vector("list", nrow(metadata))
+    metadata$level_freqs[] <- list(numeric(0))
+  }
+
+  n_labels <- if ("new_labels"   %in% names(update_rows)) nrow(update_rows) else 0L
+  n_stats  <- if ("level_counts" %in% names(update_rows)) nrow(update_rows) else 0L
+  message("metadata_apply_labels_json: ", nrow(update_rows), " variable(s) — ",
+          n_labels, " new_labels, ", n_stats, " with counts/freqs.")
+
   dplyr::rows_update(metadata, update_rows, by = "var_name", unmatched = "ignore")
 }
 
