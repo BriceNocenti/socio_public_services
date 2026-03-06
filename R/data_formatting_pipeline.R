@@ -6,7 +6,7 @@
 #
 # METADATA SCHEMA — extract_survey_metadata() produces a tibble with:
 #   var_name, var_label, r_class, n_distinct, detected_role, desc,
-#   values, labels, missing_vals, new_labels, new_name, doc_note
+#   values, labels, missing_vals, new_labels, new_name
 #
 #   detected_role (7 values):
 #     identifier    — ID column (unique per row or named IDENT/ID)
@@ -30,16 +30,16 @@
 #   2. meta <- extract_survey_metadata(df,
 #                missing_chr = c(...), missing_num = c(...))
 #      # Console shows factor_binary detections + n needing AI classification
-#   3. [optional] ai_classify_roles(meta)
-#      # Prints detected_roles / desc_overrides vectors — edit, then re-run step 2
+#   3. [optional] ai_classify_roles(meta, meta_json = meta_json)
+#      # Writes role / desc to meta_json — review, then re-run step 2
 #   4. [optional] metadata_apply_codebook(meta, codebook_df, ...)
 #   5. meta <- metadata_fix_binary(meta)
 #   6. export_metadata_excel(meta, "meta_review.xlsx")
 #      # Open Excel, check orange rows (factor_binary/nominal/integer), iterate
-#   6b.[optional] meta <- metadata_add_level_stats(meta, df)
-#      # Adds level_counts/level_freqs for ordinal merging in ai_suggest_labels()
-#   7. [optional] meta <- ai_suggest_labels(meta, df)
-#                 meta <- ai_suggest_varnames(meta)
+#   6b.[optional] meta <- metadata_add_level_stats(meta, df, meta_json = meta_json)
+#      # Adds level_counts/level_freqs to metadata + writes n/pct into meta_json
+#   7. [optional] ai_suggest_labels(meta, meta_json = meta_json)
+#                 ai_suggest_varnames(meta, meta_json = meta_json)
 #                 export_metadata_excel(meta, "meta_review2.xlsx")
 #   8. df_out <- apply_survey_formats(df, meta)
 #      generate_format_script(meta, "mysurvey", "path/to/file")
@@ -171,14 +171,255 @@ import_survey <- function(
 
 
 # ============================================================
+# 1c. Unified survey_meta.json helpers
+# ============================================================
+
+# ---------------------------------------------------------------------------
+# Back up the current meta_json before overwriting it.
+# Creates .survey_meta/ directory next to path if absent.
+# Names: {stem}_{step}_{YYYYMMDD}.json  (appends _2, _3 if already exists).
+.backup_meta_json <- function(path, step) {
+  if (!file.exists(path)) return(invisible(NULL))
+  dir_path  <- dirname(path)
+  stem      <- tools::file_path_sans_ext(basename(path))
+  backup_dir <- file.path(dir_path, ".survey_meta")
+  if (!dir.exists(backup_dir))
+    dir.create(backup_dir, recursive = TRUE, showWarnings = FALSE)
+
+  date_str  <- format(Sys.Date(), "%Y%m%d")
+  base_name <- paste0(stem, "_", step, "_", date_str, ".json")
+  dest      <- file.path(backup_dir, base_name)
+  suffix    <- 2L
+  while (file.exists(dest)) {
+    dest <- file.path(backup_dir,
+                      paste0(stem, "_", step, "_", date_str, "_", suffix, ".json"))
+    suffix <- suffix + 1L
+  }
+  file.copy(path, dest, overwrite = FALSE)
+  invisible(dest)
+}
+
+# ---------------------------------------------------------------------------
+# Read the unified survey_meta.json.
+# Returns list(config = list(), variables = list()) if file absent or malformed.
+.read_meta_json <- function(path) {
+  empty <- list(config = list(), variables = list())
+  if (is.null(path) || !nzchar(path) || !file.exists(path)) return(empty)
+  tryCatch(
+    jsonlite::read_json(path, simplifyVector = FALSE),
+    error = function(e) {
+      warning(".read_meta_json: could not parse '", path, "': ", conditionMessage(e))
+      empty
+    }
+  )
+}
+
+# ---------------------------------------------------------------------------
+# Write the unified survey_meta.json.
+# meta_list: list(config = list(...), variables = list(VAR = list(...)))
+# Format:
+#   - config section: one field per line, arrays compact
+#   - variables section: each variable is a multi-line block, levels padded
+.write_meta_json <- function(meta_list, path) {
+  esc <- function(s) {
+    s <- as.character(s)
+    s <- gsub("\\", "\\\\", s, fixed = TRUE)
+    gsub('"',  '\\"',  s,  fixed = TRUE)
+  }
+  rpad <- function(s, w) {
+    n <- nchar(s, type = "chars")
+    if (n < w) paste0(s, strrep(" ", w - n)) else s
+  }
+  # Compact JSON array (no space after commas inside arrays)
+  arr_str <- function(v) {
+    if (is.null(v) || length(v) == 0) return("[]")
+    elems <- vapply(v, function(x) {
+      if (is.na(x))          "null"
+      else if (is.logical(x)) if (x) "true" else "false"
+      else if (is.numeric(x)) as.character(x)
+      else                    paste0('"', esc(as.character(x)), '"')
+    }, character(1))
+    paste0("[", paste(elems, collapse = ", "), "]")
+  }
+  # JSON scalar: string, number, bool, or null
+  scalar_str <- function(x) {
+    if (is.null(x) || (length(x) == 1 && is.na(x))) return("null")
+    if (is.logical(x)) return(if (isTRUE(x)) "true" else "false")
+    if (is.numeric(x)) return(as.character(x))
+    paste0('"', esc(as.character(x)), '"')
+  }
+
+  # ---- config section -------------------------------------------------------
+  cfg        <- meta_list$config
+  cfg_fields <- c("dataset", "missing_num", "missing_chr", "yes_labels", "no_labels")
+  cfg_lines  <- c('  "config": {')
+  cfg_keys   <- intersect(cfg_fields, names(cfg))   # only present keys, in order
+  for (i in seq_along(cfg_keys)) {
+    k   <- cfg_keys[[i]]
+    val <- cfg[[k]]
+    # dataset is a scalar string; missing_num/chr/yes_labels/no_labels are arrays
+    v_str <- if (k == "dataset" || (length(val) == 1 && is.character(val) && k == "dataset")) {
+      scalar_str(val[[1]])
+    } else if (length(val) > 1 || k %in% c("missing_num", "missing_chr", "yes_labels", "no_labels")) {
+      arr_str(unlist(val))
+    } else {
+      scalar_str(val)
+    }
+    comma <- if (i < length(cfg_keys)) "," else ""
+    cfg_lines <- c(cfg_lines, paste0('    "', k, '": ', v_str, comma))
+  }
+  cfg_lines <- c(cfg_lines, '  }')
+
+  # ---- variables section ----------------------------------------------------
+  vars      <- meta_list$variables
+  var_names <- names(vars)
+  n_vars    <- length(var_names)
+  var_blocks <- character(n_vars)
+
+  # scalar field names width (for colon alignment inside variable blocks)
+  scalar_fields <- c("var_label", "role", "desc", "new_name")
+  w_field        <- max(nchar(scalar_fields)) + 2L  # +2 for quotes
+
+  for (vi in seq_along(var_names)) {
+    vname <- var_names[[vi]]
+    entry <- vars[[vname]]
+
+    # -- scalar fields (padded colon alignment) --------------------------------
+    s_lines <- character(length(scalar_fields))
+    for (fi in seq_along(scalar_fields)) {
+      fld    <- scalar_fields[[fi]]
+      val    <- entry[[fld]]
+      v_str  <- scalar_str(val)
+      key_q  <- paste0('"', fld, '"')
+      s_lines[[fi]] <- paste0(
+        '      ', rpad(key_q, w_field), ': ', v_str, ','
+      )
+    }
+
+    # -- levels sub-block (reuse existing alignment logic) --------------------
+    levels <- entry$levels
+    if (is.null(levels) || length(levels) == 0) {
+      levels_body <- '      "levels": {}'
+    } else {
+      n_lev <- length(levels)
+      # has_new_label: only non-null_coded levels with actual new_label
+      has_new_label <- any(purrr::map_lgl(levels, ~ !isTRUE(.x$null_coded) && !is.null(.x$new_label)))
+      has_n         <- any(purrr::map_lgl(levels, ~ !is.null(.x$n)))
+      has_pct       <- any(purrr::map_lgl(levels, ~ !is.null(.x$pct)))
+
+      val_keys  <- names(levels)
+      f_key     <- paste0('"', purrr::map_chr(val_keys, esc), '"')
+      f_label   <- purrr::map_chr(levels, function(lev)
+                     paste0('"', esc(as.character(lev$label)), '"'))
+      f_new_lbl <- if (has_new_label) purrr::map_chr(levels, function(lev)
+                     if (!isTRUE(lev$null_coded) && !is.null(lev$new_label))
+                       paste0('"', esc(as.character(lev$new_label)), '"')
+                     else '""') else NULL
+      f_n       <- if (has_n) purrr::map_chr(levels, function(lev)
+                     if (!is.null(lev$n)) as.character(as.integer(lev$n)) else "") else NULL
+      f_pct     <- if (has_pct) purrr::map_chr(levels, function(lev)
+                     if (!is.null(lev$pct)) as.character(as.integer(lev$pct)) else "") else NULL
+
+      w_key   <- max(nchar(f_key,   type = "chars"))
+      w_label <- max(nchar(f_label, type = "chars"))
+      w_new   <- if (has_new_label) max(nchar(f_new_lbl, type = "chars")) else 0L
+      w_n     <- if (has_n)   max(nchar(f_n,   type = "chars")) else 0L
+      w_pct   <- if (has_pct) max(nchar(f_pct, type = "chars")) else 0L
+
+      level_lines <- character(n_lev)
+      for (i in seq_len(n_lev)) {
+        lev     <- levels[[i]]
+        is_null <- isTRUE(lev$null_coded)
+        tokens  <- character(0)
+        tokens  <- c(tokens, paste0('"label": ', rpad(f_label[[i]], w_label)))
+        # new_label: only for non-null_coded levels
+        if (has_new_label && !is_null)
+          tokens <- c(tokens, paste0('"new_label": ', rpad(f_new_lbl[[i]], w_new)))
+        if (is_null) {
+          tokens <- c(tokens, '"null_coded": true')
+        } else {
+          if (has_n && !is.null(lev$n))
+            tokens <- c(tokens, paste0('"n": ',   formatC(f_n[[i]],   width = w_n,   flag = " ")))
+          if (has_pct && !is.null(lev$pct))
+            tokens <- c(tokens, paste0('"pct": ', formatC(f_pct[[i]], width = w_pct, flag = " ")))
+        }
+        level_lines[[i]] <- paste0('        ', rpad(f_key[[i]], w_key), ': { ',
+                                   paste(tokens, collapse = ", "), ' }')
+      }
+      for (i in seq_len(n_lev - 1L))
+        level_lines[[i]] <- paste0(level_lines[[i]], ",")
+
+      levels_body <- paste0(
+        '      "levels": {
+',
+        paste(level_lines, collapse = "\n"), '\n',
+        '      }'
+      )
+    }
+
+    comma <- if (vi < n_vars) "," else ""
+    var_blocks[[vi]] <- paste0(
+      '    "', esc(vname), '": {
+',
+      paste(s_lines, collapse = "\n"), "\n",
+      levels_body, "\n",
+      '    }', comma
+    )
+  }
+
+  # ---- _schema block (human/AI documentation) --------------------------------
+  schema_block <- paste0(
+    '  "_schema": {\n',
+    '    "description": "Survey metadata file for a French sociological dataset.',
+    ' Each variable in the \'variables\' section describes one survey item.',
+    ' This file is edited manually between AI pipeline steps.',
+    ' An AI receiving this file can use it to advise students or researchers',
+    ' on which variables are relevant for their analysis.',
+    ' Always refer students to the \'new_name\' field (the variable name in the',
+    ' final formatted dataset) rather than the original variable codes.",\n',
+    '    "fields": {\n',
+    '      "config.dataset"                  : "Source data file name",\n',
+    '      "config.missing_num"              : "Numeric codes treated as missing/non-response (excluded from analysis)",\n',
+    '      "config.missing_chr"              : "Label strings treated as missing/non-response",\n',
+    '      "config.yes_labels"               : "Label strings identifying the positive level of binary variables",\n',
+    '      "config.no_labels"                : "Label strings identifying the negative level of binary variables",\n',
+    '      "variables.VAR.var_label"         : "Original survey question label (may be edited for documentation)",\n',
+    '      "variables.VAR.role"              : "Variable type: factor_binary | factor_ordinal | factor_nominal | integer_scale | integer_count | double | identifier | integer | other",\n',
+    '      "variables.VAR.desc"              : "Ordering hint. For factor_binary: true = positive level is listed first. For factor_ordinal: true = descending order (highest category first). null = unknown or not applicable.",\n',
+    '      "variables.VAR.new_name"          : "Variable name in the final formatted dataset — use this name when advising students",\n',
+    '      "variables.VAR.levels.CODE.label"     : "Original label for this response category",\n',
+    '      "variables.VAR.levels.CODE.new_label" : "Display label in the final dataset (suggested by AI, editable)",\n',
+    '      "variables.VAR.levels.CODE.null_coded": "true = this category is a missing/non-response code, excluded from analysis",\n',
+    '      "variables.VAR.levels.CODE.n"         : "Count of respondents who chose this category",\n',
+    '      "variables.VAR.levels.CODE.pct"       : "Percentage of respondents who chose this category (excluding missing)"\n',
+    '    }\n',
+    '  }'
+  )
+
+  json_str <- paste0(
+    "{\n",
+    schema_block, ",\n",
+    paste(cfg_lines, collapse = "\n"), ",\n",
+    '  "variables": {\n',
+    paste(var_blocks, collapse = "\n"), "\n",
+    '  }\n',
+    "}\n"
+  )
+
+  writeLines(enc2utf8(json_str), con = path, useBytes = TRUE)
+  invisible(path)
+}
+
+
+# ============================================================
 # 2. extract_survey_metadata()
 # ============================================================
 
 #' Extract variable and value metadata from a labelled tibble
 #'
-#' Produces a "varmod" tibble. Iterate: run, review console output, adjust
-#' arguments (missing_num, missing_chr, detected_roles, desc_overrides), run again.
-#' When satisfied, proceed to metadata_fix_binary() and export_metadata_excel().
+#' Produces a "varmod" tibble. Iterate: run, review console output, run
+#' ai_classify_roles() for ambiguous variables, then re-run.
+#' When satisfied, proceed to export_metadata_excel() and ai_suggest_labels().
 #'
 #' @param df              A tibble from import_survey().
 #' @param missing_num     Numeric codes to flag as candidate missing values.
@@ -192,28 +433,20 @@ import_survey <- function(
 #' @param no_labels       Keywords for the "negative" level. NULL = built-in.
 #' @param max_levels_cat  Unlabelled numeric vars with ≤ this many distinct
 #'                        non-missing values are classed "integer" (not factor).
-#' @param detected_roles  Named character vector overriding role for specific
-#'                        variables. Names = var_name, values = role string.
-#'                        Paste output of ai_classify_roles() here after editing.
-#' @param desc_overrides  Named logical vector overriding desc for specific vars.
-#'                        For factor_binary: TRUE = positive level is first.
-#'                        For factor_ordinal: TRUE = descending (high→low).
-#'                        Paste output of ai_classify_roles() here after editing.
-#' @param labels_json     Optional path to a JSON file produced by
-#'                        ai_suggest_labels().  When supplied, new_labels and
-#'                        level_counts/level_freqs stored in the JSON are merged
-#'                        back into the metadata table via
-#'                        metadata_apply_labels_json().  Works for both full API
-#'                        results and dry_run stats-only files (which restore
-#'                        counts/freqs but leave new_labels unchanged).
-#' @param varnames_json   Optional path to a JSON file produced by
-#'                        ai_suggest_varnames().  When supplied, new_name (and
-#'                        optionally new_labels/level_counts/level_freqs) are
-#'                        merged back via metadata_apply_varnames_json().
+#' @param meta_json       Recommended. Path to the unified \code{*.survey_meta.json}
+#'                        file. If the file does not exist yet, it is created from
+#'                        the current extraction (with auto-detected roles/desc and
+#'                        the config parameters written to the JSON). If the file
+#'                        exists, its \code{config} section is used as defaults for
+#'                        missing_num/missing_chr/yes_labels/no_labels (R args
+#'                        override if explicitly supplied), and its
+#'                        \code{variables} section overrides auto-detected role,
+#'                        desc, new_labels, new_name for each variable.
+#'                        Edit the JSON between steps for manual corrections.
 #'
 #' @return A tibble with columns:
 #'   var_name, var_label, r_class, n_distinct, detected_role, desc,
-#'   values, labels, missing_vals, new_labels, new_name, doc_note
+#'   values, labels, missing_vals, new_labels, new_name
 #'
 #' Role taxonomy:
 #'   "identifier"     — ID column (unique per row or named IDENT/ID)
@@ -228,15 +461,57 @@ extract_survey_metadata <- function(
     df,
     missing_num     = c(96, 99, 996, 999, 9996, 9999), # 8, 9,
     missing_chr     = c("-1", "NSP", "NRP", "NR", "REFUS",
-                        "Ne sait pas", "Refus"), # "8", "9",
+                        "Ne sait pas", "Refus"), # "8", "9",
     yes_labels      = NULL,
     no_labels       = NULL,
     max_levels_cat  = 20,
-    detected_roles  = NULL,
-    desc_overrides  = NULL,
-    labels_json     = NULL,
-    varnames_json   = NULL
+    meta_json       = NULL
 ) {
+  # ---- Read config/variables from meta_json (if exists) ---------------------
+  .meta_json_existed <- !is.null(meta_json) && nzchar(meta_json) && file.exists(meta_json)
+  .meta_json_data <- .read_meta_json(meta_json)
+  .cfg            <- .meta_json_data$config
+  .json_vars      <- .meta_json_data$variables
+
+  # Detect which config args were explicitly supplied by the caller (not defaults)
+  .formals <- formals(sys.function())
+  .call_args <- as.list(match.call())[-1]
+  .missing_num_explicit  <- "missing_num" %in% names(.call_args)
+  .missing_chr_explicit  <- "missing_chr" %in% names(.call_args)
+  .yes_labels_explicit   <- "yes_labels"  %in% names(.call_args)
+  .no_labels_explicit    <- "no_labels"   %in% names(.call_args)
+
+  # Apply JSON config defaults when caller used the parameter default (not explicit)
+  if (length(.cfg) > 0) {
+    if (!is.null(.cfg$missing_num) && !.missing_num_explicit)
+      missing_num <- as.numeric(unlist(.cfg$missing_num))
+    if (!is.null(.cfg$missing_chr) && !.missing_chr_explicit)
+      missing_chr <- as.character(unlist(.cfg$missing_chr))
+    if (!is.null(.cfg$yes_labels) && !.yes_labels_explicit)
+      yes_labels <- as.character(unlist(.cfg$yes_labels))
+    if (!is.null(.cfg$no_labels) && !.no_labels_explicit)
+      no_labels <- as.character(unlist(.cfg$no_labels))
+  }
+
+  # JSON variable-level role/desc overrides (auto-detected < JSON < R args)
+  .json_role_overrides <- if (length(.json_vars) > 0) {
+    purrr::compact(purrr::imap(.json_vars, ~ {
+      r <- .x$role; if (!is.null(r) && nzchar(r)) r else NULL
+    }))
+  } else list()
+  .json_desc_overrides <- if (length(.json_vars) > 0) {
+    # Keep FALSE (explicit FALSE != NULL); drop NULL and empty list() from JSON null
+    # (jsonlite::write_json serializes R NULL as {}, so filter both NULL and list())
+    Filter(
+      function(x) !is.null(x) && !(is.list(x) && length(x) == 0L),
+      purrr::imap(.json_vars, ~ .x$desc)
+    )
+  } else list()
+
+  # Role/desc overrides come from JSON variables section only
+  .effective_roles <- .json_role_overrides
+  .effective_descs <- .json_desc_overrides
+
   default_yes <- c("oui", "choisi", "yes", "vrai", "true",
                    "présent", "actif", "sélectionné", "concerné",
                    "a le", "dispose", "perçoit")
@@ -320,13 +595,16 @@ extract_survey_metadata <- function(
     detected_role <- role_out$role
     desc_auto     <- role_out$desc
 
-    # Override role from user-supplied vector
-    if (!is.null(detected_roles) && vname %in% names(detected_roles)) {
-      detected_role <- detected_roles[[vname]]
+    # Override role: from JSON variables section
+    if (vname %in% names(.effective_roles)) {
+      detected_role <- .effective_roles[[vname]]
     }
-    # Override desc from user-supplied vector
-    desc_val <- if (!is.null(desc_overrides) && vname %in% names(desc_overrides)) {
-      desc_overrides[[vname]]
+    # Override desc: from JSON variables section
+    desc_val <- if (vname %in% names(.effective_descs)) {
+      # Coerce to logical scalar; guard against stray list() from JSON null
+      d <- .effective_descs[[vname]]
+      if (is.null(d) || (is.list(d) && length(d) == 0L)) NA
+      else as.logical(d[[1]])
     } else {
       desc_auto
     }
@@ -371,8 +649,7 @@ extract_survey_metadata <- function(
       labels        = list(raw_labels),
       missing_vals  = list(missing_vals_vec),
       new_labels    = list(new_labels_init),
-      new_name      = vname,
-      doc_note      = var_lbl
+      new_name      = vname
     )
   }) |>
     dplyr::bind_rows()
@@ -392,11 +669,59 @@ extract_survey_metadata <- function(
   if (n_needs_ai > 0) {
     message("\n[!] ", n_needs_ai, " variable(s) may need role refinement",
             " (factor_nominal / integer / factor_binary with desc=NA).")
-    message("    Run ai_classify_roles(meta) to get suggested detected_roles/desc_overrides vectors.")
+    message("    Run ai_classify_roles(meta, meta_json = meta_json) to classify roles.")
   }
 
-  if (!is.null(labels_json))   meta <- metadata_apply_labels_json(meta, labels_json)
-  if (!is.null(varnames_json)) meta <- metadata_apply_varnames_json(meta, varnames_json)
+  # Compute pruned config arrays: keep only values/labels that exist in the data
+  # (used for writing config — prune only when user explicitly supplied the arg)
+  .all_vals_num <- suppressWarnings(as.numeric(unique(unlist(meta$values))))
+  .all_vals_num <- .all_vals_num[!is.na(.all_vals_num)]
+  .all_labels   <- .normalize_text(unique(unlist(meta$labels)))
+
+  .missing_num_used <- if (.missing_num_explicit)
+    missing_num[missing_num %in% .all_vals_num] else missing_num
+  .missing_chr_used <- if (.missing_chr_explicit)
+    missing_chr[missing_chr %in% .all_labels] else missing_chr
+  .yes_labels_used  <- if (.yes_labels_explicit && !is.null(yes_labels))
+    yes_labels[.normalize_text(yes_labels) %in% .all_labels] else yes_labels
+  .no_labels_used   <- if (.no_labels_explicit && !is.null(no_labels))
+    no_labels[.normalize_text(no_labels) %in% .all_labels] else no_labels
+
+  # Apply unified meta_json (overrides new_labels, new_name, level stats)
+  if (!is.null(meta_json)) {
+    meta <- metadata_apply_meta_json(meta, .json_vars)
+
+    if (!.meta_json_existed) {
+      # Write initial JSON on first run
+      .write_initial_meta_json(meta, meta_json,
+                               missing_num = .missing_num_used,
+                               missing_chr = .missing_chr_used,
+                               yes_labels  = .yes_labels_used,
+                               no_labels   = .no_labels_used,
+                               datapath    = attr(df, "path"))
+      message("extract_survey_metadata: created ", meta_json)
+    } else {
+      # On re-run: sync null_coded flags and optionally update config
+      .updated_vars <- .update_null_coded_in_meta_json(.meta_json_data$variables, meta)
+      .updated_cfg  <- .meta_json_data$config
+      if (.missing_num_explicit)
+        .updated_cfg$missing_num <- as.list(.missing_num_used)
+      if (.missing_chr_explicit)
+        .updated_cfg$missing_chr <- as.list(.missing_chr_used)
+      if (.yes_labels_explicit)
+        .updated_cfg$yes_labels  <- as.list(.yes_labels_used)
+      if (.no_labels_explicit)
+        .updated_cfg$no_labels   <- as.list(.no_labels_used)
+
+      if (!identical(.updated_vars, .meta_json_data$variables) ||
+          !identical(.updated_cfg,  .meta_json_data$config)) {
+        .backup_meta_json(meta_json, "reextract")
+        .write_meta_json(list(config = .updated_cfg, variables = .updated_vars), meta_json)
+        message("extract_survey_metadata: updated null_coded/config in ", meta_json)
+      }
+    }
+  }
+
   meta
 }
 
@@ -510,7 +835,7 @@ extract_survey_metadata <- function(
 #' @param df        The original survey tibble (from import_survey()).
 #'
 #' @return metadata with two new list-columns: level_counts, level_freqs.
-metadata_add_level_stats <- function(metadata, df) {
+metadata_add_level_stats <- function(metadata, df, meta_json = NULL) {
   factor_roles <- c("factor_binary", "factor_nominal", "factor_ordinal")
 
   # Restrict to factor variables present in df
@@ -528,50 +853,55 @@ metadata_add_level_stats <- function(metadata, df) {
     return(metadata)
   }
 
-  # Cast relevant columns to character once, stack into a long data.table,
-  # then tabulate with a single groupby — O(n_obs * n_factor_vars) but done
-  # in one C-level pass by data.table.
   var_names <- fac_meta$var_name
-  dt_long   <- data.table::rbindlist(
-    lapply(var_names, function(vn) {
-      data.table::data.table(
-        var_name = vn,
-        val      = as.character(df[[vn]])
-      )
-    })
-  )
 
-  # Count NA separately then drop — we only count coded values
-  counts_dt <- dt_long[!is.na(val),
-                       .(n = .N),
-                       by = .(var_name, val)]
+  # --- Unnest declared levels from metadata into a long table ----------------
+  # One row per (variable, level position). val_chr is the coded value as
+  # character; is_null flags NULL-coded (missing) levels excluded from freqs.
+  meta_vals <- data.table::rbindlist(lapply(seq_len(nrow(fac_meta)), function(i) {
+    vals <- as.character(fac_meta$values[[i]])
+    nls  <- fac_meta$new_labels[[i]]
+    n    <- max(length(vals), length(nls))
+    data.table::data.table(
+      var_name = fac_meta$var_name[i],
+      position = seq_len(n),
+      val_chr  = ifelse(seq_len(n) <= length(vals), vals[seq_len(n)], NA_character_),
+      is_null  = ifelse(seq_len(n) <= length(nls),  nls[seq_len(n)] == "NULL", TRUE)
+    )
+  }))
 
-  # Build named-vector lookup: var_name -> (value -> count)
-  counts_by_var <- split(counts_dt, by = "var_name", keep.by = FALSE)
-  lookup <- lapply(counts_by_var, function(d) {
-    v <- d$n
-    names(v) <- d$val
-    v
-  })
+  # --- Observed counts: one C-level groupby across all factor vars -----------
+  dt_long <- data.table::rbindlist(lapply(var_names, function(vn)
+    data.table::data.table(var_name = vn, val = as.character(df[[vn]]))))
+  counts_dt <- dt_long[!is.na(val), .(n = .N), by = .(var_name, val)]
 
-  # Compute level_counts and level_freqs per factor row
-  compute_stats <- function(vname, vals, nls) {
-    tab  <- lookup[[vname]]
-    cnts <- purrr::map_int(as.character(vals), function(v) {
-      if (!is.null(tab) && v %in% names(tab)) tab[[v]] else 0L
-    })
-    non_null_mask <- nls != "NULL"
-    total_valid   <- sum(cnts[non_null_mask])
-    freqs         <- rep(NA_real_, length(cnts))
-    if (total_valid > 0)
-      freqs[non_null_mask] <- round(cnts[non_null_mask] / total_valid * 100, 0)
-    list(counts = cnts, freqs = freqs)
+  # --- Mismatch report: observed values absent from metadata$values ----------
+  unmatched <- counts_dt[!meta_vals, on = .(var_name, val = val_chr)]
+  if (nrow(unmatched) > 0) {
+    detail <- unmatched[order(var_name, val),
+                        paste0("  ", var_name, ': "', val, '" (n=', n, ")")]
+    message("metadata_add_level_stats: ",
+            data.table::uniqueN(unmatched$var_name),
+            " variable(s) have observed values not in metadata$values ",
+            "(excluded from counts):\n",
+            paste(detail, collapse = "\n"))
   }
 
-  stats_list <- purrr::pmap(
-    list(fac_meta$var_name, fac_meta$values, fac_meta$new_labels),
-    compute_stats
-  )
+  # --- Left join: fill observed counts for matched levels -------------------
+  meta_vals[counts_dt, on = .(var_name, val_chr = val), n := i.n]
+  meta_vals[is.na(n), n := 0L]
+
+  # --- Compute pct within each variable (NULL-coded levels excluded) --------
+  meta_vals[, total_valid := sum(n[!is_null]), by = var_name]
+  meta_vals[, pct := data.table::fifelse(
+    total_valid > 0L & !is_null,
+    round(n / total_valid * 100, 0),
+    NA_real_
+  )]
+
+  # --- Re-nest counts/freqs back into list-columns --------------------------
+  data.table::setorder(meta_vals, var_name, position)
+  nested <- meta_vals[, .(counts = list(n), freqs = list(pct)), by = var_name]
 
   # Write back into a full-length result (non-factor rows get empty vectors)
   result_counts <- vector("list", nrow(metadata))
@@ -581,12 +911,42 @@ metadata_add_level_stats <- function(metadata, df) {
 
   fac_idx <- match(fac_meta$var_name, metadata$var_name)
   for (i in seq_along(fac_idx)) {
-    result_counts[[fac_idx[i]]] <- stats_list[[i]]$counts
-    result_freqs[[fac_idx[i]]]  <- stats_list[[i]]$freqs
+    vn <- fac_meta$var_name[i]
+    ni <- which(nested$var_name == vn)
+    result_counts[[fac_idx[i]]] <- nested$counts[[ni]]
+    result_freqs[[fac_idx[i]]]  <- nested$freqs[[ni]]
   }
 
   metadata$level_counts <- result_counts
   metadata$level_freqs  <- result_freqs
+
+  # ---------- JSON integration -----------------------------------------------
+  if (!is.null(meta_json)) {
+    .backup_meta_json(meta_json, "level_stats")
+    existing <- .read_meta_json(meta_json)
+    n_updated <- 0L
+    for (i in seq_along(fac_idx)) {
+      vn   <- fac_meta$var_name[i]
+      vals <- fac_meta$values[[i]]
+      ni   <- which(nested$var_name == vn)
+      cnts <- nested$counts[[ni]]
+      frqs <- nested$freqs[[ni]]
+      if (is.null(existing$variables[[vn]])) next
+      for (j in seq_along(vals)) {
+        key <- as.character(vals[[j]])
+        if (is.null(existing$variables[[vn]]$levels[[key]])) next
+        existing$variables[[vn]]$levels[[key]]$n <- cnts[j]
+        pct <- frqs[j]
+        if (!is.na(pct))
+          existing$variables[[vn]]$levels[[key]]$pct <- as.integer(pct)
+      }
+      n_updated <- n_updated + 1L
+    }
+    .write_meta_json(existing, meta_json)
+    message("metadata_add_level_stats: updated n/pct for ", n_updated,
+            " variable(s) in ", basename(meta_json))
+  }
+
   metadata
 }
 
@@ -625,8 +985,7 @@ metadata_apply_codebook <- function(
     metadata <- metadata |>
       dplyr::left_join(var_lbl_map, by = "var_name") |>
       dplyr::mutate(
-        var_label = dplyr::if_else(!is.na(new_var_label), new_var_label, var_label),
-        doc_note  = dplyr::if_else(!is.na(new_var_label), new_var_label, doc_note)
+        var_label = dplyr::if_else(!is.na(new_var_label), new_var_label, var_label)
       ) |>
       dplyr::select(-new_var_label)
   }
@@ -678,7 +1037,7 @@ metadata_apply_codebook <- function(
 #'   - After fix: fct_relevel(..., sort) gives correct 1→2 order in factors
 #'
 #' For rows with desc == NA:
-#'   - Warns and skips. Set desc_overrides in extract_survey_metadata() first.
+#'   - Warns and skips. Set desc in the meta_json variables section first.
 #'
 #' @param metadata       Varmod tibble.
 #' @param use_var_label  If TRUE (default), positive level → "1-<var_label>".
@@ -693,7 +1052,7 @@ metadata_fix_binary <- function(metadata, use_var_label = TRUE) {
   if (length(unresolved) > 0) {
     warning(length(unresolved), " factor_binary variable(s) with desc=NA skipped: ",
             paste(unresolved, collapse = ", "),
-            "\nSet desc_overrides in extract_survey_metadata() first.")
+            "\nSet desc in the meta_json variables section, then re-run extract_survey_metadata().")
   }
 
   metadata |>
@@ -766,7 +1125,7 @@ metadata_fix_binary <- function(metadata, use_var_label = TRUE) {
 #'                        non-missing labels. If TRUE, shows all labels including
 #'                        missing-flagged ones.
 #' @param hide_cols       Column names to exclude from the Excel output.
-#'                        Default hides new_labels, new_name, doc_note (cluttered
+#'                        Default hides new_labels, new_name (cluttered
 #'                        before AI label/name suggestion steps are done).
 #' @param max_labels      Max number of labels to show per variable in the labels
 #'                        and new_labels columns. Default Inf (show all).
@@ -777,7 +1136,7 @@ export_metadata_excel <- function(
     path            = "metadata_review.xlsx",
     highlight_roles = c("factor_nominal", "integer"),
     show_missing    = FALSE,
-    hide_cols       = c("labels", "new_name", "doc_note"), # c("new_labels", "new_name", "doc_note"),
+    hide_cols       = c("labels", "new_name"),
     max_labels      = Inf
 ) {
   if (!requireNamespace("openxlsx", quietly = TRUE)) {
@@ -829,7 +1188,7 @@ export_metadata_excel <- function(
       missing_vals = missing_vals_str,
       labels       = labels_str,
       new_labels   = new_labels_str,
-      new_name, doc_note
+      new_name
     )
 
   # Also highlight factor_binary rows with desc=NA
@@ -855,9 +1214,9 @@ export_metadata_excel <- function(
 
   # Column widths — adapt to which columns remain
   all_cols   <- c("var_name", "var_label", "r_class", "detected_role", "desc",
-                  "n_distinct", "missing_vals", "labels", "new_labels", "new_name", "doc_note")
+                  "n_distinct", "missing_vals", "labels", "new_labels", "new_name")
   all_widths <- c(20,          40,           12,        22,              8,
-                  10,           30,            45,        45,             20,           40)
+                  10,           30,            45,        45,             20)
   shown_cols <- intersect(names(df_excel), all_cols)
   shown_w    <- all_widths[match(shown_cols, all_cols)]
   purrr::walk2(seq_along(shown_w), shown_w, function(col, w) {
@@ -958,7 +1317,7 @@ apply_survey_formats <- function(df, metadata, uppercase_names = TRUE) {
       final_name = dplyr::if_else(new_name != "" & new_name != var_name,
                                   new_name, var_name),
       final_name = if (uppercase_names) toupper(final_name) else final_name,
-      lbl        = dplyr::if_else(doc_note != "", doc_note, var_label)
+      lbl        = var_label
     ) |>
     dplyr::filter(lbl != "", final_name %in% names(df))
 
@@ -1056,6 +1415,37 @@ generate_format_script <- function(
     mutate_block <- "# No categorical variables to format\n"
   }
 
+  # NA-replacement block for integer_scale / integer_count variables.
+  # Only replaces values that are confirmed null-coded (missing_vals) for that
+  # specific variable — never touches genuine numeric values.
+  int_meta <- metadata |>
+    dplyr::filter(detected_role %in% c("integer_scale", "integer_count"))
+
+  if (nrow(int_meta) > 0) {
+    na_lines <- purrr::pmap_chr(int_meta, function(var_name, new_name,
+                                                    missing_vals, var_label, ...) {
+      display <- if (!is.null(new_name) && nzchar(new_name) && new_name != var_name)
+        new_name else var_name
+      miss_num <- suppressWarnings(as.numeric(unlist(missing_vals)))
+      miss_num <- sort(unique(miss_num[!is.na(miss_num)]))
+      if (length(miss_num) == 0) return(NA_character_)
+      vals_str <- paste(miss_num, collapse = ", ")
+      paste0('\n  # ', display, ': "', substr(var_label, 1, 70), '"\n',
+             '  ', display, ' = dplyr::if_else(', display,
+             ' %in% c(', vals_str, '), NA_real_, as.numeric(', display, ')),')
+    })
+    na_lines <- na_lines[!is.na(na_lines)]
+
+    na_block <- if (length(na_lines) > 0) {
+      paste0(df_name, ' <- ', df_name, ' |> dplyr::mutate(\n',
+             paste(na_lines, collapse = "\n"), '\n)\n')
+    } else {
+      "# No integer_scale/integer_count variables with missing codes to recode\n"
+    }
+  } else {
+    na_block <- "# No integer_scale/integer_count variables to recode\n"
+  }
+
   script <- paste0(
     '# === SURVEY FORMATTING SCRIPT: ', toupper(df_name), ' ===\n',
     '# Generated : ', today, '\n',
@@ -1084,7 +1474,9 @@ generate_format_script <- function(
     '\n\n',
     '# STEP 3: Format categorical variables ----\n', mutate_block,
     '\n\n',
-    '# STEP 4: Export ----\n',
+    '# STEP 4: Recode missing values in integer variables ----\n', na_block,
+    '\n\n',
+    '# STEP 5: Export ----\n',
     df_name, ' |> saveRDS("', df_name, '.rds")\n',
     'message("Done. ', df_name, '.rds written.")\n'
   )
@@ -1274,38 +1666,42 @@ ai_batch_retrieve <- function(
 #'   ? = cannot determine
 #'
 #' @param metadata         Varmod tibble from extract_survey_metadata().
+#' @param meta_json        Path to the unified \code{*.survey_meta.json} file
+#'                         (required). Results (role, desc) are written directly
+#'                         to this file after a backup. Re-run
+#'                         extract_survey_metadata() to reload.
 #' @param role_examples    Named list of character vectors: example label sets for
-#'                         each role, to guide Haiku. Each element is a small
-#'                         vector of example labels for that role (not the actual
-#'                         data labels — just illustrative examples the AI can
-#'                         use as reference). Names must be role codes: F,O,B,S,C.
-#'                         E.g. list(O = c("Très satisfait","Satisfait","Peu satisfait"),
-#'                                   S = c("Gauche","--2--","--3--","Droite"),
-#'                                   C = c("1 enfant","2 enfants","3 enfants ou plus")).
+#'                         each role, to guide Haiku. Names must be role codes:
+#'                         F, O, B, S, C.
 #' @param api_key          ANTHROPIC_API_KEY env var by default.
 #' @param model            Default: Haiku 4.5.
+#' @param chunk_size       Number of unique label sets per API call. Default 400.
+#'                         Large chunks preserve cross-variable context and are
+#'                         safe: output is ~10 tokens/line, so 400 sets ≈ 4K
+#'                         output tokens — well within Haiku's 8K limit.
+#' @param use_batch        If TRUE, use the Anthropic batch API instead of
+#'                         synchronous calls. Default FALSE.
+#' @param dry_run          If TRUE, print the system/user prompts without calling
+#'                         the API or writing any file. Default FALSE.
 #' @param max_labels_sent  Max non-missing labels per unique label set sent to AI.
 #'                         Default 8. Increase for variables with many levels.
-#' @param batch_threshold  Above this many unique label sets, use batch API.
-#'                         Default 60.
-#' @param dry_run          If TRUE, print the system prompt and user prompt that
-#'                         would be sent, then return invisibly without making
-#'                         any API call. Use to review and validate the prompt
-#'                         before spending tokens. Default FALSE.
 #'
-#' @return Invisibly returns list(detected_roles, desc_overrides, extra_missing).
-#'         Primary output: copy-pasteable vectors printed to console.
-#'         In dry_run mode: invisibly returns list(system_prompt, user_prompt,
-#'         n_vars, n_unique_sets).
+#' @return Invisibly returns \code{meta_json}.
+#'         In dry_run mode: invisibly returns the list of user prompt strings.
 ai_classify_roles <- function(
     metadata,
+    meta_json        = NULL,
     role_examples    = list(),
+    chunk_size       = 400L,
+    use_batch        = FALSE,
+    dry_run          = FALSE,
     api_key          = Sys.getenv("ANTHROPIC_API_KEY"),
     model            = "claude-haiku-4-5",
-    max_labels_sent  = 8L,
-    batch_threshold  = 60L,
-    dry_run          = FALSE
+    max_labels_sent  = 8L
 ) {
+  if (is.null(meta_json))
+    stop("ai_classify_roles: meta_json is required. ",
+         "Provide the path to your *.survey_meta.json file.")
   # --- Filter to ambiguous variables only ---
   target <- metadata |>
     dplyr::filter(
@@ -1316,9 +1712,7 @@ ai_classify_roles <- function(
   if (nrow(target) == 0) {
     message("ai_classify_roles: No ambiguous variables to classify.",
             " (factor_binary with desc resolved, double, identifier already clear.)")
-    return(invisible(list(detected_roles = character(0),
-                          desc_overrides = logical(0),
-                          extra_missing  = character(0))))
+    return(invisible(meta_json))
   }
 
   message("ai_classify_roles: ", nrow(target), " variable(s) to classify.")
@@ -1354,11 +1748,19 @@ ai_classify_roles <- function(
       lbl_str  <- paste0('"', shown, '"', collapse = ", ")
       suffix   <- if (n_total > max_labels_sent)
         paste0(", +", n_total - max_labels_sent, " more") else ""
+      # When all labels are missing codes (nd:0, empty non_miss), append them
+      # with a "miss:" prefix so the model sees them as context — not as values.
+      # This lets it infer role from the variable label (age, count, year…).
+      miss_ctx <- if (n_total == 0 && length(missing_vals) > 0) {
+        miss_shown <- head(.normalize_text(missing_vals[nzchar(missing_vals)]),
+                           max_labels_sent)
+        paste0(", miss:", paste0('"', miss_shown, '"', collapse = ","))
+      } else ""
       cur_code <- switch(detected_role,
         factor_binary  = "B", factor_nominal = "F", integer = "I", "?")
-      sprintf("SET:%s|%s|cur:%s|nd:%d|[%s%s]",
+      sprintf("SET:%s|%s|cur:%s|nd:%d|[%s%s%s]",
               var_name, substr(.normalize_text(var_label), 1, 55),
-              cur_code, n_distinct, lbl_str, suffix)
+              cur_code, n_distinct, lbl_str, suffix, miss_ctx)
     }
   )
 
@@ -1372,8 +1774,8 @@ ai_classify_roles <- function(
       "Moins de 650 €/De 650 à moins de 950 €/De 950 à moins de 1200 €",
       "Aucun / Moins de 6 / De 6 à moins de 12"),
     S = c("Gauche / 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9 / Droite"),
-    C = c("1 / 2 / 3 / 4 / 5 / 7 / 10 / 12 / 17 / 20 / 21" ,
-    "1 enfant / 2 enfants / 3 enfants / 4 enfants / 5 enfants / 6 enfants"),
+    C = c("1 / 2 / 3 / 4 / 5 / 7 / 10 / 12 / 17 / 20 / 21",
+      "1 enfant / 2 enfants / 3 enfants / 4 enfants / 5 enfants / 6 enfants"),
     B = c("Oui / Non", "Choisi/Non choisi"),
     X = c("6-1-4-5-2-3-7 / 6-1-4-5-2-7-3 / 6-1-4-7-3-2-5 / ...")
   )
@@ -1389,6 +1791,16 @@ ai_classify_roles <- function(
     fmt_ex("C", ex[["C"]]),
     fmt_ex("B", ex[["B"]])
   ), collapse = "\n")
+
+  # Concrete nd:0 examples (no regular labels, infer from variable label)
+  nd0_examples_block <- paste0(
+    "## nd:0 EXAMPLES (all labels are missing codes — classify from variable label)\n",
+    "  SET:Q19E_AGE|quel est votre age ?|cur:I|nd:0|[miss:\"NSP\",\"NVPD\"]  → C\n",
+    "  SET:Q19E_ANNEE|annee de naissance|cur:I|nd:0|[miss:\"NSP\",\"NVPD\"]  → C\n",
+    "  SET:EA3A|combien de freres|cur:I|nd:0|[miss:\"NSP\",\"NVPD\"]          → C\n",
+    "  SET:SEX1|combien de relations de couple|cur:I|nd:0|[miss:\"NSP\"]     → C\n",
+    "  SET:EMP10|en quelle annee avez-vous commence|cur:I|nd:0|[miss:\"NSP\"] → C"
+  )
 
   # --- System prompt ---
   system_prompt <- paste0(
@@ -1408,6 +1820,7 @@ ai_classify_roles <- function(
     "?  unclear         : leave unchanged, user will decide\n\n",
     "## EXAMPLES\n",
     examples_block, "\n\n",
+    nd0_examples_block, "\n\n",
     "## desc FIELD (add after a TAB, for O and B only)\n",
     "T = descending / positive-first\n",
     "  O: labels go from highest to lowest (Très satisfait … Pas du tout)\n",
@@ -1417,7 +1830,14 @@ ai_classify_roles <- function(
     "  B: positive level is listed SECOND\n",
     "? = cannot determine from the labels shown\n\n",
     "## INPUT FORMAT\n",
-    "SET:id|variable label|cur:CURRENT_CODE|nd:N_DISTINCT|[\"lv1\", \"lv2\", ...]\n\n",
+    "SET:id|variable label|cur:CURRENT_CODE|nd:N_DISTINCT|[\"lv1\", \"lv2\", ...]\n",
+    "  nd = number of distinct NON-MISSING values\n",
+    "  When nd:0 the bracket may contain miss:\"...\" entries — these are the\n",
+    "  ONLY labels present (all are missing codes like NSP, NVPD, 88, 99).\n",
+    "  In that case, classify from the variable label alone:\n",
+    "  - age, année de naissance, durée, nombre de…, combien → C\n",
+    "  - échelle, score, position → S\n",
+    "  - nominal list → F\n\n",
     "## OUTPUT FORMAT — one line per SET, no blank lines, no explanations\n",
     "SET:id TAB CODE [TAB desc] [TAB miss:\"label\"]\n",
     "- Omit desc entirely for F, S, C, Q, X, ?\n",
@@ -1425,57 +1845,65 @@ ai_classify_roles <- function(
     "  (NSP, Refus, NR, non-réponse…) that was not already filtered out"
   )
 
-  user_prompt <- paste0(
-    "Classify these ", nrow(unique_sets), " label set(s):\n\n",
-    paste(prompt_lines, collapse = "\n")
-  )
+  # --- Split unique_sets into chunks and build one prompt per chunk ---
+  chunks  <- split(seq_len(nrow(unique_sets)),
+                   ceiling(seq_len(nrow(unique_sets)) / chunk_size))
+  prompts <- purrr::map(chunks, function(idx) {
+    n_sets <- length(idx)
+    paste0(
+      "Classify these ", n_sets, " label set(s):\n\n",
+      paste(prompt_lines[idx], collapse = "\n")
+    )
+  })
 
-  # Max tokens: ~12 tokens per output line is ample (id + code + desc + miss)
-  max_tok <- max(256L, nrow(unique_sets) * 20L)
+  # Max tokens: ~20 tokens per output line is ample (id + code + desc + miss)
+  max_tok <- max(256L, ceiling(nrow(unique_sets) / length(chunks)) * 20L)
 
   # --- Dry run: print prompts and exit without calling the API ---
   if (dry_run) {
     message(strrep("=", 60))
     message("DRY RUN — no API call made")
     message(strrep("=", 60))
-    message("\nVariables to classify: ", nrow(target),
-            "  |  Unique label sets: ", nrow(unique_sets),
-            "  |  Route: ", if (nrow(unique_sets) <= batch_threshold) "synchronous" else "batch",
+    message("Variables: ", nrow(target), "  |  Unique sets: ", nrow(unique_sets),
+            "  |  Chunks: ", length(prompts),
+            "  |  Route: ", if (use_batch) "batch" else "synchronous",
             "  |  max_tokens: ", max_tok)
     message("\n", strrep("-", 60))
-    message("SYSTEM PROMPT:")
+    message("SYSTEM PROMPT")
     message(strrep("-", 60))
     cat(system_prompt, "\n")
-    message("\n", strrep("-", 60))
-    message("USER PROMPT:")
-    message(strrep("-", 60))
-    cat(user_prompt, "\n")
+    purrr::iwalk(prompts, function(p, i) {
+      message("\n", strrep("-", 60))
+      message("USER MESSAGE ", i, "/", length(prompts))
+      message(strrep("-", 60))
+      cat(p, "\n")
+    })
     message(strrep("=", 60))
-    return(invisible(list(
-      system_prompt  = system_prompt,
-      user_prompt    = user_prompt,
-      n_vars         = nrow(target),
-      n_unique_sets  = nrow(unique_sets)
-    )))
+    return(invisible(prompts))
   }
 
   # --- Route sync vs batch ---
-  if (nrow(unique_sets) <= batch_threshold) {
-    message("  Synchronous call (", nrow(unique_sets), " sets)...")
-    resp     <- ai_call_claude(user_prompt, model = model, api_key = api_key,
-                               system = system_prompt, max_tokens = max_tok)
-    raw_text <- resp$content[[1]]$text
+  if (!use_batch) {
+    message("ai_classify_roles: synchronous (", nrow(unique_sets), " unique set(s), ",
+            length(prompts), " chunk(s))")
+    results_text <- purrr::imap(prompts, function(p, i) {
+      message("  Chunk ", i, "/", length(prompts))
+      resp <- ai_call_claude(p, model = model, api_key = api_key,
+                             system = system_prompt, max_tokens = max_tok)
+      resp$content[[1]]$text
+    })
   } else {
-    message("  Batch mode (", nrow(unique_sets), " sets > threshold ",
-            batch_threshold, ")...")
-    req_list <- list(list(custom_id = "classify_all", prompt = user_prompt))
-    batch    <- ai_batch_submit(req_list, model = model, api_key = api_key,
-                                max_tokens = max_tok, system = system_prompt)
-    message("  Batch submitted: ", batch$id)
-    message("  To recover if session ends: ai_batch_retrieve('", batch$id, "')")
-    raw      <- ai_batch_retrieve(batch$id, api_key = api_key)
-    raw_text <- raw[["classify_all"]]
+    message("ai_classify_roles: batch mode (", nrow(unique_sets), " unique set(s))")
+    requests <- purrr::imap(prompts, ~ list(custom_id = paste0("classify_", .y),
+                                            prompt     = .x))
+    batch    <- ai_batch_submit(requests, model = model, api_key = api_key,
+                                system = system_prompt, max_tokens = max_tok)
+    message("Batch submitted. ID: ", batch$id)
+    raw          <- ai_batch_retrieve(batch$id, api_key = api_key)
+    results_text <- purrr::map(purrr::set_names(names(raw)), ~ raw[[.x]])
   }
+
+  raw_text <- paste(unlist(results_text), collapse = "\n")
 
   # --- Role code → full role name ---
   role_map <- c(
@@ -1544,56 +1972,37 @@ ai_classify_roles <- function(
     if (set_id %in% names(set_missing)) extra_missing[[vn]]  <- set_missing[[set_id]]
   }
 
-  # --- Print copy-pasteable output ---
-  lbl_lookup <- purrr::set_names(
-    purrr::map(target$labels, ~ paste(head(.x[nzchar(.x)], 3), collapse = '", "')),
-    target$var_name
-  )
+  # --- Write role/desc results directly to meta_json ---
+  .backup_meta_json(meta_json, "classify_roles")
+  existing <- .read_meta_json(meta_json)
+
+  n_updated <- 0L
+  for (vn in names(detected_roles)) {
+    if (!is.null(existing$variables[[vn]])) {
+      existing$variables[[vn]]$role <- detected_roles[[vn]]
+      n_updated <- n_updated + 1L
+    }
+  }
+  for (vn in names(desc_overrides)) {
+    if (!is.null(existing$variables[[vn]])) {
+      existing$variables[[vn]]$desc <- desc_overrides[[vn]]
+    }
+  }
+
+  .write_meta_json(existing, meta_json)
 
   message("\n", strrep("=", 60))
-  message("Review and copy-paste into your script,")
-  message("then re-run extract_survey_metadata() with these vectors.")
-  message(strrep("=", 60), "\n")
-
-  if (length(detected_roles) > 0) {
-    lines_out <- purrr::imap_chr(detected_roles, function(role, vname) {
-      comment <- if (vname %in% names(lbl_lookup))
-        paste0('  # "', lbl_lookup[[vname]], '"') else ""
-      sprintf('  %-22s = "%s",%s', vname, role, comment)
-    })
-    cat("detected_roles <- c(\n", paste(lines_out, collapse = "\n"),
-        "\n)\n\n", sep = "")
-  } else {
-    cat("detected_roles <- c()  # no role changes\n\n")
-  }
-
-  if (length(desc_overrides) > 0) {
-    desc_lines <- purrr::imap_chr(desc_overrides, function(dv, vname) {
-      role_hint <- if (vname %in% names(detected_roles))
-        paste0("  # [", detected_roles[[vname]], "]") else ""
-      sprintf('  %-22s = %s,%s', vname,
-              if (is.na(dv)) "NA" else toupper(as.character(dv)), role_hint)
-    })
-    cat("desc_overrides <- c(\n", paste(desc_lines, collapse = "\n"),
-        "\n)\n\n", sep = "")
-  }
+  message("ai_classify_roles: ", n_updated, " variable(s) updated in: ", meta_json)
+  message("Review role/desc fields in the JSON, then re-run extract_survey_metadata().")
 
   if (length(extra_missing) > 0) {
     uniq_miss <- unique(unname(extra_missing))
-    cat('# Possible missing labels flagged by AI — add to missing_chr:\n')
-    cat("c(\n", paste(paste0('  "', uniq_miss, '"'), collapse = ",\n"),
-        "\n)\n\n", sep = "")
-    message("[!] Add the above to missing_chr in extract_survey_metadata() if correct.")
+    message("\n[!] Possible missing labels flagged by AI — add to missing_chr if correct:")
+    message("    ", paste0('"', uniq_miss, '"', collapse = ", "))
   }
 
-  message("# Re-run with:\n# meta <- extract_survey_metadata(df,\n",
-          "#   detected_roles = detected_roles,\n",
-          "#   desc_overrides = desc_overrides)")
   message(strrep("=", 60))
-
-  invisible(list(detected_roles = detected_roles,
-                 desc_overrides = desc_overrides,
-                 extra_missing  = extra_missing))
+  invisible(meta_json)
 }
 
 
@@ -1718,13 +2127,26 @@ ai_suggest_missing <- function(
     return(invisible(list(missing_chr = character(0), missing_num = numeric(0))))
   }
 
-  # Extract numeric codes embedded in labels (e.g. "9-NSP" → 9, "99-Refus" → 99)
-  # Pattern: optional leading digits before a hyphen or space
+  # Collect the actual numeric VALUES (not just codes embedded in label strings)
+  # that correspond to the identified missing labels across all variables.
+  # This robustly captures codes like 88, 99, 9999 regardless of label format.
+  norm_valid <- valid_labels  # already normalized above
+  missing_vals_out <- sort(unique(suppressWarnings(as.numeric(unlist(
+    purrr::map2(target$values, target$labels, function(vals, lbls) {
+      norm_lbls <- .normalize_text(lbls)
+      vals[norm_lbls %in% norm_valid]
+    })
+  )))))
+  missing_vals_out <- missing_vals_out[!is.na(missing_vals_out)]
+
+  # Also extract numeric codes embedded in label strings as a fallback
+  # (e.g. "9-NSP" → 9) — may overlap with missing_vals_out, that's fine.
   num_codes <- purrr::map_dbl(valid_labels, function(lbl) {
     m <- regmatches(lbl, regexpr("^([0-9]+)(?=[-. ]|$)", lbl, perl = TRUE))
     if (length(m) == 1 && nzchar(m)) as.numeric(m) else NA_real_
   })
-  missing_num_out <- sort(unique(num_codes[!is.na(num_codes)]))
+  missing_num_out <- sort(unique(c(missing_vals_out,
+                                   num_codes[!is.na(num_codes)])))
 
   # Print copy-pasteable output
   message("\n", strrep("=", 60))
@@ -1739,7 +2161,7 @@ ai_suggest_missing <- function(
   if (length(missing_num_out) > 0) {
     cat("missing_num <- c(", paste(missing_num_out, collapse = ", "), ")\n\n")
   } else {
-    cat("# missing_num: no numeric codes extracted from these labels\n\n")
+    cat("# missing_num: no numeric values found for these labels\n\n")
   }
 
   message("# Then re-run:")
@@ -1785,38 +2207,23 @@ ai_suggest_missing <- function(
 #'   to TRUE only for very large surveys (200+ factor variables).
 #'
 #' ## Output
-#'   Results are written to a JSON file on disk (default path derived from
-#'   the df path).  The metadata table is NOT modified here.  Load the JSON
-#'   back via the labels_json argument of extract_survey_metadata().
+#'   Results are merged directly into \code{meta_json} (after a backup).
+#'   The metadata table is NOT modified here. Reload with
+#'   \code{extract_survey_metadata(df, meta_json = meta_json)}.
 #'
 #' ## Dry run
 #'   dry_run=TRUE prints every prompt that would be sent without making any
 #'   API call.  Use this to validate prompts before spending tokens.
 #'
-#' Requires level_counts and level_freqs columns for ordinal merging.  Pass
-#' df= to compute them automatically, or call metadata_add_level_stats() first.
+#' Sends level counts and frequencies to Haiku for ordinal variables if the
+#' metadata table already has level_counts/level_freqs columns (added by
+#' metadata_add_level_stats()).  If those columns are absent, labels are sent
+#' without counts and Haiku still suggests new labels.
 #'
 #' @param metadata     Varmod tibble.
-#' @param df           Optional original survey tibble.  Used for two purposes:
-#'                     (1) auto-compute level stats if missing; (2) derive the
-#'                     default output directory and stem from the df's file path
-#'                     attribute (set by import_survey()).
 #' @param vars         Optional character vector of var_name to restrict to.
 #' @param ordinal_desc Logical. If TRUE, send factor_ordinal labels to Haiku in
 #'                     descending (high->low) order.  Default FALSE = stored order.
-#' @param output_path   Where to write the JSON file.  Three accepted forms:
-#'                     \itemize{
-#'                       \item \code{NULL} (default): use the same directory as
-#'                         the source file (from \code{attr(df, "path")}), or
-#'                         \code{getwd()} if unavailable.
-#'                       \item A **directory path** (no \code{.json} suffix):
-#'                         the JSON is named \code{{stem}_labels.json} and
-#'                         written into that directory.
-#'                       \item A **full file path** ending in \code{.json}:
-#'                         used as-is (overrides stem logic entirely).
-#'                     }
-#'                     The directory is created automatically if it does not
-#'                     exist.  Existing files are silently overwritten.
 #' @param chunk_size   Variables per API request.  Default 30.
 #' @param use_batch    Logical. Use the Anthropic Message Batch API (cheaper,
 #'                     async).  Default FALSE.
@@ -1825,83 +2232,22 @@ ai_suggest_missing <- function(
 #' @param api_key      ANTHROPIC_API_KEY env var by default.
 #' @param model        Default: Haiku 4.5.
 #'
-#' @return Invisibly returns the resolved output path.  In dry_run mode:
+#' @return Invisibly returns \code{meta_json}.  In dry_run mode:
 #'         invisibly returns a list of the prompt strings.
 ai_suggest_labels <- function(
     metadata,
-    df            = NULL,
     vars          = NULL,
     ordinal_desc  = FALSE,
-    output_path    = NULL,
+    meta_json     = NULL,
     chunk_size    = 30L,
     use_batch     = FALSE,
     dry_run       = FALSE,
     api_key       = Sys.getenv("ANTHROPIC_API_KEY"),
     model         = "claude-haiku-4-5"
 ) {
-  # ---------- resolve output path -----------------------------------------
-  # output_path can be:
-  #   NULL              -> same dir + stem as df source file, or getwd()
-  #   a data file path  -> treated as NULL: use its dir + stem
-  #   a directory path  -> use it; stem from df source file
-  #   a .json path      -> used verbatim (full override)
-  df_path     <- if (!is.null(df)) attr(df, "path") else NULL
-  df_has_path <- !is.null(df_path) && nzchar(df_path)
-
-  # Regex covering common survey data formats plus generic non-json files
-  .data_ext_re <- "\\.(dta|sas7bdat|sav|por|xpt|parquet|feather|arrow|csv|tsv|rds|rda|rdata|xlsx|xls|ods)$"
-
-  if (!is.null(output_path) && grepl("\\.json$", output_path, ignore.case = TRUE)) {
-    # Full .json path — use verbatim after normalisation.
-    output_path <- enc2utf8(normalizePath(output_path, winslash = "/", mustWork = FALSE))
-  } else {
-    # Determine source for dir + stem:
-    #   1. If output_path looks like a data file, use it as the source.
-    #   2. If output_path is a plain directory, use it for dir and df for stem.
-    #   3. If output_path is NULL, use df path (or getwd()).
-    src_path <- if (!is.null(output_path) &&
-                    grepl(.data_ext_re, output_path, ignore.case = TRUE)) {
-      output_path          # treat data file path exactly like df path
-    } else if (df_has_path) {
-      df_path
-    } else {
-      NULL
-    }
-
-    out_dir <- if (!is.null(output_path) &&
-                   nzchar(output_path) &&
-                   !grepl(.data_ext_re, output_path, ignore.case = TRUE)) {
-      # Plain directory explicitly supplied
-      enc2utf8(normalizePath(output_path, winslash = "/", mustWork = FALSE))
-    } else if (!is.null(src_path)) {
-      enc2utf8(normalizePath(dirname(src_path), winslash = "/", mustWork = FALSE))
-    } else {
-      enc2utf8(normalizePath(getwd(), winslash = "/", mustWork = FALSE))
-    }
-
-    stem <- if (!is.null(src_path)) {
-      tools::file_path_sans_ext(basename(src_path))
-    } else {
-      "survey"
-    }
-
-    output_path <- file.path(out_dir, paste0(stem, "_labels.json"))
-  }
-
-  # Ensure the output directory exists (handles accented / Unicode paths)
-  out_dir_final <- dirname(output_path)
-  if (!dir.exists(out_dir_final))
-    dir.create(out_dir_final, recursive = TRUE, showWarnings = FALSE)
-
-  # ---------- level stats ---------------------------------------------------
-  needs_stats <- !all(c("level_counts", "level_freqs") %in% names(metadata))
-  if (needs_stats && !is.null(df)) {
-    message("ai_suggest_labels: computing level stats via metadata_add_level_stats().")
-    metadata <- metadata_add_level_stats(metadata, df)
-  } else if (needs_stats) {
-    message("ai_suggest_labels: level_counts/level_freqs missing. ",
-            "Ordinal merging disabled. Pass df= to enable.")
-  }
+  if (is.null(meta_json))
+    stop("ai_suggest_labels: meta_json is required. ",
+         "Provide the path to your *.survey_meta.json file.")
 
   # ---------- filter target variables --------------------------------------
   target <- metadata |>
@@ -1910,7 +2256,7 @@ ai_suggest_labels <- function(
   if (!is.null(vars)) target <- dplyr::filter(target, var_name %in% vars)
   if (nrow(target) == 0) {
     message("ai_suggest_labels: No factor variables to process.")
-    return(invisible(output_path))
+    return(invisible(meta_json))
   }
 
   # ---------- compute send_order permutation --------------------------------
@@ -2030,13 +2376,6 @@ ai_suggest_labels <- function(
 
   # ---------- dry run -------------------------------------------------------
   if (dry_run) {
-    # Replace "_labels.json" -> "_labels_dry_run.json", or fall back generically.
-    dry_path <- if (grepl("_labels\\.json$", output_path)) {
-      sub("_labels\\.json$", "_labels_dry_run.json", output_path)
-    } else {
-      sub("\\.json$", "_dry_run.json", output_path)
-    }
-
     message(strrep("=", 60))
     message("DRY RUN — no API call made")
     message(strrep("=", 60))
@@ -2054,12 +2393,14 @@ ai_suggest_labels <- function(
     })
     message(strrep("=", 60))
 
-    # Write stats-only JSON (no AI labels) so counts/freqs survive the session.
+    # Write stats-only (counts/freqs) so they survive the session.
     stats_map <- .build_stats_only_map(target)
     if (length(stats_map) > 0) {
-      .write_labels_json(stats_map, dry_path)
-      message("ai_suggest_labels dry_run: ", length(stats_map),
-              " variable(s) written to: ", dry_path)
+      .backup_meta_json(meta_json, "labels_dryrun")
+      existing <- .read_meta_json(meta_json)
+      existing$variables <- .merge_labels_into_meta_vars(existing$variables, stats_map)
+      .write_meta_json(existing, meta_json)
+      message("ai_suggest_labels dry_run: stats written to: ", meta_json)
     }
 
     return(invisible(prompts))
@@ -2091,7 +2432,7 @@ ai_suggest_labels <- function(
 
   if (length(parsed_map) == 0) {
     warning("ai_suggest_labels: No valid responses to write.")
-    return(invisible(output_path))
+    return(invisible(meta_json))
   }
 
   # Enrich parsed_map with level_counts/level_freqs for ALL factor types
@@ -2099,11 +2440,14 @@ ai_suggest_labels <- function(
   # Stored in original metadata order (parallel to labels / new_labels).
   parsed_map <- .enrich_labels_map_with_stats(parsed_map, target)
 
-  .write_labels_json(parsed_map, output_path)
-  message("ai_suggest_labels: ", length(parsed_map), " variable(s) written to: ", output_path)
-  message("Load with extract_survey_metadata(..., labels_json = \"", output_path, "\")")
-
-  invisible(output_path)
+  # Deep-merge new labels into the unified meta_json (backup first)
+  .backup_meta_json(meta_json, "labels")
+  existing <- .read_meta_json(meta_json)
+  existing$variables <- .merge_labels_into_meta_vars(existing$variables, parsed_map)
+  .write_meta_json(existing, meta_json)
+  message("ai_suggest_labels: ", length(parsed_map), " variable(s) merged into: ", meta_json)
+  message("Reload with extract_survey_metadata(df, meta_json = \"", meta_json, "\")")
+  invisible(meta_json)
 }
 
 # ---------------------------------------------------------------------------
@@ -2360,113 +2704,57 @@ ai_suggest_labels <- function(
 }
 
 # ---------------------------------------------------------------------------
-# Apply a saved ai_suggest_labels() JSON file to a metadata table.
-# Called internally by extract_survey_metadata() when labels_json != NULL.
-# Also exported for direct use.
-#
-# @param metadata    Varmod tibble.
-# @param labels_json Path to a JSON file produced by ai_suggest_labels().
-# @return metadata with new_labels updated.
-metadata_apply_labels_json <- function(metadata, labels_json) {
-  if (!file.exists(labels_json))
-    stop("labels_json file not found: ", labels_json)
+# Merge a labels_map (from .build_levels_map / .enrich_labels_map_with_stats)
+# into the $variables section of a unified survey_meta.json list.
+# Only updates the "levels" sub-object; preserves var_label, role, desc,
+# new_name untouched.
+.merge_labels_into_meta_vars <- function(meta_vars, labels_map) {
+  for (vname in names(labels_map)) {
+    entry  <- labels_map[[vname]]
+    levels <- entry$levels
+    if (is.null(levels)) next
 
-  saved <- jsonlite::read_json(labels_json, simplifyVector = FALSE)
-
-  # Build one update-row per variable in the JSON.
-  # Each row may carry: new_labels (if present), level_counts, level_freqs.
-  # Matching is by value code — never by position — so ordering is irrelevant.
-  update_rows <- purrr::imap(saved, function(entry, vname) {
-
-    row <- metadata[metadata$var_name == vname, ]
-    if (nrow(row) == 0) {
-      warning("metadata_apply_labels_json: var '", vname, "' not in metadata. Skipped.")
-      return(NULL)
-    }
-
-    # ---- detect format -------------------------------------------------------
-    if (is.list(entry) && !is.null(entry$levels)) {
-      # Rich format: { role, levels: { val_code: { label, new_label?, n?, pct? } } }
-      meta_vals  <- as.character(row$values[[1]])
-      levels_obj <- entry$levels
-
-      # -- new_labels (omit entirely if none present, i.e. dry_run file) -------
-      has_new <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$new_label)))
-      new_labs <- if (has_new) {
-        nls <- row$new_labels[[1]]
-        for (i in seq_along(meta_vals)) {
-          lev <- levels_obj[[meta_vals[[i]]]]
-          if (!is.null(lev) && !is.null(lev$new_label))
-            nls[[i]] <- as.character(lev$new_label)
-        }
-        nls
-      } else NULL
-
-      # -- level_counts / level_freqs (matched by value code) ------------------
-      has_stats <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$n)))
-      counts <- if (has_stats) {
-        purrr::map_int(meta_vals, function(v) {
-          lev <- levels_obj[[v]]
-          if (!is.null(lev) && !is.null(lev$n)) as.integer(lev$n) else NA_integer_
-        })
-      } else NULL
-      freqs <- if (has_stats) {
-        purrr::map_dbl(meta_vals, function(v) {
-          lev <- levels_obj[[v]]
-          if (!is.null(lev) && !is.null(lev$pct)) as.double(lev$pct) else NA_real_
-        })
-      } else NULL
-
-      if (is.null(new_labs) && is.null(counts)) return(NULL)
-
-      out <- tibble::tibble(var_name = vname)
-      if (!is.null(new_labs)) out$new_labels   <- list(new_labs)
-      if (!is.null(counts))   out$level_counts  <- list(counts)
-      if (!is.null(freqs))    out$level_freqs   <- list(freqs)
-      out
-
+    if (is.null(meta_vars[[vname]])) {
+      # Variable not yet in unified JSON (e.g. ai_suggest_labels was run before
+      # extract_survey_metadata wrote the initial JSON). Create stub.
+      meta_vars[[vname]] <- list(
+        var_label = "",
+        role      = as.character(entry$role[[1]]),
+        desc      = NULL,
+        new_name  = vname,
+        levels    = levels
+      )
     } else {
-      # Legacy flat format: entry is a plain list of label strings
-      new_labs <- unlist(entry)
-      if (length(new_labs) == 0) return(NULL)
-      orig <- row$new_labels[[1]]
-      if (length(new_labs) != length(orig)) {
-        warning("metadata_apply_labels_json: length mismatch for '", vname,
-                "' (", length(new_labs), " vs ", length(orig), "). Skipped.")
-        return(NULL)
+      # Merge only levels; preserve all other fields
+      existing_levels <- meta_vars[[vname]]$levels
+      if (is.null(existing_levels)) existing_levels <- list()
+
+      # For each level in the new map, update new_label, n, pct
+      for (val_code in names(levels)) {
+        new_lev  <- levels[[val_code]]
+        if (is.null(existing_levels[[val_code]])) {
+          existing_levels[[val_code]] <- new_lev
+        } else {
+          # Keep existing label; update new_label, n, pct, null_coded
+          if (!is.null(new_lev$new_label))
+            existing_levels[[val_code]]$new_label <- new_lev$new_label
+          if (!is.null(new_lev$n))
+            existing_levels[[val_code]]$n <- new_lev$n
+          if (!is.null(new_lev$pct))
+            existing_levels[[val_code]]$pct <- new_lev$pct
+          if (isTRUE(new_lev$null_coded))
+            existing_levels[[val_code]]$null_coded <- TRUE
+        }
       }
-      tibble::tibble(var_name = vname, new_labels = list(new_labs))
+      meta_vars[[vname]]$levels <- existing_levels
+
+      # Also update role in meta_vars if it was auto-set in initial JSON
+      if (!is.null(entry$role))
+        meta_vars[[vname]]$role <- as.character(entry$role[[1]])
     }
-  }) |> purrr::compact() |> dplyr::bind_rows()
-
-  if (nrow(update_rows) == 0) {
-    message("metadata_apply_labels_json: stats-only (dry_run) JSON — no labels to apply.")
-    return(metadata)
   }
-
-  # Ensure metadata has level_counts / level_freqs columns before rows_update,
-  # initialising missing ones with empty vectors for non-factor rows.
-  if ("level_counts" %in% names(update_rows) &&
-      !"level_counts" %in% names(metadata)) {
-    metadata$level_counts <- vector("list", nrow(metadata))
-    metadata$level_counts[] <- list(integer(0))
-  }
-  if ("level_freqs" %in% names(update_rows) &&
-      !"level_freqs" %in% names(metadata)) {
-    metadata$level_freqs <- vector("list", nrow(metadata))
-    metadata$level_freqs[] <- list(numeric(0))
-  }
-
-  n_labels <- if ("new_labels"   %in% names(update_rows)) nrow(update_rows) else 0L
-  n_stats  <- if ("level_counts" %in% names(update_rows)) nrow(update_rows) else 0L
-  message("metadata_apply_labels_json: ", nrow(update_rows), " variable(s) — ",
-          n_labels, " new_labels, ", n_stats, " with counts/freqs.")
-
-  dplyr::rows_update(metadata, update_rows, by = "var_name", unmatched = "ignore")
+  meta_vars
 }
-
-
-
 
 # ============================================================
 # 11. ai_suggest_varnames()
@@ -2475,13 +2763,11 @@ metadata_apply_labels_json <- function(metadata, labels_json) {
 #' Use Haiku to suggest short UPPER_SNAKE_CASE R variable names
 #'
 #' Calls the Anthropic API (synchronous or batch) to propose new names for all
-#' variables in `metadata`. Results are written to a JSON file; apply with
-#' `metadata_apply_varnames_json()`.
+#' variables in `metadata`. Results are written directly to meta_json.
 #'
 #' @param metadata       Varmod tibble from `extract_survey_metadata()`.
 #' @param vars           Optional character vector of `var_name` to restrict.
-#' @param output_path    Path for the output `.json`. NULL = same dir/stem as
-#'                       `attr(metadata, "path")` or `getwd()`.
+#' @param meta_json      Path to the unified `*.survey_meta.json` file (required).
 #' @param chunk_size     Variables per API request. Default 300L (large enough
 #'                       to handle most datasets in one call; dedup handles
 #'                       cross-chunk name collisions automatically).
@@ -2492,12 +2778,11 @@ metadata_apply_labels_json <- function(metadata, labels_json) {
 #' @param api_key        Anthropic API key. Default: `ANTHROPIC_API_KEY` env var.
 #' @param model          Model to use. Default `"claude-haiku-4-5"`.
 #'
-#' @return Invisibly: the `output_path` where results were written (or the list
-#'   of prompts in dry_run mode). Apply with `metadata_apply_varnames_json()`.
+#' @return Invisibly: `meta_json` (or the list of prompts in dry_run mode).
 ai_suggest_varnames <- function(
     metadata,
     vars           = NULL,
-    output_path    = NULL,
+    meta_json      = NULL,
     chunk_size     = 300L,
     max_new_labels = 4L,
     max_tokens     = 20000L,
@@ -2506,53 +2791,16 @@ ai_suggest_varnames <- function(
     api_key        = Sys.getenv("ANTHROPIC_API_KEY"),
     model          = "claude-haiku-4-5"
 ) {
-  # ---------- output path resolution (same logic as ai_suggest_labels) ------
-  df_path     <- attr(metadata, "path")
-  df_has_path <- !is.null(df_path) && nzchar(df_path)
-
-  .data_ext_re <- "\\.(dta|sas7bdat|sav|por|xpt|parquet|feather|arrow|csv|tsv|rds|rda|rdata|xlsx|xls|ods)$"
-
-  if (!is.null(output_path) && grepl("\\.json$", output_path, ignore.case = TRUE)) {
-    output_path <- enc2utf8(normalizePath(output_path, winslash = "/", mustWork = FALSE))
-  } else {
-    src_path <- if (!is.null(output_path) &&
-                    grepl(.data_ext_re, output_path, ignore.case = TRUE)) {
-      output_path
-    } else if (df_has_path) {
-      df_path
-    } else {
-      NULL
-    }
-
-    out_dir <- if (!is.null(output_path) &&
-                   nzchar(output_path) &&
-                   !grepl(.data_ext_re, output_path, ignore.case = TRUE)) {
-      enc2utf8(normalizePath(output_path, winslash = "/", mustWork = FALSE))
-    } else if (!is.null(src_path)) {
-      enc2utf8(normalizePath(dirname(src_path), winslash = "/", mustWork = FALSE))
-    } else {
-      enc2utf8(normalizePath(getwd(), winslash = "/", mustWork = FALSE))
-    }
-
-    stem <- if (!is.null(src_path)) {
-      tools::file_path_sans_ext(basename(src_path))
-    } else {
-      "survey"
-    }
-
-    output_path <- file.path(out_dir, paste0(stem, "_varnames.json"))
-  }
-
-  out_dir_final <- dirname(output_path)
-  if (!dir.exists(out_dir_final))
-    dir.create(out_dir_final, recursive = TRUE, showWarnings = FALSE)
+  if (is.null(meta_json))
+    stop("ai_suggest_varnames: meta_json is required. ",
+         "Provide the path to your *.survey_meta.json file.")
 
   # ---------- filter target variables ---------------------------------------
   target <- metadata
   if (!is.null(vars)) target <- dplyr::filter(target, var_name %in% vars)
   if (nrow(target) == 0) {
     message("ai_suggest_varnames: No variables to process.")
-    return(invisible(output_path))
+    return(invisible(meta_json))
   }
 
   # ---------- system prompt -------------------------------------------------
@@ -2619,12 +2867,6 @@ ai_suggest_varnames <- function(
 
   # ---------- dry run -------------------------------------------------------
   if (dry_run) {
-    dry_path <- if (grepl("_varnames\\.json$", output_path)) {
-      sub("_varnames\\.json$", "_varnames_dry_run.json", output_path)
-    } else {
-      sub("\\.json$", "_dry_run.json", output_path)
-    }
-
     message(strrep("=", 60))
     message("DRY RUN — no API call made")
     message(strrep("=", 60))
@@ -2642,13 +2884,7 @@ ai_suggest_varnames <- function(
     })
     message(strrep("=", 60))
 
-    # Write stub JSON (empty entries, no AI names)
-    stub <- purrr::set_names(
-      purrr::map(target$var_name, ~ list()),
-      target$var_name
-    )
-    .write_varnames_json(stub, dry_path)
-    message("ai_suggest_varnames dry_run: stub written to: ", dry_path)
+    message("ai_suggest_varnames dry_run: no stub written (edit meta_json directly)")
 
     return(invisible(prompts))
   }
@@ -2693,17 +2929,26 @@ ai_suggest_varnames <- function(
 
   if (length(names_map) == 0) {
     warning("ai_suggest_varnames: No valid responses to write.")
-    return(invisible(output_path))
+    return(invisible(meta_json))
   }
 
   # Build structured map enriched with metadata (new_labels, counts, freqs)
   out_map <- .build_varnames_map(target, names_map)
-  .write_varnames_json(out_map, output_path)
-  message("ai_suggest_varnames: ", length(out_map), " variable(s) written to: ",
-          output_path)
-  message("Apply with metadata_apply_varnames_json(metadata, \"", output_path, "\")")
 
-  invisible(output_path)
+  # Deep-merge new_name into the unified meta_json (backup first)
+  .backup_meta_json(meta_json, "varnames")
+  existing <- .read_meta_json(meta_json)
+  for (vname in names(out_map)) {
+    entry <- out_map[[vname]]
+    nn    <- entry[["new_name"]]
+    if (!is.null(nn) && nzchar(nn) && !is.null(existing$variables[[vname]])) {
+      existing$variables[[vname]]$new_name <- nn
+    }
+  }
+  .write_meta_json(existing, meta_json)
+  message("ai_suggest_varnames: ", length(out_map), " variable(s) merged into: ", meta_json)
+  message("Reload with extract_survey_metadata(df, meta_json = \"", meta_json, "\")")
+  invisible(meta_json)
 }
 
 
@@ -2935,56 +3180,173 @@ ai_suggest_varnames <- function(
 }
 
 
-#' Apply a varnames JSON file to update metadata
-#'
-#' Reads the JSON produced by `ai_suggest_varnames()` and updates:
-#' - `new_name` for all matched variables
-#' - `new_labels`, `level_counts`, `level_freqs` when present in the JSON
-#'
-#' @param metadata  Varmod tibble.
-#' @param json_path Path to the `_varnames.json` file.
-#'
-#' @return Updated metadata tibble.
-metadata_apply_varnames_json <- function(metadata, json_path) {
-  if (!file.exists(json_path))
-    stop("metadata_apply_varnames_json: file not found: ", json_path)
+# ---------------------------------------------------------------------------
+# Sync null_coded flags in the JSON variables section with freshly-computed
+# missing_vals from extract_survey_metadata(). Called on every re-run when
+# meta_json already exists, so new missing_chr entries take effect in the JSON.
+# Returns the updated json_vars list (unchanged object if no differences found).
+.update_null_coded_in_meta_json <- function(json_vars, metadata) {
+  for (vname in names(json_vars)) {
+    row <- metadata[metadata$var_name == vname, ]
+    if (nrow(row) == 0) next
+    miss_vals <- as.character(row$missing_vals[[1]])
+    levels    <- json_vars[[vname]]$levels
+    if (is.null(levels) || length(levels) == 0) next
 
-  raw <- jsonlite::fromJSON(json_path, simplifyVector = FALSE)
-
-  # --- new_name updates (always) ---
-  update_name <- purrr::imap_dfr(raw, function(entry, vname) {
-    nn <- entry[["new_name"]]
-    if (!is.null(nn) && nzchar(nn))
-      tibble::tibble(var_name = vname, new_name = nn)
-    else
-      NULL
-  })
-
-  if (nrow(update_name) == 0) {
-    message("metadata_apply_varnames_json: no new_name entries found in JSON.")
-    return(metadata)
-  }
-
-  update_name <- dplyr::filter(update_name, var_name %in% metadata$var_name)
-  message("metadata_apply_varnames_json: updating new_name for ",
-          nrow(update_name), " variable(s).")
-  metadata <- dplyr::rows_update(metadata, update_name,
-                                 by = "var_name", unmatched = "ignore")
-
-  # --- optional: restore new_labels / level_counts / level_freqs ---
-  for (col in c("new_labels", "level_counts", "level_freqs")) {
-    entries_with_col <- purrr::keep(raw, ~ !is.null(.x[[col]]) && length(.x[[col]]) > 0)
-    if (length(entries_with_col) == 0 || !col %in% names(metadata)) next
-
-    for (vname in names(entries_with_col)) {
-      if (!vname %in% metadata$var_name) next
-      idx <- which(metadata$var_name == vname)
-      metadata[[col]][[idx]] <- unlist(entries_with_col[[vname]][[col]])
+    changed <- FALSE
+    for (val_code in names(levels)) {
+      should_be_null <- val_code %in% miss_vals
+      currently_null <- isTRUE(levels[[val_code]]$null_coded)
+      if (should_be_null && !currently_null) {
+        json_vars[[vname]]$levels[[val_code]]$null_coded <- TRUE
+        changed <- TRUE
+      } else if (!should_be_null && currently_null) {
+        json_vars[[vname]]$levels[[val_code]]$null_coded <- NULL
+        changed <- TRUE
+      }
     }
-    message("metadata_apply_varnames_json: restored ", col,
-            " for ", length(entries_with_col), " variable(s).")
+  }
+  json_vars
+}
+
+# ---------------------------------------------------------------------------
+# Apply a unified survey_meta.json variables section to a metadata table.
+# Called internally by extract_survey_metadata() when meta_json is supplied.
+# json_vars: the $variables list read from .read_meta_json() (already in memory).
+# Updates: new_labels (from levels[*].new_label), level_counts/freqs (from n/pct),
+#          new_name, detected_role, desc — all matched by variable name + value code.
+metadata_apply_meta_json <- function(metadata, json_vars) {
+  if (is.null(json_vars) || length(json_vars) == 0) return(metadata)
+
+  update_rows <- purrr::imap(json_vars, function(entry, vname) {
+    row <- metadata[metadata$var_name == vname, ]
+    if (nrow(row) == 0) return(NULL)
+
+    out <- tibble::tibble(var_name = vname)
+
+    # new_name
+    nn <- entry[["new_name"]]
+    if (!is.null(nn) && nzchar(nn) && nn != vname)
+      out$new_name <- nn
+
+    # new_labels + level stats from levels block (matched by value code)
+    levels_obj <- entry[["levels"]]
+    if (!is.null(levels_obj) && length(levels_obj) > 0) {
+      meta_vals <- as.character(row$values[[1]])
+
+      has_new <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$new_label)))
+      if (has_new) {
+        nls <- row$new_labels[[1]]
+        for (i in seq_along(meta_vals)) {
+          lev <- levels_obj[[meta_vals[[i]]]]
+          if (!is.null(lev) && !is.null(lev$new_label))
+            nls[[i]] <- as.character(lev$new_label)
+        }
+        out$new_labels <- list(nls)
+      }
+
+      has_stats <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$n)))
+      if (has_stats) {
+        counts <- purrr::map_int(meta_vals, function(v) {
+          lev <- levels_obj[[v]]
+          if (!is.null(lev) && !is.null(lev$n)) as.integer(lev$n) else NA_integer_
+        })
+        freqs <- purrr::map_dbl(meta_vals, function(v) {
+          lev <- levels_obj[[v]]
+          if (!is.null(lev) && !is.null(lev$pct)) as.double(lev$pct) else NA_real_
+        })
+        out$level_counts <- list(counts)
+        out$level_freqs  <- list(freqs)
+      }
+    }
+
+    if (ncol(out) == 1L) return(NULL)  # only var_name, nothing to update
+    out
+  }) |> purrr::compact() |> dplyr::bind_rows()
+
+  if (nrow(update_rows) == 0) return(metadata)
+
+  # Ensure list columns exist before rows_update
+  for (col in c("level_counts", "level_freqs")) {
+    if (col %in% names(update_rows) && !col %in% names(metadata)) {
+      metadata[[col]] <- vector("list", nrow(metadata))
+      metadata[[col]][] <- list(if (col == "level_counts") integer(0) else numeric(0))
+    }
   }
 
-  metadata
+  n_updated <- nrow(update_rows)
+  has_nl  <- "new_labels"   %in% names(update_rows)
+  has_nn  <- "new_name"     %in% names(update_rows)
+  has_st  <- "level_counts" %in% names(update_rows)
+  message("metadata_apply_meta_json: ", n_updated, " variable(s) updated",
+          if (has_nn) paste0(" (new_name: ",     sum(!is.na(update_rows$new_name)),    ")") else "",
+          if (has_nl) paste0(" (new_labels: ",   sum(!is.null(update_rows$new_labels)),")")  else "",
+          if (has_st) paste0(" (stats: ",        n_updated,                            ")")  else "")
+
+  dplyr::rows_update(metadata, update_rows, by = "var_name", unmatched = "ignore")
 }
+
+
+# ---------------------------------------------------------------------------
+# Write an initial survey_meta.json from a freshly-extracted metadata table.
+# Called by extract_survey_metadata() when meta_json does not exist yet.
+# datapath: optional path to the source dataset (written to config.dataset).
+.write_initial_meta_json <- function(metadata, path,
+                                     missing_num = NULL, missing_chr = NULL,
+                                     yes_labels = NULL, no_labels = NULL,
+                                     datapath = NULL) {
+  # Config section
+  cfg <- list()
+  if (!is.null(datapath) && nzchar(datapath))
+    cfg$dataset <- basename(datapath)
+  if (!is.null(missing_num) && length(missing_num) > 0)
+    cfg$missing_num <- as.list(missing_num)
+  if (!is.null(missing_chr) && length(missing_chr) > 0)
+    cfg$missing_chr <- as.list(missing_chr)
+  if (!is.null(yes_labels) && length(yes_labels) > 0)
+    cfg$yes_labels <- as.list(yes_labels)
+  if (!is.null(no_labels) && length(no_labels) > 0)
+    cfg$no_labels <- as.list(no_labels)
+
+  # Variables section: one entry per variable, levels with original labels
+  vars_list <- purrr::imap(
+    purrr::set_names(seq_len(nrow(metadata)), metadata$var_name),
+    function(i, vname) {
+      row    <- metadata[i, ]
+      role   <- row$detected_role
+      desc   <- row$desc
+      vals   <- row$values[[1]]
+      labs   <- row$labels[[1]]
+      mnulls <- row$missing_vals[[1]]
+
+      # Build levels: original labels, null_coded for missing
+      levels_list <- if (length(vals) > 0) {
+        purrr::set_names(
+          purrr::map2(as.character(vals), labs, function(v, l) {
+            is_miss <- v %in% as.character(mnulls)
+            entry   <- list(label = l)
+            if (is_miss) entry$null_coded <- TRUE
+            entry
+          }),
+          as.character(vals)
+        )
+      } else list()
+
+      list(
+        var_label = row$var_label,
+        role      = role,
+        desc      = desc,
+        new_name  = vname,
+        levels    = levels_list
+      )
+    }
+  )
+
+  out_dir <- dirname(path)
+  if (!dir.exists(out_dir))
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+
+  .write_meta_json(list(config = cfg, variables = vars_list), path)
+}
+
 
