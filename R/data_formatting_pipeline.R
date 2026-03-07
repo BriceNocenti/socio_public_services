@@ -316,15 +316,15 @@ import_survey <- function(
                        paste0('"', esc(as.character(lev$new_label)), '"')
                      else '""') else NULL
       f_n       <- if (has_n) purrr::map_chr(levels, function(lev)
-                     if (!is.null(lev$n)) as.character(as.integer(lev$n)) else "") else NULL
+                     if (!is.null(lev$n) && !is.na(lev$n)) as.character(as.integer(lev$n)) else "") else NULL
       f_pct     <- if (has_pct) purrr::map_chr(levels, function(lev)
-                     if (!is.null(lev$pct)) as.character(as.integer(lev$pct)) else "") else NULL
+                     if (!is.null(lev$pct) && !is.na(lev$pct)) as.character(as.integer(lev$pct)) else "") else NULL
 
-      w_key   <- max(nchar(f_key,   type = "chars"))
-      w_label <- max(nchar(f_label, type = "chars"))
-      w_new   <- if (has_new_label) max(nchar(f_new_lbl, type = "chars")) else 0L
-      w_n     <- if (has_n)   max(nchar(f_n,   type = "chars")) else 0L
-      w_pct   <- if (has_pct) max(nchar(f_pct, type = "chars")) else 0L
+      w_key   <- max(nchar(f_key,   type = "chars"), na.rm = TRUE)
+      w_label <- max(nchar(f_label, type = "chars"), na.rm = TRUE)
+      w_new   <- if (has_new_label) max(nchar(f_new_lbl, type = "chars"), na.rm = TRUE) else 0L
+      w_n     <- if (has_n)   max(nchar(f_n,   type = "chars"), na.rm = TRUE) else 0L
+      w_pct   <- if (has_pct) max(nchar(f_pct, type = "chars"), na.rm = TRUE) else 0L
 
       level_lines <- character(n_lev)
       for (i in seq_len(n_lev)) {
@@ -370,28 +370,29 @@ import_survey <- function(
   # ---- _schema block (human/AI documentation) --------------------------------
   schema_block <- paste0(
     '  "_schema": {\n',
-    '    "description": "Survey metadata file for a French sociological dataset.',
-    ' Each variable in the \'variables\' section describes one survey item.',
-    ' This file is edited manually between AI pipeline steps.',
-    ' An AI receiving this file can use it to advise students or researchers',
-    ' on which variables are relevant for their analysis.',
-    ' Always refer students to the \'new_name\' field (the variable name in the',
-    ' final formatted dataset) rather than the original variable codes.",\n',
+    '    "description": "Fichier de m\u00e9tadonn\u00e9es d\'une enqu\u00eate sociologique fran\u00e7aise.',
+    ' Chaque variable de la section \'variables\' d\u00e9crit une question du questionnaire.',
+    ' Ce fichier peut \u00eatre \u00e9dit\u00e9 manuellement entre les \u00e9tapes automatis\u00e9es.',
+    ' Une IA qui re\u00e7oit ce fichier peut s\'en servir pour conseiller des \u00e9tudiant\u00b7es',
+    ' sur les variables utiles \u00e0 leur analyse.',
+    ' Toujours d\u00e9signer les variables par leur \'new_name\'',
+    ' (nom dans le fichier de donn\u00e9es final).",\n',
     '    "fields": {\n',
-    '      "config.dataset"                  : "Source data file name",\n',
-    '      "config.missing_num"              : "Numeric codes treated as missing/non-response (excluded from analysis)",\n',
-    '      "config.missing_chr"              : "Label strings treated as missing/non-response",\n',
-    '      "config.yes_labels"               : "Label strings identifying the positive level of binary variables",\n',
-    '      "config.no_labels"                : "Label strings identifying the negative level of binary variables",\n',
-    '      "variables.VAR.var_label"         : "Original survey question label (may be edited for documentation)",\n',
-    '      "variables.VAR.role"              : "Variable type: factor_binary | factor_ordinal | factor_nominal | integer_scale | integer_count | double | identifier | integer | other",\n',
-    '      "variables.VAR.desc"              : "Ordering hint. For factor_binary: true = positive level is listed first. For factor_ordinal: true = descending order (highest category first). null = unknown or not applicable.",\n',
-    '      "variables.VAR.new_name"          : "Variable name in the final formatted dataset — use this name when advising students",\n',
-    '      "variables.VAR.levels.CODE.label"     : "Original label for this response category",\n',
-    '      "variables.VAR.levels.CODE.new_label" : "Display label in the final dataset (suggested by AI, editable)",\n',
-    '      "variables.VAR.levels.CODE.null_coded": "true = this category is a missing/non-response code, excluded from analysis",\n',
-    '      "variables.VAR.levels.CODE.n"         : "Count of respondents who chose this category",\n',
-    '      "variables.VAR.levels.CODE.pct"       : "Percentage of respondents who chose this category (excluding missing)"\n',
+    '      "config.dataset"                  : "Nom du fichier de donn\u00e9es source",\n',
+    '      "config.missing_num"              : "Codes num\u00e9riques trait\u00e9s comme valeurs manquantes ou non-r\u00e9ponses (exclus de l\'analyse)",\n',
+    '      "config.missing_chr"              : "Libell\u00e9s textuels trait\u00e9s comme valeurs manquantes ou non-r\u00e9ponses",\n',
+    '      "config.yes_labels"               : "Libell\u00e9s qui d\u00e9signent la modalit\u00e9 positive des variables binaires (ex : Oui, Choisi)",\n',
+    '      "config.no_labels"                : "Libell\u00e9s qui d\u00e9signent la modalit\u00e9 n\u00e9gative des variables binaires (ex : Non, Non choisi)",\n',
+    '      "variables.VAR.var_label"         : "Intitul\u00e9 original de la question dans le questionnaire (peut \u00eatre modifi\u00e9 pour la documentation)",\n',
+    '      "variables.VAR.role"              : "Type de variable : factor_binary = binaire, factor_ordinal = ordinale (ordre significatif), factor_nominal = nominale (cat\u00e9gories sans ordre), integer_scale = \u00e9chelle num\u00e9rique, integer_count = comptage, double = continu, identifier = identifiant, integer = entier, other = autre",\n',
+    '      "variables.VAR.desc"              : "Sens du tri des modalit\u00e9s. Pour une binaire : true = la modalit\u00e9 positive est en premier. Pour une ordinale : true = ordre d\u00e9croissant (la modalit\u00e9 la plus \u00e9lev\u00e9e en premier). null = non applicable ou inconnu.",\n',
+    '      "variables.VAR.new_name"          : "Nom de la variable dans le fichier de donn\u00e9es final \u2014 c\'est ce nom qu\'il faut utiliser pour conseiller les \u00e9tudiant\u00b7es",\n',
+    '      "variables.VAR.doc_note"          : "Note de documentation libre sur la variable (ajout\u00e9e manuellement)",\n',
+    '      "variables.VAR.levels.CODE.label"     : "Libell\u00e9 original de cette modalit\u00e9 de r\u00e9ponse",\n',
+    '      "variables.VAR.levels.CODE.new_label" : "Libell\u00e9 court pour l\'affichage dans les tableaux (sugg\u00e9r\u00e9 par l\'IA, modifiable)",\n',
+    '      "variables.VAR.levels.CODE.null_coded": "true = cette modalit\u00e9 est une non-r\u00e9ponse ou valeur manquante, exclue de l\'analyse",\n',
+    '      "variables.VAR.levels.CODE.n"         : "Nombre de r\u00e9pondant\u00b7es ayant choisi cette modalit\u00e9",\n',
+    '      "variables.VAR.levels.CODE.pct"       : "Pourcentage de r\u00e9pondant\u00b7es ayant choisi cette modalit\u00e9 (hors valeurs manquantes)"\n',
     '    }\n',
     '  }'
   )
@@ -2175,6 +2176,120 @@ ai_suggest_missing <- function(
 
 
 # ============================================================
+# 10b. .compute_merge_groups()
+# ============================================================
+
+# ---------------------------------------------------------------------------
+# Greedy forward scan that groups contiguous non-null ordinal levels into
+# merged bins, respecting a minimum percentage and/or count threshold, and
+# stopping early at natural breaks in the code sequence.
+#
+# A "natural break" is a gap between consecutive numeric codes that is
+# strictly larger than the median inter-code gap.  E.g. for codes
+# 0,1,2,...,11,12,24,36,... the median gap is 1 (months), so the jump
+# 12→24 (+12) is a break.  Non-numeric codes never trigger breaks.
+#
+# Algorithm (greedy, single forward pass):
+#   - Accumulate levels into the current group.
+#   - Close the group (and start a new one) when EITHER:
+#       (a) running pct  >= min_pct  (and min_pct  > 0), OR
+#       (b) running n    >= min_n    (and min_n    > 0), OR
+#       (c) a natural break falls BETWEEN the just-added level and the next one
+#           (break is checked AFTER satisfying a/b, so a group is never split
+#           solely by a break when it is still below threshold).
+#   - After the forward pass, if the last group is still below threshold,
+#     merge it into the preceding group (if one exists).
+#
+# @param values     Character vector of value codes in ordinal order (non-null
+#                   levels only).
+# @param counts     Integer vector parallel to values (observed n per level).
+# @param freqs      Numeric vector parallel to values (pct 0-100 per level).
+# @param min_pct    Close a group when running pct >= min_pct*100.
+#                   0 = threshold not used.  Default 0.05 (→ 5 %).
+# @param min_n      Close a group when running n   >= min_n.
+#                   0 = threshold not used.  Default 0.
+#
+# @return Integer vector of the same length as values giving the group id
+#         (1-based).  All elements in a group share the same id.
+.compute_merge_groups <- function(values, counts, freqs,
+                                  min_pct = 0.05, min_n = 0L) {
+  n <- length(values)
+  if (n == 0L) return(integer(0))
+
+  # Both thresholds disabled → every level is its own group
+  use_pct <- isTRUE(min_pct > 0)
+  use_n   <- isTRUE(min_n   > 0)
+  if (!use_pct && !use_n) return(seq_len(n))
+
+  # Convert min_pct from fraction to 0-100 scale to match freqs
+  min_pct_100 <- if (use_pct) min_pct * 100 else Inf
+
+  # ---- Natural break detection ---------------------------------------------
+  # Try to parse codes as numbers; if any fail, disable break detection.
+  num_codes  <- suppressWarnings(as.numeric(values))
+  has_breaks <- !any(is.na(num_codes)) && n >= 3L
+  is_break_before <- logical(n)   # is_break_before[i] = TRUE means gap(i-1, i) is a break
+  if (has_breaks) {
+    gaps        <- abs(diff(num_codes))     # absolute distances, direction-agnostic
+    median_gap  <- stats::median(gaps)
+    if (median_gap > 0) {
+      # A break exists between position i and i+1 when gaps[i] > median_gap
+      for (i in seq_along(gaps)) {
+        if (gaps[i] > median_gap) is_break_before[i + 1L] <- TRUE
+      }
+    }
+  }
+
+  # ---- Greedy forward scan -------------------------------------------------
+  groups      <- integer(n)
+  gid         <- 1L
+  running_pct <- 0
+  running_n   <- 0L
+
+  for (i in seq_len(n)) {
+    # Accumulate current level
+    running_pct <- running_pct + if (!is.na(freqs[i]))  freqs[i]  else 0
+    running_n   <- running_n   + if (!is.na(counts[i])) counts[i] else 0L
+    groups[i]   <- gid
+
+    # Decide whether to close this group:
+    threshold_met <- (use_pct && running_pct >= min_pct_100) ||
+                     (use_n   && running_n   >= min_n)
+
+    if (threshold_met && i < n) {
+      # Also close on a natural break even if threshold not yet met for the
+      # next level — but only when threshold IS already met here.
+      # (Always close when threshold met, regardless of break status.)
+      gid         <- gid + 1L
+      running_pct <- 0
+      running_n   <- 0L
+    } else if (i < n && is_break_before[i + 1L] && (running_pct > 0 || running_n > 0L)) {
+      # Natural break reached before threshold: close the group anyway so we
+      # don't cross a semantic boundary.  The resulting group may be below
+      # threshold; the post-pass will handle that.
+      gid         <- gid + 1L
+      running_pct <- 0
+      running_n   <- 0L
+    }
+  }
+
+  # ---- Post-pass: merge last group upward if still below threshold ---------
+  if (gid > 1L) {
+    last_ids  <- which(groups == gid)
+    last_pct  <- sum(freqs[last_ids],  na.rm = TRUE)
+    last_n    <- sum(counts[last_ids], na.rm = TRUE)
+    still_low <- (use_pct && last_pct < min_pct_100) ||
+                 (use_n   && last_n   < min_n)
+    if (still_low) {
+      groups[last_ids] <- gid - 1L
+    }
+  }
+
+  groups
+}
+
+
+# ============================================================
 # 11. ai_suggest_labels()
 # ============================================================
 
@@ -2197,10 +2312,14 @@ ai_suggest_missing <- function(
 #'   - factor_ordinal, ordinal_desc=FALSE (default) : sent in STORED order as-is.
 #'   - factor_nominal : always sent in stored order, never reordered.
 #'
-#' ## chunk_size vs use_batch
-#'   chunk_size controls how many variables go into one API request.  Smaller
-#'   chunks (default 30) give Haiku more focus and produce better labels, at the
-#'   cost of more sequential calls.  Larger values (up to 80) reduce call count.
+#' ## max_levels vs use_batch
+#'   max_levels controls how many non-null factor levels go into one API request.
+#'   This is a better proxy than a fixed variable count because a chunk of 30
+#'   binary variables (60 levels) is far lighter than 30 ordinal/nominal variables
+#'   (90–300 levels).  Default 150 gives ~75 variables for binary-heavy surveys
+#'   and ~12–20 variables for nominal-heavy surveys.  Variables whose level count
+#'   alone exceeds max_levels are skipped with a warning (they would cost too much
+#'   API credit for no useful output).
 #'   use_batch=TRUE submits everything as a single Anthropic Message Batch job
 #'   (cheaper, but asynchronous — requires polling to retrieve results and can
 #'   take minutes).  Keep use_batch=FALSE (default) for interactive use; set it
@@ -2224,7 +2343,19 @@ ai_suggest_missing <- function(
 #' @param vars         Optional character vector of var_name to restrict to.
 #' @param ordinal_desc Logical. If TRUE, send factor_ordinal labels to Haiku in
 #'                     descending (high->low) order.  Default FALSE = stored order.
-#' @param chunk_size   Variables per API request.  Default 30.
+#' @param min_pct      For factor_ordinal merging: close a merge group when the
+#'                     running percentage reaches this fraction (0–1 scale).
+#'                     Default 0.05 (5 %).  Set to 0 to disable the pct threshold.
+#' @param min_n        For factor_ordinal merging: close a merge group when the
+#'                     running count reaches this value.  Default 0 (disabled).
+#'                     Both min_pct and min_n at 0 disables merging entirely.
+#' @param max_levels   Maximum total non-null levels per API request.  Default 150.
+#'   For ordinal variables, the level count used for chunking is the number of
+#'   merge groups (not raw levels), which is typically much smaller.
+#'   Variables whose individual level/group count exceeds max_levels are skipped
+#'   with a warning.
+#' @param chunk_size   Deprecated. Use max_levels instead.  If supplied, sets
+#'   max_levels = chunk_size * 5L with a warning.
 #' @param use_batch    Logical. Use the Anthropic Message Batch API (cheaper,
 #'                     async).  Default FALSE.
 #' @param dry_run      If TRUE, print the prompt(s) that would be sent and
@@ -2238,13 +2369,21 @@ ai_suggest_labels <- function(
     metadata,
     vars          = NULL,
     ordinal_desc  = FALSE,
+    min_pct       = 0.05,
+    min_n         = 0L,
     meta_json     = NULL,
-    chunk_size    = 30L,
+    max_levels    = 150L,
+    chunk_size    = NULL,
     use_batch     = FALSE,
     dry_run       = FALSE,
     api_key       = Sys.getenv("ANTHROPIC_API_KEY"),
     model         = "claude-haiku-4-5"
 ) {
+  if (!is.null(chunk_size)) {
+    warning("ai_suggest_labels: 'chunk_size' is deprecated. ",
+            "Use 'max_levels' instead. Converting: max_levels = chunk_size * 5L.")
+    max_levels <- chunk_size * 5L
+  }
   if (is.null(meta_json))
     stop("ai_suggest_labels: meta_json is required. ",
          "Provide the path to your *.survey_meta.json file.")
@@ -2284,23 +2423,93 @@ ai_suggest_labels <- function(
           idx  # ordinal_desc=FALSE or nominal => untouched identity permutation
         }
       )
+    ) |>
+    dplyr::mutate(
+      # For ordinal variables: compute merge groups using level stats (if
+      # available), then use group count for chunking budget.  For binary /
+      # nominal: no merging, each non-NULL level is its own "group".
+      .merge_groups = purrr::pmap(
+        list(detected_role, values, new_labels,
+             if ("level_counts" %in% names(target)) level_counts else vector("list", nrow(target)),
+             if ("level_freqs"  %in% names(target)) level_freqs  else vector("list", nrow(target)),
+             .send_order),
+        function(role, vals, nls, counts, freqs, send_ord) {
+          n_tot <- length(nls)
+          # Default: each position gets its own singleton group id
+          groups_full <- seq_len(n_tot)
+          if (role == "factor_ordinal" &&
+              (isTRUE(min_pct > 0) || isTRUE(min_n > 0)) &&
+              length(counts) == n_tot && length(freqs) == n_tot) {
+            # Work in the send-order permutation so groups respect ordinal direction
+            non_null_idx <- which(nls[send_ord] != "NULL")
+            if (length(non_null_idx) >= 2L) {
+              vals_s   <- as.character(vals)[send_ord][non_null_idx]
+              counts_s <- counts[send_ord][non_null_idx]
+              freqs_s  <- freqs[send_ord][non_null_idx]
+              grp_s    <- .compute_merge_groups(vals_s, counts_s, freqs_s,
+                                                min_pct = min_pct, min_n = min_n)
+              # Place groups back into the full-length (send-order) vector
+              groups_send <- seq_len(n_tot)
+              groups_send[non_null_idx] <- grp_s
+              # Un-permute to original stored order
+              inv_ord <- order(send_ord)
+              groups_full <- groups_send[inv_ord]
+            }
+          }
+          groups_full   # integer vector, length == length(nls), NULLs get their own id
+        }
+      ),
+      .n_levels = purrr::pmap_int(
+        list(detected_role, new_labels, .merge_groups),
+        function(role, nls, grps) {
+          non_null <- nls != "NULL"
+          if (role == "factor_ordinal") {
+            # Count distinct merge groups among non-null levels
+            length(unique(grps[non_null]))
+          } else {
+            sum(non_null)
+          }
+        }
+      )
     )
+
+  # Skip variables whose level/group count alone exceeds max_levels (would cost
+  # too much API credit and produce no useful output).
+  oversized <- dplyr::filter(target, .n_levels > max_levels)
+  if (nrow(oversized) > 0) {
+    warning("ai_suggest_labels: ", nrow(oversized), " variable(s) skipped — ",
+            "non-null level/group count exceeds max_levels (", max_levels, "): ",
+            paste(oversized$var_name, collapse = ", "))
+    target <- dplyr::filter(target, .n_levels <= max_levels)
+  }
+  if (nrow(target) == 0) {
+    message("ai_suggest_labels: No variables remaining after filtering oversized.")
+    return(invisible(meta_json))
+  }
 
   # ---------- JSON builder for one variable ---------------------------------
   .build_var_json <- function(var_name, var_label, detected_role, desc,
-                               labels, new_labels, send_order,
-                               level_counts, level_freqs) {
-    labels_ord     <- labels[send_order]
-    new_labels_ord <- new_labels[send_order]
-    counts_ord     <- if (length(level_counts) > 0) level_counts[send_order] else integer(0)
-    freqs_ord      <- if (length(level_freqs)  > 0) level_freqs[send_order]  else numeric(0)
+                               values, labels, new_labels, send_order,
+                               merge_groups, level_counts, level_freqs) {
+    values_ord      <- as.character(values)[send_order]
+    labels_ord      <- labels[send_order]
+    new_labels_ord  <- new_labels[send_order]
+    groups_ord      <- merge_groups[send_order]
+    counts_ord      <- if (length(level_counts) > 0) level_counts[send_order] else integer(0)
+    freqs_ord       <- if (length(level_freqs)  > 0) level_freqs[send_order]  else numeric(0)
 
-    keep        <- new_labels_ord != "NULL"
-    labels_send <- labels_ord[keep]
-    counts_send <- counts_ord[keep]
-    freqs_send  <- freqs_ord[keep]
+    keep         <- new_labels_ord != "NULL"
+    values_keep  <- values_ord[keep]
+    labels_keep  <- labels_ord[keep]
+    groups_keep  <- groups_ord[keep]
+    counts_keep  <- counts_ord[keep]
+    freqs_keep   <- freqs_ord[keep]
 
-    if (length(labels_send) == 0) return(NULL)
+    if (length(labels_keep) == 0) return(NULL)
+
+    # Fallback: if values are empty, use positional indices as pseudo-codes
+    if (length(values_keep) == 0 || all(nchar(values_keep) == 0L))
+      values_keep <- as.character(seq_along(labels_keep))
 
     type_str <- switch(detected_role,
       factor_binary  = "binary",
@@ -2309,19 +2518,54 @@ ai_suggest_labels <- function(
       "nominal"
     )
 
-    esc       <- function(x) gsub('"', '\\"', x, fixed = TRUE)
-    labs_json <- paste0('["', paste(esc(labels_send), collapse = '", "'), '"]')
-    obj       <- paste0('{"var":"', esc(var_name), '","type":"', type_str,
-                        '","desc":"', esc(substr(var_label, 1, 120)), '",',
-                        '"labels":', labs_json)
+    esc <- function(x) gsub('"', '\\"', x, fixed = TRUE)
 
-    if (detected_role == "factor_ordinal" &&
-        length(counts_send) == length(labels_send) &&
-        !any(is.na(counts_send))) {
-      obj <- paste0(obj,
-                    ',"counts":[', paste(counts_send, collapse = ","), ']',
-                    ',"freqs":[',  paste(freqs_send,  collapse = ","), ']')
+    # Strip variable name prefix from var_label before sending to AI
+    # (Stata labels often start with "VARNAME. " or "VARNAMEa. " — redundant tokens)
+    var_label_clean <- sub("^[A-Za-z][A-Za-z0-9_]*[a-z]?[0-9]*\\.\\s*", "", var_label)
+
+    # ---- For ordinal variables: collapse groups before sending to AI --------
+    # Each group is one entry: key = first value code of the group (in send-order),
+    # label = original labels joined by " / ", counts/freqs summed.
+    # .parse_labels_json_responses() matches AI output by that key and expands
+    # the label back to all member levels.
+    if (detected_role == "factor_ordinal" && length(unique(groups_keep)) < length(groups_keep)) {
+      gids      <- unique(groups_keep)
+      n_groups  <- length(gids)
+
+      g_keys    <- character(n_groups)
+      g_labels  <- character(n_groups)
+
+      for (gi in seq_along(gids)) {
+        gid  <- gids[gi]
+        idx  <- which(groups_keep == gid)
+        orig_labels <- labels_keep[idx]
+
+        # Group label sent to AI: list of original labels joined by " / "
+        g_labels[gi] <- paste(unique(orig_labels), collapse = " / ")
+        # Key: first code in the group
+        g_keys[gi]   <- values_keep[idx[1]]
+      }
+
+      # Build levels JSON using group keys
+      kv_pairs    <- paste0('"', esc(g_keys), '":"', esc(g_labels), '"')
+      levels_json <- paste0("{", paste(kv_pairs, collapse = ", "), "}")
+
+      obj <- paste0('{"var":"', esc(var_name), '","type":"', type_str,
+                    '","desc":"', esc(substr(var_label_clean, 1, 120)), '",',
+                    '"levels":', levels_json)
+
+      return(paste0(obj, "}"))
     }
+
+    # ---- Non-ordinal or ordinal with no merging: send raw levels ------------
+    kv_pairs    <- paste0('"', esc(values_keep), '":"', esc(labels_keep), '"')
+    levels_json <- paste0("{", paste(kv_pairs, collapse = ", "), "}")
+
+    obj <- paste0('{"var":"', esc(var_name), '","type":"', type_str,
+                  '","desc":"', esc(substr(var_label_clean, 1, 120)), '",',
+                  '"levels":', levels_json)
+
     paste0(obj, "}")
   }
 
@@ -2345,8 +2589,9 @@ ai_suggest_labels <- function(
             "falling back to inline rules.")
     paste0(
       "Tu es un assistant de recodage de labels de variables d'enquete en sociologie.\n",
-      "Reponds UNIQUEMENT avec un objet JSON : ",
-      '{"VARNAME1": ["label A", "label B"], "VARNAME2": ["label X"]}\n',
+      "Reponds UNIQUEMENT avec un objet JSON dont les valeurs sont des objets ",
+      "codes->nouveaux labels : ",
+      '{"VARNAME1": {"1": "label A", "2": "label B"}, "VARNAME2": {"1": "label X"}}\n',
       "Aucun commentaire ni markdown."
     )
   }
@@ -2355,13 +2600,13 @@ ai_suggest_labels <- function(
   build_prompt <- function(chunk_df) {
     json_objects <- purrr::pmap(
       dplyr::select(chunk_df, var_name, var_label, detected_role, desc,
-                    labels, new_labels, .send_order,
+                    values, labels, new_labels, .send_order, .merge_groups,
                     dplyr::any_of(c("level_counts", "level_freqs"))),
       function(var_name, var_label, detected_role, desc,
-               labels, new_labels, .send_order,
+               values, labels, new_labels, .send_order, .merge_groups,
                level_counts = integer(0), level_freqs = numeric(0)) {
         .build_var_json(var_name, var_label, detected_role, desc,
-                        labels, new_labels, .send_order,
+                        values, labels, new_labels, .send_order, .merge_groups,
                         level_counts, level_freqs)
       }
     ) |> purrr::compact()
@@ -2371,7 +2616,21 @@ ai_suggest_labels <- function(
     paste0("[\n", paste(json_objects, collapse = ",\n"), "\n]")
   }
 
-  chunks  <- split(target, ceiling(seq_len(nrow(target)) / chunk_size))
+  chunks <- local({
+    chunk_ids <- integer(nrow(target))
+    cid   <- 1L
+    cumul <- 0L
+    for (i in seq_len(nrow(target))) {
+      n <- target$.n_levels[[i]]
+      if (cumul + n > max_levels && cumul > 0L) {
+        cid   <- cid + 1L
+        cumul <- 0L
+      }
+      chunk_ids[[i]] <- cid
+      cumul <- cumul + n
+    }
+    split(target, chunk_ids)
+  })
   prompts <- purrr::map(chunks, build_prompt) |> purrr::compact()
 
   # ---------- dry run -------------------------------------------------------
@@ -2380,6 +2639,7 @@ ai_suggest_labels <- function(
     message("DRY RUN — no API call made")
     message(strrep("=", 60))
     message("Variables: ", nrow(target), "  |  Chunks: ", length(prompts),
+            "  |  Levels budget: ", max_levels, " per chunk",
             "  |  Route: ", if (use_batch) "batch" else "synchronous")
     message("\n", strrep("-", 60))
     message("SYSTEM PROMPT")
@@ -2564,21 +2824,24 @@ ai_suggest_labels <- function(
 # Returns a named list suitable for jsonlite::write_json().
 # target: filtered tibble with .send_order column.
 .parse_labels_json_responses <- function(results_text, target) {
-  # Step 1: collect raw AI outputs into a flat var_name -> char-vector map
+  # Step 1: collect raw AI outputs → flat var_name -> named-list (keyed) or
+  # unnamed vector (legacy positional format) map.
   raw_map <- list()
   for (txt in results_text) {
     if (is.null(txt) || !nzchar(txt)) next
     tryCatch({
-      json_str <- stringr::str_extract(
-        txt,
-        "(?s)\\{(?:[^{}]|\\[[^\\[\\]]*\\])*\\}"
-      )
+      # Broad regex: grab the outermost {...} including nested objects.
+      json_str <- stringr::str_extract(txt, "(?s)\\{.+\\}")
       if (is.na(json_str)) stop("No JSON object found")
       parsed <- jsonlite::fromJSON(json_str, simplifyVector = FALSE)
       for (vname in names(parsed)) {
         val <- parsed[[vname]]
-        if (is.character(val) ||
-            (is.list(val) && all(purrr::map_lgl(val, is.character)))) {
+        if (is.list(val) && !is.null(names(val))) {
+          # New keyed format: {"value_code": "new_label", ...}
+          raw_map[[vname]] <- purrr::map_chr(val, as.character)
+        } else if (is.character(val) ||
+                   (is.list(val) && all(purrr::map_lgl(val, is.character)))) {
+          # Legacy positional array format
           raw_map[[vname]] <- unlist(val)
         }
       }
@@ -2589,30 +2852,85 @@ ai_suggest_labels <- function(
 
   if (length(raw_map) == 0) return(list())
 
-  # Step 2: un-permute each variable back to original metadata order,
-  # validate length, re-insert NULL placeholders.
-  out <- purrr::imap(raw_map, function(ai_labels, vname) {
+  # Step 2: join AI labels onto original new_labels, expanding merge groups
+  # for ordinal variables back to individual level labels, then un-permute.
+  out <- purrr::imap(raw_map, function(ai_result, vname) {
     row <- target[target$var_name == vname, ]
     if (nrow(row) == 0) return(NULL)
 
     orig_new_labels <- row$new_labels[[1]]
+    orig_values     <- as.character(row$values[[1]])
     send_order      <- row$.send_order[[1]]
+    merge_groups    <- row$.merge_groups[[1]]
+    role            <- row$detected_role[[1]]
 
-    orig_reordered <- orig_new_labels[send_order]
-    keep_mask      <- orig_reordered != "NULL"
-    n_keep         <- sum(keep_mask)
+    # Apply send_order permutation
+    nl_ord     <- orig_new_labels[send_order]
+    val_ord    <- if (length(orig_values) == length(orig_new_labels))
+                    orig_values[send_order]
+                  else
+                    as.character(seq_along(nl_ord))
+    groups_ord <- merge_groups[send_order]
+    keep       <- nl_ord != "NULL"
 
-    if (length(ai_labels) != n_keep) {
-      warning("ai_suggest_labels: length mismatch for ", vname,
-              " (expected ", n_keep, ", got ", length(ai_labels), "). Skipped.")
-      return(NULL)
+    if (!is.null(names(ai_result))) {
+      # ---- Keyed format: join by value code or group key -------------------
+      result_ord <- nl_ord   # default: keep existing label; "NULL" preserved
+
+      if (role == "factor_ordinal" &&
+          length(unique(groups_ord[keep])) < sum(keep)) {
+        # Group-based matching: AI returned one label per group, keyed by the
+        # first code of each group.  Expand the group label to all members.
+        gids      <- unique(groups_ord[keep])
+        n_matched <- 0L
+        for (gid in gids) {
+          member_idx <- which(keep & groups_ord == gid)
+          # Group key = value code of the first member (in send-order)
+          group_key  <- val_ord[member_idx[1]]
+          ai_lbl     <- ai_result[[group_key]]
+          if (!is.null(ai_lbl) && nzchar(ai_lbl)) {
+            result_ord[member_idx] <- ai_lbl
+            n_matched              <- n_matched + 1L
+          }
+        }
+        n_groups    <- length(gids)
+        n_unmatched <- n_groups - n_matched
+        if (n_unmatched > 0)
+          message("ai_suggest_labels: ", vname, " — ", n_unmatched, "/",
+                  n_groups, " group(s) not matched by key in AI response; ",
+                  "original label kept.")
+      } else {
+        # Non-grouped or non-ordinal: standard level-by-level matching
+        n_matched <- 0L
+        for (j in which(keep)) {
+          key    <- val_ord[j]
+          ai_lbl <- ai_result[[key]]
+          if (!is.null(ai_lbl) && nzchar(ai_lbl)) {
+            result_ord[j] <- ai_lbl
+            n_matched     <- n_matched + 1L
+          }
+        }
+        n_send      <- sum(keep)
+        n_unmatched <- n_send - n_matched
+        if (n_unmatched > 0)
+          message("ai_suggest_labels: ", vname, " — ", n_unmatched, "/",
+                  n_send, " level(s) not matched by value code in AI response; ",
+                  "original label kept.")
+      }
+    } else {
+      # ---- Legacy positional fallback --------------------------------------
+      n_keep <- sum(keep)
+      if (length(ai_result) != n_keep) {
+        warning("ai_suggest_labels: length mismatch for ", vname,
+                " (expected ", n_keep, ", got ", length(ai_result), "). Skipped.")
+        return(NULL)
+      }
+      result_ord         <- nl_ord
+      result_ord[keep]   <- ai_result
     }
 
-    result_in_send_order            <- orig_reordered
-    result_in_send_order[keep_mask] <- ai_labels
-
     inv_order <- order(send_order)
-    as.list(result_in_send_order[inv_order])  # list so JSON keeps arrays
+    as.list(result_ord[inv_order])
   }) |> purrr::compact()
 
   out

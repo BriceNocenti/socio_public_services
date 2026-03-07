@@ -49,22 +49,19 @@ meta <- extract_survey_metadata(df,
 # → Review role / desc fields in meta_json, then re-run Step 1
 meta <- extract_survey_metadata(df, meta_json = meta_json)
 
-
-# ============================================================
 # STEP 3 — Export Excel for visual review (optional, read-only)
-# ============================================================
 export_metadata_excel(meta, path = metadata_review_path)
 # utils::browseURL(metadata_review_path)
 
 
 # ============================================================
-# STEP 4 — Add level counts/frequencies (writes n/pct into meta_json)
+# STEP 3 — Add level counts/frequencies (writes n/pct into meta_json)
 # ============================================================
 meta <- metadata_add_level_stats(meta, df, meta_json = meta_json)
 
 
 # ============================================================
-# STEP 5 — AI label suggestions (enriches meta_json with new_label)
+# STEP 4 — AI label suggestions (enriches meta_json with new_label)
 # → Edit new_label fields in meta_json after this step
 # ============================================================
 # ai_suggest_labels(meta, meta_json = meta_json, dry_run = TRUE) # preview prompts
@@ -77,7 +74,7 @@ meta <- metadata_add_level_stats(meta, df)
 
 
 # ============================================================
-# STEP 6 — AI variable name suggestions (adds new_name to meta_json)
+# STEP 5 — AI variable name suggestions (adds new_name to meta_json)
 # → Edit new_name fields in meta_json after this step
 # ============================================================
 # ai_suggest_varnames(meta, meta_json = meta_json, dry_run = TRUE) # preview prompts
@@ -86,10 +83,10 @@ ai_suggest_varnames(meta, meta_json = meta_json, chunk_size = 400L)
 
 
 # ============================================================
-# STEP 7 — Final reload and apply
+# STEP 6 — Final reload and apply
 # ============================================================
 meta   <- extract_survey_metadata(df, meta_json = meta_json)
 df_out <- apply_survey_formats(df, meta)
-saveRDS(df_out, path.expand(stringr::str_replace(datapath, "\.[^\.]+$", "_formatted.rds")))
+saveRDS(df_out, path.expand(stringr::str_replace(datapath, "\\.[^\\.]+$", "_formatted.rds")))
 generate_format_script(meta, "prfc1", datapath)
 
