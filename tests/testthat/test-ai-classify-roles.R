@@ -486,15 +486,15 @@ test_that("P1: .build_classify_system_prompt() with ordinal_desc=TRUE includes d
 
   result <- .build_classify_system_prompt(prompt_path, ordinal_desc = TRUE)
 
-  # Should contain desc EXAMPLES section
-  expect_true(grepl("desc EXAMPLES", result))
+  # Should contain ordinal direction detection section
+  expect_true(grepl("Ordinal descending/ascending order detection", result))
   # Should contain JSONL format (Input/Output pairs from json_example blocks)
   expect_true(grepl('"role"', result))
   expect_true(grepl('"id"', result))
   expect_true(grepl("Input:", result))
   expect_true(grepl("Output:", result))
-  # Should NOT contain raw json_example fences
-  expect_false(grepl("```json_example", result))
+  # Should NOT contain raw json fences
+  expect_false(grepl("```json", result))
   # Should NOT contain IF markers
   expect_false(grepl("<!-- IF", result))
   # Should contain factor_ordinal and factor_binary desc sections
@@ -502,6 +502,14 @@ test_that("P1: .build_classify_system_prompt() with ordinal_desc=TRUE includes d
   expect_true(grepl("factor_binary", result))
   # Should NOT contain old SET: format
   expect_false(grepl("SET:", result))
+  # Should NOT contain nd:0 section (removed)
+  expect_false(grepl("nd:0 EXAMPLES", result))
+  # Should contain MISSING VALUE DETECTION section
+  expect_true(grepl("MISSING VALUE DETECTION", result))
+  # Should contain binary unknown examples
+  expect_true(grepl("Homme.*Femme", result))
+  # Should contain Autre ordinal example
+  expect_true(grepl("Autre", result))
 })
 
 test_that("P2: .build_classify_system_prompt() with ordinal_desc=FALSE has binary desc only", {
@@ -519,4 +527,654 @@ test_that("P2: .build_classify_system_prompt() with ordinal_desc=FALSE has binar
   expect_false(grepl("<!-- IF", result))
   # Should NOT contain old SET: format
   expect_false(grepl("SET:", result))
+  # Should NOT contain nd:0 section (removed)
+  expect_false(grepl("nd:0 EXAMPLES", result))
+  # Should contain MISSING VALUE DETECTION section
+  expect_true(grepl("MISSING VALUE DETECTION", result))
+  # Should contain binary unknown examples
+  expect_true(grepl("Homme.*Femme", result))
+})
+
+
+# ---------------------------------------------------------------------------
+# A. Auto-classification tests — nd:0 and nd:1 variables
+# ---------------------------------------------------------------------------
+
+test_that("A1: nd:0 integer vars auto-classified as integer_count without API call", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    AGE_Q = list(
+      var_label = "quel est votre age",
+      role      = "integer",
+      levels    = list("99" = list(label = "NSP", missing = TRUE))
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "AGE_Q", "quel est votre age",
+    c("NSP"), c(99L),
+    missing_vals  = 99L,
+    detected_role = "integer"
+  )
+  meta$n_distinct <- 0L
+
+  # mock_ai should NOT be called — if it is, test fails
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    function(...) stop("API should not be called for nd:0 vars"),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path)
+  )
+
+  res <- .read_meta_json(path)$variables$AGE_Q
+  expect_equal(res$role, "integer_count")
+})
+
+test_that("A2: nd:1 factor vars auto-classified as factor_unique_value without API call", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    CONST = list(
+      var_label = "constante",
+      role      = "factor_nominal",
+      levels    = list("1" = list(label = "Valeur unique"))
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "CONST", "constante",
+    c("Valeur unique"), c(1L),
+    detected_role = "factor_nominal"
+  )
+  meta$n_distinct <- 1L
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    function(...) stop("API should not be called for n_distinct==1"),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path)
+  )
+
+  res <- .read_meta_json(path)$variables$CONST
+  expect_equal(res$role, "factor_unique_value")
+})
+
+test_that("A3: mixed nd:0 + nd:1 + normal vars — auto + API classification", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    AGE_Q = list(
+      var_label = "quel est votre age",
+      role      = "integer",
+      levels    = list("99" = list(label = "NSP", missing = TRUE))
+    ),
+    CONST = list(
+      var_label = "constante",
+      role      = "factor_nominal",
+      levels    = list("1" = list(label = "Valeur unique"))
+    ),
+    SATISF = list(
+      var_label = "satisfaction",
+      role      = "factor_nominal",
+      levels    = list(
+        "1" = list(label = "Tres satisfait"),
+        "2" = list(label = "Satisfait"),
+        "3" = list(label = "Pas satisfait")
+      )
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- dplyr::bind_rows(
+    {
+      m <- make_classify_meta("AGE_Q", "quel est votre age",
+                              c("NSP"), c(99L), missing_vals = 99L,
+                              detected_role = "integer")
+      m$n_distinct <- 0L
+      m
+    },
+    {
+      m <- make_classify_meta("CONST", "constante",
+                              c("Valeur unique"), c(1L))
+      m$n_distinct <- 1L
+      m
+    },
+    make_classify_meta("SATISF", "satisfaction",
+                       c("Tres satisfait", "Satisfait", "Pas satisfait"),
+                       c(1L, 2L, 3L))
+  )
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    mock_ai('{"id":"SATISF","role":"factor_ordinal","desc":"high_first"}'),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path, ordinal_desc = TRUE)
+  )
+
+  res <- .read_meta_json(path)$variables
+  expect_equal(res$AGE_Q$role, "integer_count")
+  expect_equal(res$CONST$role, "factor_unique_value")
+  expect_equal(res$SATISF$role, "factor_ordinal")
+})
+
+
+# ---------------------------------------------------------------------------
+# B. Binary desc="unknown" — existing JSON order preserved
+# ---------------------------------------------------------------------------
+
+test_that("B1: binary + desc unknown → existing JSON order preserved", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    SEXE = list(
+      var_label = "Sexe",
+      role      = "factor_nominal",
+      levels    = list(
+        "1" = list(label = "Homme"),
+        "2" = list(label = "Femme")
+      )
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "SEXE", "sexe de l enquete",
+    c("Homme", "Femme"), c(1L, 2L),
+    detected_role = "factor_nominal"
+  )
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    mock_ai('{"id":"SEXE","role":"factor_binary","desc":"unknown"}'),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path, ordinal_desc = TRUE)
+  )
+
+  res <- .read_meta_json(path)$variables$SEXE
+  expect_equal(res$role, "factor_binary")
+  # desc=unknown + .find_binary_desc fails → existing JSON order preserved (1, 2 from v3 migration)
+  expect_equal(res$levels[["1"]]$order, 1L)
+  expect_equal(res$levels[["2"]]$order, 2L)
+})
+
+
+# ---------------------------------------------------------------------------
+# O. Ordinal with "Autre" — Autre moved to last position
+# ---------------------------------------------------------------------------
+
+test_that("O1: ordinal with Autre → Autre gets last order position", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    DIPLOME = list(
+      var_label = "Diplome",
+      role      = "factor_nominal",
+      levels    = list(
+        "1" = list(label = "Aucun"),
+        "2" = list(label = "Autre"),
+        "3" = list(label = "Bac"),
+        "4" = list(label = "Bac+5")
+      )
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "DIPLOME", "Diplome",
+    c("Aucun", "Autre", "Bac", "Bac+5"),
+    c(1L, 2L, 3L, 4L)
+  )
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    mock_ai('{"id":"DIPLOME","role":"factor_ordinal","desc":"high_first"}'),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path, ordinal_desc = TRUE)
+  )
+
+  res <- .read_meta_json(path)$variables$DIPLOME$levels
+  # high_first: sequential 1,2,3,4 then Autre moved to 4 (last)
+  # Original order: Aucun=1, Autre=2, Bac=3, Bac+5=4
+  # After Autre move: Aucun=1, Bac=2, Bac+5=3, Autre=4
+  expect_equal(res[["2"]]$order, 4L, label = "Autre should be order=4 (last)")
+  expect_equal(res[["1"]]$order, 1L, label = "Aucun should be order=1")
+  expect_equal(res[["3"]]$order, 2L, label = "Bac should be order=2")
+  expect_equal(res[["4"]]$order, 3L, label = "Bac+5 should be order=3")
+})
+
+test_that("O2: ordinal with Autre already last → order unchanged", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    FREQ = list(
+      var_label = "Frequence",
+      role      = "factor_nominal",
+      levels    = list(
+        "1" = list(label = "Toujours"),
+        "2" = list(label = "Souvent"),
+        "3" = list(label = "Rarement"),
+        "4" = list(label = "Autre")
+      )
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "FREQ", "Frequence",
+    c("Toujours", "Souvent", "Rarement", "Autre"),
+    c(1L, 2L, 3L, 4L)
+  )
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    mock_ai('{"id":"FREQ","role":"factor_ordinal","desc":"high_first"}'),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path, ordinal_desc = TRUE)
+  )
+
+  res <- .read_meta_json(path)$variables$FREQ$levels
+  # Autre is already last (position 4) → order stays 4
+  expect_equal(res[["1"]]$order, 1L)
+  expect_equal(res[["2"]]$order, 2L)
+  expect_equal(res[["3"]]$order, 3L)
+  expect_equal(res[["4"]]$order, 4L, label = "Autre already last → order=4")
+})
+
+
+# ---------------------------------------------------------------------------
+# H. Additional parser tests — ordinal_desc parameter
+# ---------------------------------------------------------------------------
+
+test_that("H6: parse with ordinal_desc=FALSE → no desc in factor_ordinal expected", {
+  json_text <- '{
+    "AGE4": {
+      "var_label": "Groupe d age",
+      "role": "factor_ordinal",
+      "levels": {
+        "1": { "order": 1, "label": "20-29" },
+        "2": { "order": 2, "label": "30-39" }
+      }
+    }
+  }'
+  result <- .parse_json_example_block(json_text, ordinal_desc = FALSE)
+  parsed_expected <- jsonlite::fromJSON(result[["AGE4"]]$expected)
+  expect_equal(parsed_expected$role, "factor_ordinal")
+  expect_null(parsed_expected$desc)
+})
+
+test_that("H7: parse with ordinal_desc=FALSE → desc preserved for factor_binary", {
+  json_text <- '{
+    "EMPLOI": {
+      "var_label": "avez-vous un emploi",
+      "role": "factor_binary",
+      "desc": "high_first",
+      "cur": "factor_binary",
+      "levels": {
+        "1": { "label": "Oui" },
+        "2": { "label": "Non" }
+      }
+    }
+  }'
+  result <- .parse_json_example_block(json_text, ordinal_desc = FALSE)
+  parsed_expected <- jsonlite::fromJSON(result[["EMPLOI"]]$expected)
+  expect_equal(parsed_expected$desc, "high_first")
+})
+
+
+# ---------------------------------------------------------------------------
+# P. Additional prompt building tests — ordinal desc in examples
+# ---------------------------------------------------------------------------
+
+test_that("P3: ordinal_desc=TRUE → ordinal JSONL examples in built prompt include desc", {
+  withr::local_dir(.test_proj_root)
+  prompt_path <- file.path(getwd(), "instructions", "classify_roles_prompt.md")
+  skip_if_not(file.exists(prompt_path), "classify_roles_prompt.md not found")
+
+  result <- .build_classify_system_prompt(prompt_path, ordinal_desc = TRUE)
+
+  # SATISF ordinal example should include desc
+  expect_true(grepl('"SATISF".*"factor_ordinal".*"desc"', result))
+  # No raw fences should remain
+  expect_false(grepl("```", result))
+})
+
+test_that("P4: ordinal_desc=FALSE → ordinal JSONL examples have no desc", {
+  withr::local_dir(.test_proj_root)
+  prompt_path <- file.path(getwd(), "instructions", "classify_roles_prompt.md")
+  skip_if_not(file.exists(prompt_path), "classify_roles_prompt.md not found")
+
+  result <- .build_classify_system_prompt(prompt_path, ordinal_desc = FALSE)
+
+  # SATISF ordinal Output line should NOT contain desc — check line by line
+  satisf_output_lines <- grep('"SATISF".*"factor_ordinal"', strsplit(result, "\n")[[1]], value = TRUE)
+  expect_true(length(satisf_output_lines) > 0, label = "SATISF ordinal output line must exist")
+  expect_false(any(grepl('"desc"', satisf_output_lines)), label = "SATISF ordinal output must not have desc")
+  # Binary desc must still be present (Q1 from factor_binary section)
+  expect_true(grepl('"Q1".*"desc"', result, perl = TRUE))
+})
+
+
+# ---------------------------------------------------------------------------
+# M. miss field — extra missing-value detection from AI response
+# ---------------------------------------------------------------------------
+
+test_that("M1: AI returns miss field → message printed with flagged label", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    SANTE = list(
+      var_label = "Etat de sante",
+      role      = "factor_nominal",
+      levels    = list(
+        "1" = list(label = "Tres bon"),
+        "2" = list(label = "Bon"),
+        "3" = list(label = "Mauvais"),
+        "4" = list(label = "Non concerne")
+      )
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "SANTE", "Etat de sante",
+    c("Tres bon", "Bon", "Mauvais", "Non concerne"),
+    c(1L, 2L, 3L, 4L)
+  )
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    mock_ai('{"id":"SANTE","role":"factor_ordinal","desc":"high_first","miss":"Non concerne"}'),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  expect_message(
+    ai_classify_roles(meta, meta_json = path, ordinal_desc = TRUE),
+    "Non concerne",
+    label = "miss field should appear in message output"
+  )
+
+  # Role should still be updated correctly
+  res <- .read_meta_json(path)$variables$SANTE
+  expect_equal(res$role, "factor_ordinal")
+})
+
+# ---------------------------------------------------------------------------
+# P. Additional prompt building tests — new examples
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# I. Pre-AI nd:1 disambiguation — integer_count / other / factor_unique_value
+# ---------------------------------------------------------------------------
+
+test_that("I1: nd:1 + detected_role=integer → integer_count (not factor_unique_value)", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    AGE_Q = list(
+      var_label = "quel est votre age",
+      role      = "integer",
+      levels    = list("99" = list(label = "NSP", missing = TRUE))
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "AGE_Q", "quel est votre age",
+    c("NSP"), c(99L),
+    missing_vals    = 99L,
+    detected_role   = "integer",
+    n_distinct_data = 3L  # small data count but detected_role=integer triggers it
+  )
+  meta$n_distinct <- 1L  # override to nd:1
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    function(...) stop("API should not be called for nd:1 integer vars"),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path)
+  )
+
+  res <- .read_meta_json(path)$variables$AGE_Q
+  expect_equal(res$role, "integer_count")
+})
+
+test_that("I2: nd:1 + large n_distinct_data + factor_nominal → integer_count (labelled age)", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    Q19C = list(
+      var_label = "Quel est son age actuel",
+      role      = "factor_nominal",
+      levels    = list(
+        "85" = list(label = "85 ans ou plus"),
+        "88" = list(label = "NVPD", missing = TRUE),
+        "99" = list(label = "Ne sais pas", missing = TRUE)
+      )
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "Q19C", "Quel est son age actuel",
+    c("85 ans ou plus", "NVPD", "Ne sais pas"),
+    c(85L, 88L, 99L),
+    missing_vals    = c(88L, 99L),
+    detected_role   = "factor_nominal",
+    n_distinct_data = 72L  # 72 distinct integer ages observed in data
+  )
+  # n_distinct = 1 (only "85 ans ou plus" is non-missing label)
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    function(...) stop("API should not be called for nd:1 with large n_distinct_data"),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path)
+  )
+
+  res <- .read_meta_json(path)$variables$Q19C
+  expect_equal(res$role, "integer_count",
+               label = "Many distinct data values → integer_count despite factor_nominal detected_role")
+})
+
+test_that("I3: nd:1 + 'noter en clair' label → other (open-text field)", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    EMP5 = list(
+      var_label = "Quelle est votre profession",
+      role      = "factor_nominal",
+      levels    = list(
+        "01" = list(label = "Noter en clair"),
+        "88" = list(label = "NVPD", missing = TRUE),
+        "99" = list(label = "NSP", missing = TRUE)
+      )
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "EMP5", "Quelle est votre profession",
+    c("Noter en clair", "NVPD", "NSP"),
+    c("01", "88", "99"),
+    missing_vals    = c("88", "99"),
+    detected_role   = "factor_nominal",
+    n_distinct_data = 3L  # only 3 distinct codes in data (01, 88, 99)
+  )
+  # n_distinct = 1
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    function(...) stop("API should not be called for open-text nd:1 vars"),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path)
+  )
+
+  res <- .read_meta_json(path)$variables$EMP5
+  expect_equal(res$role, "other",
+               label = "'noter en clair' label → other (open-text field)")
+})
+
+test_that("I3b: nd:1 + 'preciser' in var_label → other (open-text detected via var_label)", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    EMP1B = list(
+      var_label = "Quel etait votre dernier emploi ? Notez le metier, puis precisez",
+      role      = "factor_nominal",
+      levels    = list(
+        "01" = list(label = "Reponse"),
+        "88" = list(label = "NVPD", missing = TRUE)
+      )
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "EMP1B", "Quel etait votre dernier emploi ? Notez le metier, puis precisez",
+    c("Reponse", "NVPD"),
+    c("01", "88"),
+    missing_vals    = "88",
+    detected_role   = "factor_nominal",
+    n_distinct_data = 2L
+  )
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    function(...) stop("API should not be called"),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path)
+  )
+
+  res <- .read_meta_json(path)$variables$EMP1B
+  expect_equal(res$role, "other",
+               label = "'precisez' in var_label → other")
+})
+
+test_that("I4: nd:1 + small n_distinct_data + normal label → factor_unique_value", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    Q15A = list(
+      var_label = "Cela a-t-il dure plus ou moins de 4 mois",
+      role      = "factor_nominal",
+      levels    = list(
+        "01" = list(label = "4 mois ou plus"),
+        "88" = list(label = "NVPD", missing = TRUE)
+      )
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "Q15A", "Cela a-t-il dure plus ou moins de 4 mois",
+    c("4 mois ou plus", "NVPD"),
+    c("01", "88"),
+    missing_vals    = "88",
+    detected_role   = "factor_nominal",
+    n_distinct_data = 2L  # only 2 distinct codes in data (01 and 88)
+  )
+  # n_distinct = 1
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    function(...) stop("API should not be called for true factor_unique_value"),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path)
+  )
+
+  res <- .read_meta_json(path)$variables$Q15A
+  expect_equal(res$role, "factor_unique_value",
+               label = "True single-category factor → factor_unique_value")
+})
+
+test_that("I5: nd:0 + large n_distinct_data + factor_nominal → integer_count", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    AGE_ARRIVEE = list(
+      var_label = "Age arrive en France",
+      role      = "factor_nominal",
+      levels    = list(
+        "88" = list(label = "NVPD", missing = TRUE),
+        "99" = list(label = "NSP ou prefere indiquer annee", missing = TRUE)
+      )
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- make_classify_meta(
+    "AGE_ARRIVEE", "Age arrive en France",
+    c("NVPD", "NSP ou prefere indiquer annee"),
+    c(88L, 99L),
+    missing_vals    = c(88L, 99L),
+    detected_role   = "factor_nominal",
+    n_distinct_data = 68L  # 68 distinct age values + 2 missing codes in data
+  )
+  # n_distinct = 0 (all labels are missing-coded)
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    function(...) stop("API should not be called for nd:0 vars"),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path)
+  )
+
+  res <- .read_meta_json(path)$variables$AGE_ARRIVEE
+  expect_equal(res$role, "integer_count",
+               label = "nd:0 with many distinct data values → integer_count despite factor_nominal")
+})
+
+
+test_that("P5: built prompt includes double, unclear, and miss examples", {
+  withr::local_dir(.test_proj_root)
+  prompt_path <- file.path(getwd(), "instructions", "classify_roles_prompt.md")
+  skip_if_not(file.exists(prompt_path), "classify_roles_prompt.md not found")
+
+  result <- .build_classify_system_prompt(prompt_path, ordinal_desc = TRUE)
+
+  # double example present
+  expect_true(grepl('"double"', result), label = "double role example must exist")
+  # unclear example present
+  expect_true(grepl('"unclear"', result), label = "unclear role example must exist")
+  # miss field example present
+  expect_true(grepl('"miss"', result), label = "miss field example must exist")
+  # Renamed descending age example should use AGE10_DESC, not duplicate Q19E_GRAGE
+  expect_true(grepl("AGE10_DESC", result),
+    label = "AGE10_DESC should appear in built prompt")
 })

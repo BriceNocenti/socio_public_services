@@ -221,6 +221,90 @@ import_survey <- function(
 }
 
 
+# Compact JSON inside ```json ... ``` input example blocks in the system prompt.
+# Input blocks are identified by containing both "var": and "levels": fields.
+# Output blocks (Sortie) are left pretty-printed.
+# The JSON preamble line (first line of each fence body) is preserved verbatim;
+# only the array content that follows the first blank line is compacted.
+# This ensures Haiku sees the same compact one-liner format in examples as in
+# the real user messages it receives.
+.compact_example_json_blocks <- function(text) {
+  lines  <- strsplit(text, "\n", fixed = TRUE)[[1]]
+  result <- character(length(lines))
+  in_fence      <- FALSE
+  fence_start   <- 0L
+  fence_lines   <- character(0)
+
+  flush_fence <- function(fl) {
+    # Determine if this is an input block (contains both "var": and "levels":)
+    body <- paste(fl, collapse = "\n")
+    is_input <- grepl('"var"', body, fixed = TRUE) &&
+                grepl('"levels"', body, fixed = TRUE)
+    if (!is_input) return(c("```json", fl, "```"))
+
+    # Split into: preamble line(s) before first blank line, then the rest
+    blank_idx <- which(nchar(trimws(fl)) == 0L)
+    if (length(blank_idx) == 0L || blank_idx[[1L]] <= 1L) {
+      # No blank separator — compact everything as one block
+      compacted <- .compact_json_string(paste(fl, collapse = ""))
+      return(c("```json", compacted, "```"))
+    }
+    sep       <- blank_idx[[1L]]
+    preamble  <- fl[seq_len(sep)]          # includes the blank line
+    json_part <- fl[seq.int(sep + 1L, length(fl))]
+    compacted <- .compact_json_string(paste(json_part, collapse = ""))
+    c("```json", preamble, compacted, "```")
+  }
+
+  i <- 1L
+  out <- list()
+  while (i <= length(lines)) {
+    ln <- lines[[i]]
+    if (!in_fence && grepl("^```json", ln)) {
+      in_fence    <- TRUE
+      fence_lines <- character(0)
+    } else if (in_fence && ln == "```") {
+      in_fence <- FALSE
+      out <- c(out, list(flush_fence(fence_lines)))
+    } else if (in_fence) {
+      fence_lines <- c(fence_lines, ln)
+    } else {
+      out <- c(out, list(ln))
+    }
+    i <- i + 1L
+  }
+  paste(unlist(out), collapse = "\n")
+}
+
+# Compact a JSON string: collapse whitespace outside string literals.
+.compact_json_string <- function(s) {
+  chars   <- strsplit(s, "", fixed = TRUE)[[1L]]
+  out     <- character(length(chars))
+  j       <- 0L
+  in_str  <- FALSE
+  escaped <- FALSE
+  for (ch in chars) {
+    if (escaped) {
+      escaped <- FALSE
+      j <- j + 1L; out[[j]] <- ch
+      next
+    }
+    if (ch == "\\" && in_str) {
+      escaped <- TRUE
+      j <- j + 1L; out[[j]] <- ch
+      next
+    }
+    if (ch == '"') {
+      in_str <- !in_str
+      j <- j + 1L; out[[j]] <- ch
+      next
+    }
+    if (!in_str && ch %in% c(" ", "\t", "\n", "\r")) next
+    j <- j + 1L; out[[j]] <- ch
+  }
+  paste(out[seq_len(j)], collapse = "")
+}
+
 .clean_var_label_for_api <- function(var_label, var_name = NULL) {
   # Strip Stata-style variable name prefix — redundant since the variable name
   # is already the JSON key / SET: id field.
@@ -272,13 +356,6 @@ import_survey <- function(
     levels = shown
   )
 
-  # nd:0 case — only missing codes present, classify from label alone
-  if (n_total == 0L && length(missing_vals) > 0L) {
-    miss_shown <- head(.normalize_text(missing_vals[nzchar(missing_vals)]), max_labels)
-    obj$levels <- NULL
-    obj$miss   <- miss_shown
-  }
-
   as.character(jsonlite::toJSON(obj, auto_unbox = TRUE))
 }
 
@@ -290,7 +367,7 @@ import_survey <- function(
 # Each object has $input_args (for .format_classify_jsonl()) and $expected
 # (a JSONL output string like '{"id":"X","role":"factor_ordinal","desc":"high_first"}').
 # ---------------------------------------------------------------------------
-.parse_json_example_block <- function(json_text) {
+.parse_json_example_block <- function(json_text, ordinal_desc = TRUE) {
   parsed <- jsonlite::fromJSON(json_text, simplifyVector = FALSE)
   if (!is.list(parsed) || length(parsed) == 0) return(list())
 
@@ -349,7 +426,9 @@ import_survey <- function(
 
     # Build expected output as JSONL string
     out_obj <- list(id = var_name, role = role)
-    if (nzchar(dir_code)) out_obj$desc <- dir_code
+    if (nzchar(dir_code) && (role == "factor_binary" || ordinal_desc)) {
+      out_obj$desc <- dir_code
+    }
     expected <- as.character(jsonlite::toJSON(out_obj, auto_unbox = TRUE))
 
     # Build values vector: use numeric codes if they look numeric, else character
@@ -426,8 +505,8 @@ import_survey <- function(
     )
   }
 
-  # --- Replace json_example blocks with formatted JSONL Input/Output pairs ---
-  block_pattern <- "```json_example\\s*\\n([\\s\\S]*?)```\\s*\\n?"
+  # --- Replace json blocks (with "var_label") with formatted JSONL Input/Output pairs ---
+  block_pattern <- "```json\\s*\\n([\\s\\S]*?)```\\s*\\n?"
   matches <- gregexpr(block_pattern, md_text, perl = TRUE)[[1]]
 
   if (matches[[1]] != -1L) {
@@ -440,14 +519,17 @@ import_survey <- function(
                            match_starts[[i]] + match_lengths[[i]] - 1L)
       # Extract JSON content
       json_text <- sub(
-        "```json_example\\s*\\n([\\s\\S]*?)```\\s*\\n?", "\\1",
+        "```json\\s*\\n([\\s\\S]*?)```\\s*\\n?", "\\1",
         full_match, perl = TRUE
       )
 
+      # Only process blocks that contain "var_label" (classify example blocks)
+      if (!grepl('"var_label"', json_text, fixed = TRUE)) next
+
       examples <- tryCatch(
-        .parse_json_example_block(json_text),
+        .parse_json_example_block(json_text, ordinal_desc = ordinal_desc),
         error = function(e) {
-          warning("Failed to parse json_example block: ", e$message)
+          warning("Failed to parse json example block: ", e$message)
           list()
         }
       )
@@ -582,6 +664,8 @@ import_survey <- function(
         vars[[vname]]$levels[[val_code]]$missing    <- TRUE
         next
       }
+      # Skip levels already flagged as missing (no order assigned to them)
+      if (isTRUE(lev$missing)) next
       # Assign order if absent
       if (is.null(lev$order)) {
         valid_idx <- valid_idx + 1L
@@ -1114,8 +1198,9 @@ extract_survey_metadata <- function(
       var_name      = vname,
       var_label     = var_lbl,
       r_class       = r_class,
-      n_distinct    = n_dist,
-      detected_role = detected_role,
+      n_distinct      = n_dist,
+      n_distinct_data = n_dist_total,
+      detected_role   = detected_role,
       values        = list(raw_values),
       labels        = list(raw_labels),
       missing_vals  = list(missing_vals_vec),
@@ -2357,7 +2442,7 @@ ai_batch_retrieve <- function(
 #' @param dry_run          If TRUE, print the system/user prompts without calling
 #'                         the API or writing any file. Default FALSE.
 #' @param max_labels_sent  Max non-missing labels per unique label set sent to AI.
-#'                         Default 5. Increase for variables with many levels.
+#'                         Default 10.
 #'
 #' @return Invisibly returns \code{meta_json}.
 #'         In dry_run mode: invisibly returns the list of user prompt strings.
@@ -2370,7 +2455,7 @@ ai_classify_roles <- function(
     dry_run          = FALSE,
     api_key          = Sys.getenv("ANTHROPIC_API_KEY"),
     model            = "claude-haiku-4-5",
-    max_labels_sent  = 5L,
+    max_labels_sent  = 10L,
     log_raw_answer   = FALSE
 ) {
   if (is.null(meta_json))
@@ -2397,6 +2482,75 @@ ai_classify_roles <- function(
     return(invisible(meta_json))
   }
 
+  # --- Auto-classify nd:0 (all missing) and nd:1 (single non-missing value) ---
+  auto_nd0 <- target |> dplyr::filter(n_distinct == 0L)
+  auto_nd1 <- target |> dplyr::filter(n_distinct == 1L)
+  n_auto   <- nrow(auto_nd0) + nrow(auto_nd1)
+
+  if (n_auto > 0L) {
+    .backup_meta_json(meta_json, "classify_roles_auto")
+    existing_auto <- .read_meta_json(meta_json)
+
+    # Threshold: if the actual data has >= 5 distinct values but only 1 non-missing
+    # label, it is a continuous integer variable (age, year, score…), not a factor.
+    .nd_cont_threshold <- 5L
+
+    # French survey open-text field patterns: "noter en clair", "précisez", etc.
+    .opentext_re <- paste0(
+      "(?i)(noter?\\s+en\\s+clair|notez\\s+en\\s+clair|",
+      "\\bpr\u00e9cisez\\b|\\bprecisez\\b|texte\\s+libre|r\u00e9ponse\\s+libre|",
+      "reponse\\s+libre|champ\\s+texte|libre\\s+r\u00e9ponse|libre\\s+reponse)"
+    )
+
+    if (nrow(auto_nd0) > 0L) {
+      message("  ", nrow(auto_nd0),
+              " variable(s) with nd=0 (all missing codes) — auto-classified, not sent to AI.")
+      for (vn in auto_nd0$var_name) {
+        if (is.null(existing_auto$variables[[vn]])) next
+        row <- auto_nd0[auto_nd0$var_name == vn, ]
+        dr  <- row$detected_role
+        ndd <- if ("n_distinct_data" %in% names(row)) row$n_distinct_data else 0L
+        if (dr == "integer" || ndd >= .nd_cont_threshold) {
+          existing_auto$variables[[vn]]$role <- "integer_count"
+        }
+        # else: leave existing JSON role unchanged; variable not sent to AI
+      }
+    }
+
+    if (nrow(auto_nd1) > 0L) {
+      message("  ", nrow(auto_nd1),
+              " variable(s) with 1 non-missing value — disambiguating pre-AI.")
+      for (vn in auto_nd1$var_name) {
+        if (is.null(existing_auto$variables[[vn]])) next
+        row  <- auto_nd1[auto_nd1$var_name == vn, ]
+        dr   <- row$detected_role
+        ndd  <- if ("n_distinct_data" %in% names(row)) row$n_distinct_data else 0L
+        lbl1 <- if (length(row$labels[[1]]) > 0) row$labels[[1]][[1]] else ""
+        vlbl <- row$var_label
+
+        if (dr == "integer" || ndd >= .nd_cont_threshold) {
+          # Many distinct data values despite 1 label = continuous integer
+          existing_auto$variables[[vn]]$role <- "integer_count"
+        } else if (grepl(.opentext_re, lbl1, perl = TRUE) ||
+                   grepl(.opentext_re, vlbl, perl = TRUE)) {
+          # Open-text / free-text field ("noter en clair", "précisez"…)
+          existing_auto$variables[[vn]]$role <- "other"
+        } else {
+          # True single-category factor (e.g. question filtered to one answer)
+          existing_auto$variables[[vn]]$role <- "factor_unique_value"
+        }
+      }
+    }
+
+    .write_meta_json(existing_auto, meta_json)
+    target <- target |> dplyr::filter(n_distinct > 1L)
+  }
+
+  if (nrow(target) == 0) {
+    message("ai_classify_roles: All variables auto-classified. No API call needed.")
+    return(invisible(meta_json))
+  }
+
   message("ai_classify_roles: ", nrow(target), " variable(s) to classify.")
 
   # --- Build label key per variable (non-missing labels, sorted for dedup) ---
@@ -2406,7 +2560,7 @@ ai_classify_roles <- function(
       .lbl_key = purrr::pmap_chr(list(labels, values, missing_vals),
         function(lbls, vals, miss) {
           is_miss_lbl <- as.character(vals) %in% as.character(miss)
-          clean <- sort(.normalize_text(lbls[!is_miss_lbl & nzchar(lbls)]))
+          clean <- sort(tolower(.normalize_text(lbls[!is_miss_lbl & nzchar(lbls)])))
           paste(clean, collapse = "\x01")
         })
     )
@@ -2623,6 +2777,26 @@ ai_classify_roles <- function(
       }
       for (j in seq_along(non_miss_keys)) {
         existing$variables[[vn]]$levels[[non_miss_keys[[j]]]]$order <- new_orders[[j]]
+      }
+
+      # Move "Autre" catch-all to last position if present
+      autre_pat <- "(?i)^autre(\\b|$)"
+      for (j in seq_along(non_miss_keys)) {
+        lbl_j <- levs[[non_miss_keys[[j]]]]$label %||% ""
+        if (grepl(autre_pat, lbl_j, perl = TRUE)) {
+          cur_order <- existing$variables[[vn]]$levels[[non_miss_keys[[j]]]]$order
+          if (!is.null(cur_order) && cur_order != n_valid) {
+            # Shift levels that were after "Autre" position back by 1
+            for (k in seq_along(non_miss_keys)) {
+              ok <- existing$variables[[vn]]$levels[[non_miss_keys[[k]]]]$order
+              if (!is.null(ok) && ok > cur_order && ok <= n_valid) {
+                existing$variables[[vn]]$levels[[non_miss_keys[[k]]]]$order <- ok - 1L
+              }
+            }
+            existing$variables[[vn]]$levels[[non_miss_keys[[j]]]]$order <- n_valid
+          }
+          break
+        }
       }
 
     } else if (new_role == "factor_binary" && n_valid == 2L) {
@@ -3212,12 +3386,12 @@ ai_merge_levels <- function(
     split(target$var_name, chunk_ids)
   })
 
-  opt_str <- paste0(min(optimal_levels), "-", max(optimal_levels))
   build_prompt <- function(vnames) {
     jsons <- purrr::map_chr(vnames, ~ var_json_map[[.x]] %||% "")
     jsons <- jsons[nzchar(jsons)]
     if (length(jsons) == 0L) return(NULL)
-    paste0("optimal_levels:", opt_str, " min_pct:", min_pct, "%\n\n",
+    paste0('{"optimal_levels":[', min(optimal_levels), ',', max(optimal_levels),
+           '],"min_pct":', min_pct, '}\n\n',
            "[\n", paste(jsons, collapse = ",\n"), "\n]")
   }
   prompts <- purrr::map(chunks, build_prompt) |> purrr::compact()
@@ -3240,6 +3414,20 @@ ai_merge_levels <- function(
 
   system_prompt_text <- paste(
     readLines(prompt_path, encoding = "UTF-8", warn = FALSE), collapse = "\n")
+  # Strip nominal-only sections when nominal = FALSE to avoid sending unused rules to the API.
+  if (!nominal) {
+    system_prompt_text <- gsub(
+      "<!-- BEGIN_NOMINAL_ONLY -->[\\s\\S]*?<!-- END_NOMINAL_ONLY -->",
+      "",
+      system_prompt_text,
+      perl = TRUE
+    )
+    system_prompt_text <- gsub("\n{3,}", "\n\n", system_prompt_text, perl = TRUE)
+    system_prompt_text <- trimws(system_prompt_text)
+  }
+  # Compact input example JSON blocks so Haiku sees the same compact format in
+  # examples as in the real user messages it receives (output blocks kept pretty).
+  system_prompt_text <- .compact_example_json_blocks(system_prompt_text)
 
   # System prompt as cacheable content block list (Anthropic extended-cache beta)
   system_prompt_cached <- list(

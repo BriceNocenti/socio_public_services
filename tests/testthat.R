@@ -34,17 +34,19 @@ make_meta_list <- function(vars) {
 # detected_role = "factor_nominal" so the variable enters the target filter.
 make_classify_meta <- function(var_name, var_label,
                                labels_vec, values_vec,
-                               missing_vals  = integer(0),
-                               detected_role = "factor_nominal") {
+                               missing_vals    = integer(0),
+                               detected_role   = "factor_nominal",
+                               n_distinct_data = as.integer(length(labels_vec))) {
   tibble::tibble(
-    var_name      = var_name,
-    var_label     = var_label,
-    r_class       = "integer",
-    n_distinct    = as.integer(length(labels_vec) - length(missing_vals)),
-    labels        = list(labels_vec),
-    values        = list(values_vec),
-    missing_vals  = list(missing_vals),
-    detected_role = detected_role
+    var_name        = var_name,
+    var_label       = var_label,
+    r_class         = "integer",
+    n_distinct      = as.integer(length(labels_vec) - length(missing_vals)),
+    n_distinct_data = n_distinct_data,
+    labels          = list(labels_vec),
+    values          = list(values_vec),
+    missing_vals    = list(missing_vals),
+    detected_role   = detected_role
   )
 }
 
