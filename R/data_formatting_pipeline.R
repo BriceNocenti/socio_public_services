@@ -51,8 +51,7 @@
 #   7. [optional] ai_suggest_labels(meta, meta_json = meta_json)
 #                 ai_suggest_varnames(meta, meta_json = meta_json)
 #                 export_metadata_excel(meta, "meta_review2.xlsx")
-#   8. df_out <- apply_survey_formats(df, meta)
-#      generate_format_script(meta, "mysurvey", "path/to/file")
+#   8. generate_format_script(meta, "mysurvey", "path/to/file")
 #
 # Functions:
 #   import_survey()                  — auto-detect format and import
@@ -62,7 +61,6 @@
 #   metadata_merge_ordinal_levels()  — fast algorithmic ordinal merge (frequency threshold)
 #   ai_merge_levels()                — semantic ordinal/nominal merge via Haiku; writes order to JSON
 #   export_metadata_excel()          — review file (openxlsx, orange = needs attention)
-#   apply_survey_formats()           — apply metadata → factors on real data
 #   generate_format_script()         — write readable _recode.R for students
 #
 # AI helpers (require ANTHROPIC_API_KEY env var):
@@ -1765,7 +1763,6 @@ metadata_apply_codebook <- function(
 #'   - Positive level → "1-<var_label>" (or original label if use_var_label=FALSE)
 #'   - Negative level → "2-Non"
 #'   - Missing levels (order=NA) keep "NULL" sentinel
-#'   - apply_survey_formats() sorts levels by order ascending, so no vector reorder needed
 #'
 #' For binary rows where positive is not yet resolved (no level with order=1):
 #'   - Warns and skips. Run ai_classify_roles() first.
@@ -1975,254 +1972,7 @@ export_metadata_excel <- function(
 
 
 # ============================================================
-# 6. apply_survey_formats()
-# ============================================================
-
-#' Apply metadata to a dataframe: recode to factors, rename, re-label
-#'
-#' Terminal step. Applies factor recoding to factor_binary/nominal/ordinal roles.
-#' Values in missing_vals are mapped to NA. new_labels == "NULL" → NA.
-#' factor_ordinal and factor_binary variables sort levels by the "order" integer
-#' (ascending) from the metadata$order list-column. factor_nominal levels are
-#' sorted alphabetically. Falls back to default factor() when order is absent.
-#'
-#' @param df               Tibble from import_survey().
-#' @param metadata         Fully-reviewed varmod tibble.
-#' @param uppercase_names  UPPERCASE all output variable names. Default TRUE.
-#'
-#' @return A tibble with factors applied and variables renamed.
-apply_survey_formats <- function(df, metadata, uppercase_names = TRUE) {
-  meta <- metadata |> dplyr::filter(var_name %in% names(df))
-
-  non_factor_roles <- c("double", "integer", "integer_scale", "integer_count",
-                        "identifier", "other")
-
-  for (i in seq_len(nrow(meta))) {
-    row       <- meta[i, ]
-    vname     <- row$var_name
-    vals      <- row$values[[1]]
-    nls       <- row$new_labels[[1]]
-    miss_vals <- row$missing_vals[[1]]
-    role      <- row$detected_role
-    ord_ints  <- if ("order" %in% names(row)) row$order[[1]] else NULL
-    is_ord    <- role == "factor_ordinal"
-    is_bin    <- role == "factor_binary"
-
-    if (role %in% non_factor_roles) next
-    if (length(vals) == 0 || length(nls) == 0) next
-
-    null_mask  <- nls == "NULL"
-    keep_mask  <- !null_mask
-    recode_vec <- purrr::set_names(as.character(vals[keep_mask]), nls[keep_mask])
-
-    raw_char  <- as.character(df[[vname]])
-    recoded   <- dplyr::recode(raw_char, !!!recode_vec, .default = NA_character_)
-    # Also NA-ify values in missing_vals (catches codes not in new_labels)
-    miss_char <- as.character(miss_vals)
-    recoded   <- dplyr::if_else(raw_char %in% miss_char, NA_character_, recoded)
-
-    # Determine factor level order
-    if ((is_ord || is_bin) && length(ord_ints) == length(nls)) {
-      # Sort non-missing levels by order integer ascending
-      keep_ord  <- ord_ints[keep_mask]
-      ord_order <- order(keep_ord, na.last = NA)
-      lvl_order <- unique(nls[keep_mask][ord_order])
-      df[[vname]] <- factor(recoded, levels = lvl_order, ordered = is_ord)
-    } else {
-      df[[vname]] <- factor(recoded)
-      if (!(is_ord || is_bin)) df[[vname]] <- forcats::fct_relevel(df[[vname]], sort)
-    }
-  }
-
-  # Rename
-  rename_map <- meta |>
-    dplyr::filter(new_name != var_name, new_name != "") |>
-    dplyr::select(var_name, new_name)
-  if (nrow(rename_map) > 0) {
-    rename_vec <- purrr::set_names(rename_map$var_name, rename_map$new_name)
-    df <- dplyr::rename(df, !!!rename_vec)
-  }
-
-  if (uppercase_names) names(df) <- toupper(names(df))
-
-  # Re-apply variable labels
-  label_map <- meta |>
-    dplyr::mutate(
-      final_name = dplyr::if_else(new_name != "" & new_name != var_name,
-                                  new_name, var_name),
-      final_name = if (uppercase_names) toupper(final_name) else final_name,
-      lbl        = var_label
-    ) |>
-    dplyr::filter(lbl != "", final_name %in% names(df))
-
-  if (nrow(label_map) > 0) {
-    lbl_vec <- purrr::set_names(label_map$lbl, label_map$final_name)
-    df <- labelled::set_variable_labels(df, .labels = lbl_vec)
-  }
-
-  df
-}
-
-
-# ============================================================
-# 7. generate_format_script()
-# ============================================================
-
-#' Generate a readable _recode.R script for students
-#'
-#' Output script has no dependency on data_formatting_pipeline.R —
-#' it uses base R, dplyr, and forcats only. Ordinal variables use
-#' fct_relevel() with explicit level order instead of sort().
-#'
-#' @param metadata    Fully-reviewed varmod tibble.
-#' @param df_name     Object name in generated script (e.g. "prfe").
-#' @param input_path  Path to original data file (for documentation).
-#' @param output_path Output .R file path. NULL = paste0(df_name, "_recode.R").
-#' @param n_obs       Number of observations (optional, for header).
-#'
-#' @return Invisibly returns script text. Also writes to file.
-generate_format_script <- function(
-    metadata,
-    df_name,
-    input_path,
-    output_path = NULL,
-    n_obs       = NULL
-) {
-  if (is.null(output_path)) output_path <- paste0(df_name, "_recode.R")
-
-  n_vars <- nrow(metadata)
-  n_str  <- if (!is.null(n_obs)) formatC(n_obs, format = "d", big.mark = " ") else "?"
-  today  <- format(Sys.Date(), "%Y-%m-%d")
-
-  # Rename block
-  rename_rows <- metadata |>
-    dplyr::filter(new_name != var_name & new_name != "")
-  if (nrow(rename_rows) > 0) {
-    rename_lines <- purrr::pmap_chr(rename_rows, function(var_name, new_name, var_label, ...) {
-      pad <- strrep(" ", max(0, 22 - nchar(new_name)))
-      sprintf('  %s%s= %s,  # "%s"', new_name, pad, var_name,
-              substr(var_label, 1, 60))
-    })
-    rename_block <- paste0(df_name, ' <- ', df_name, ' |> dplyr::rename(\n',
-                           paste(rename_lines, collapse = "\n"), '\n)\n')
-  } else {
-    rename_block <- "# No variables renamed\n"
-  }
-
-  # Mutate block
-  cat_meta <- metadata |>
-    dplyr::filter(detected_role %in% c("factor_binary", "factor_nominal",
-                                        "factor_ordinal"))
-
-  if (nrow(cat_meta) > 0) {
-    mutate_lines <- purrr::pmap_chr(cat_meta, function(
-      var_name, var_label, new_name, new_labels, values, missing_vals,
-      detected_role, ...
-    ) {
-      display <- if (!is.null(new_name) && new_name != "" && new_name != var_name)
-        new_name else var_name
-
-      recode_lines <- purrr::map2_chr(new_labels, values, function(nl, v) {
-        if (nl == "NULL") sprintf('    "NULL"                         = "%s"  # missing',
-                                  as.character(v))
-        else sprintf('    "%-35s= "%s"', paste0(nl, '"'), as.character(v))
-      })
-
-      relevel_line <- if (detected_role == "factor_ordinal") {
-        valid_nls <- new_labels[new_labels != "NULL"]
-        lvls <- paste0('"', valid_nls, '"', collapse = ", ")
-        paste0('    forcats::fct_relevel(', lvls, ')')
-      } else {
-        '    forcats::fct_relevel(sort)'
-      }
-
-      paste0('\n  # ', display, ': "', substr(var_label, 1, 70), '"\n',
-             '  ', display, ' = factor(as.character(', display, ')) |>\n',
-             '    forcats::fct_recode(\n',
-             paste(recode_lines, collapse = ",\n"), '\n',
-             '    ) |>\n', relevel_line, ',')
-    })
-
-    mutate_block <- paste0(df_name, ' <- ', df_name, ' |> dplyr::mutate(\n',
-                           paste(mutate_lines, collapse = "\n"), '\n)\n')
-  } else {
-    mutate_block <- "# No categorical variables to format\n"
-  }
-
-  # NA-replacement block for integer_scale / integer_count variables.
-  # Only replaces values that are confirmed null-coded (missing_vals) for that
-  # specific variable — never touches genuine numeric values.
-  int_meta <- metadata |>
-    dplyr::filter(detected_role %in% c("integer_scale", "integer_count"))
-
-  if (nrow(int_meta) > 0) {
-    na_lines <- purrr::pmap_chr(int_meta, function(var_name, new_name,
-                                                    missing_vals, var_label, ...) {
-      display <- if (!is.null(new_name) && nzchar(new_name) && new_name != var_name)
-        new_name else var_name
-      miss_num <- suppressWarnings(as.numeric(unlist(missing_vals)))
-      miss_num <- sort(unique(miss_num[!is.na(miss_num)]))
-      if (length(miss_num) == 0) return(NA_character_)
-      vals_str <- paste(miss_num, collapse = ", ")
-      paste0('\n  # ', display, ': "', substr(var_label, 1, 70), '"\n',
-             '  ', display, ' = dplyr::if_else(', display,
-             ' %in% c(', vals_str, '), NA_real_, as.numeric(', display, ')),')
-    })
-    na_lines <- na_lines[!is.na(na_lines)]
-
-    na_block <- if (length(na_lines) > 0) {
-      paste0(df_name, ' <- ', df_name, ' |> dplyr::mutate(\n',
-             paste(na_lines, collapse = "\n"), '\n)\n')
-    } else {
-      "# No integer_scale/integer_count variables with missing codes to recode\n"
-    }
-  } else {
-    na_block <- "# No integer_scale/integer_count variables to recode\n"
-  }
-
-  script <- paste0(
-    '# === SURVEY FORMATTING SCRIPT: ', toupper(df_name), ' ===\n',
-    '# Generated : ', today, '\n',
-    '# Source    : ', input_path, '\n',
-    '# N = ', n_str, ' | Variables: ', n_vars, '\n',
-    '#\n',
-    '# HOW TO USE:\n',
-    '#   1. Review rename and mutate sections.\n',
-    '#   2. Edit labels or names as needed.\n',
-    '#   3. Run once to produce ', df_name, '.rds\n',
-    '#   4. In your analysis script: readRDS("', df_name, '.rds")\n',
-    '\n',
-    'library(dplyr)\n',
-    'library(forcats)\n',
-    'library(labelled)\n',
-    '\n',
-    '# To regenerate metadata:\n',
-    '# source("data_formatting_pipeline.R")\n',
-    '# ', df_name, '_raw  <- import_survey("', input_path, '")\n',
-    '# ', df_name, '_meta <- extract_survey_metadata(', df_name, '_raw)\n',
-    '\n\n',
-    '# STEP 1: Import ----\n',
-    df_name, ' <- import_survey("', input_path, '")\n',
-    '\n\n',
-    '# STEP 2: Rename variables ----\n', rename_block,
-    '\n\n',
-    '# STEP 3: Format categorical variables ----\n', mutate_block,
-    '\n\n',
-    '# STEP 4: Recode missing values in integer variables ----\n', na_block,
-    '\n\n',
-    '# STEP 5: Export ----\n',
-    df_name, ' |> saveRDS("', df_name, '.rds")\n',
-    'message("Done. ', df_name, '.rds written.")\n'
-  )
-
-  writeLines(script, output_path, useBytes = FALSE)
-  message("Script written to: ", output_path)
-  invisible(script)
-}
-
-
-# ============================================================
-# 8. AI helpers — httr2 only, no reticulate
+# 6. AI helpers — httr2 only, no reticulate
 # ============================================================
 
 #' Single synchronous call to Claude API
@@ -2382,7 +2132,7 @@ ai_batch_retrieve <- function(
 
 
 # ============================================================
-# 9. ai_classify_roles()
+# 7. ai_classify_roles()
 # ============================================================
 
 #' Classify ambiguous variables with Haiku, print copy-pasteable R vectors
@@ -2895,7 +2645,7 @@ invert_ordinal_order <- function(meta_json) {
 
 
 # ============================================================
-# 10. ai_suggest_missing()
+# 8. ai_suggest_missing()
 # ============================================================
 
 #' Use Haiku to suggest missing value candidates from value labels
@@ -3203,7 +2953,7 @@ ai_suggest_missing <- function(
 
 
 # ============================================================
-# 11. ai_merge_levels()
+# 9. ai_merge_levels()
 # ============================================================
 
 #' Use Haiku to semantically merge factor level groups
@@ -3586,7 +3336,7 @@ ai_merge_levels <- function(
 
 
 # ============================================================
-# 12. ai_suggest_labels()
+# 10. ai_suggest_labels()
 # ============================================================
 
 #' Use Haiku to suggest concise French factor level labels
@@ -5002,5 +4752,29 @@ metadata_apply_meta_json <- function(metadata, json_vars) {
 
   .write_meta_json(list(config = cfg, variables = vars_list), path)
 }
+
+
+
+# ============================================================
+# 12. generate_format_script()
+# ============================================================
+
+
+# ============================================================
+# 12. generate_format_script()
+# ============================================================
+
+#' Generate a readable _recode.R script for students
+#'
+#' Output script has no dependency on data_formatting_pipeline.R —
+#' it uses base R, dplyr, and forcats only. Ordinal variables use
+#' fct_relevel() with explicit level order instead of sort().
+#'
+#' @param metadata    Fully-reviewed varmod tibble.
+#' @param df_name     Object name in generated script (e.g. "prfe").
+#' @param input_path  Path to original data file (for documentation).
+#' @param output_path Output .R file path. NULL = paste0(df_name, "_recode.R").
+#' @param n_obs       Number of observations (optional, for header).
+
 
 
