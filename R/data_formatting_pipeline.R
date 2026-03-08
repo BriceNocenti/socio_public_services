@@ -1,12 +1,12 @@
 # ============================================================
-# Survey Formatting Pipeline — data_formatting_pipeline.R  v3
+# Survey Formatting Pipeline — data_formatting_pipeline.R  v4
 # ============================================================
 # Source this file in any _mf.R script:
 #   source("data_formatting_pipeline.R")
 #
 # METADATA SCHEMA — extract_survey_metadata() produces a tibble with:
-#   var_name, var_label, r_class, n_distinct, detected_role, desc,
-#   values, labels, missing_vals, new_labels, new_name
+#   var_name, var_label, r_class, n_distinct, detected_role,
+#   values, labels, missing_vals, new_labels, new_name, order
 #
 #   detected_role (7 values):
 #     identifier    — ID column (unique per row or named IDENT/ID)
@@ -18,10 +18,13 @@
 #     factor_ordinal — ≥3 ordered levels — set by AI/user
 #     factor_nominal — ≥3 unordered levels (default for labelled ≥3)
 #
-#   desc (logical):
-#     factor_binary : TRUE = positive level is first; FALSE = second; NA = unknown
-#     factor_ordinal: TRUE = descending (high→low); FALSE = ascending; NA = not set
-#     double/integer: FALSE; identifier/nominal: NA
+#   order (integer list-column, parallel to values):
+#     factor_binary/ordinal/nominal: integer ≥ 1 = desired position in output factor
+#       (levels with same integer are merged before AI label suggestion)
+#       binary: order=1 = positive level (Oui, Choisi…), order=2 = negative
+#       ordinal: order=1 = first shown level (direction set by ai_classify_roles)
+#     missing/suppressed level: NA_integer_ (JSON: "missing": true, no "order" field)
+#     other roles: NA_integer_
 #
 # USER WORKFLOW (iterate until metadata is good):
 #   1. df   <- import_survey("file.sas7bdat")
@@ -31,13 +34,20 @@
 #                missing_chr = c(...), missing_num = c(...))
 #      # Console shows factor_binary detections + n needing AI classification
 #   3. [optional] ai_classify_roles(meta, meta_json = meta_json)
-#      # Writes role / desc to meta_json — review, then re-run step 2
+#      # Writes "order" integers to meta_json — review, then re-run step 2
 #   4. [optional] metadata_apply_codebook(meta, codebook_df, ...)
 #   5. meta <- metadata_fix_binary(meta)
 #   6. export_metadata_excel(meta, "meta_review.xlsx")
 #      # Open Excel, check orange rows (factor_binary/nominal/integer), iterate
 #   6b.[optional] meta <- metadata_add_level_stats(meta, df, meta_json = meta_json)
 #      # Adds level_counts/level_freqs to metadata + writes n/pct into meta_json
+#      # Also sets missing:true for zero-n levels in meta_json
+#   6c.[optional] meta <- metadata_merge_ordinal_levels(meta, meta_json = meta_json)
+#      # Fast algorithmic pre-pass: merges small ordinal levels by frequency threshold
+#   6d.[optional] ai_merge_levels(meta, meta_json = meta_json)
+#      # Semantic merge by Haiku: decides group structure for ordinal (+ nominal if nominal=TRUE)
+#      # Writes merged "order" integers to meta_json; collapses to factor_binary when 2 groups
+#      # Run AFTER ai_classify_roles() and metadata_add_level_stats()
 #   7. [optional] ai_suggest_labels(meta, meta_json = meta_json)
 #                 ai_suggest_varnames(meta, meta_json = meta_json)
 #                 export_metadata_excel(meta, "meta_review2.xlsx")
@@ -45,23 +55,29 @@
 #      generate_format_script(meta, "mysurvey", "path/to/file")
 #
 # Functions:
-#   import_survey()             — auto-detect format and import
-#   extract_survey_metadata()   — build standardised varmod tibble (v3 schema)
-#   metadata_apply_codebook()   — merge external Excel/CSV codebook
-#   metadata_fix_binary()       — standardise binary positive/negative labels
-#   export_metadata_excel()     — review file (openxlsx, orange = needs attention)
-#   apply_survey_formats()      — apply metadata → factors on real data
-#   generate_format_script()    — write readable _recode.R for students
+#   import_survey()                  — auto-detect format and import
+#   extract_survey_metadata()        — build standardised varmod tibble (v4 schema)
+#   metadata_apply_codebook()        — merge external Excel/CSV codebook
+#   metadata_fix_binary()            — standardise binary positive/negative labels
+#   metadata_merge_ordinal_levels()  — fast algorithmic ordinal merge (frequency threshold)
+#   ai_merge_levels()                — semantic ordinal/nominal merge via Haiku; writes order to JSON
+#   export_metadata_excel()          — review file (openxlsx, orange = needs attention)
+#   apply_survey_formats()           — apply metadata → factors on real data
+#   generate_format_script()         — write readable _recode.R for students
 #
 # AI helpers (require ANTHROPIC_API_KEY env var):
 #   ai_suggest_missing()        — Haiku: identify missing-value label candidates
 #   ai_classify_roles()         — Haiku: classify ambiguous vars (nominal/ordinal/scale/count)
+#                                  writes "order" integers (direction) to meta_json
 #   ai_call_claude()            — synchronous single call (httr2)
 #   ai_batch_submit()           — submit Message Batch job (httr2)
 #   ai_batch_retrieve()         — poll + retrieve batch results (httr2)
 #   metadata_add_level_stats()  — add level_counts/level_freqs to metadata
-#   ai_suggest_labels()         — shorten labels + merge small ordinal levels (JSON)
+#   ai_suggest_labels()         — shorten labels using order field for grouping/direction
 #   ai_suggest_varnames()       — propose short R variable names + doc strings
+#
+# Tests scripts: 
+#   source("tests/testthat/test-json-roundtrip.R")
 # ============================================================
 
 
@@ -105,6 +121,32 @@ import_survey <- function(
     stop("Unrecognised format: '", ext, "'. Use sas/dta/sav/parquet/rds.")
   )
 
+  # Replace "" with NA in all character/factor columns (incl. haven_labelled on
+  # character base). Done here so downstream counts/freqs are never corrupted by
+  # empty-string pseudo-values.
+  # NOTE: dplyr::na_if() on haven_labelled triggers vec_cast -> validate_labelled()
+  # which fails when val_labels contain duplicates. Bypass by modifying the
+  # underlying values directly and restoring attributes.
+  .zap_empty_str <- function(col) {
+    if (is.factor(col)) {
+      if ("" %in% levels(col)) {
+        col[col == ""] <- NA
+        col <- droplevels(col)
+      }
+      return(col)
+    }
+    # character (possibly haven_labelled): preserve all attributes
+    attrs <- attributes(col)
+    col_raw <- as.character(col)
+    col_raw[!is.na(col_raw) & col_raw == ""] <- NA_character_
+    attributes(col_raw) <- attrs
+    col_raw
+  }
+  df <- dplyr::mutate(df, dplyr::across(
+    dplyr::where(~ is.character(.) || is.factor(.)),
+    .zap_empty_str
+  ))
+
   if (isTRUE(upper_names)) {
     names(df) <- toupper(names(df))
   }
@@ -137,7 +179,7 @@ import_survey <- function(
 #   x              Character vector to normalize.
 #   to_guillemets  If TRUE, replace "text" with «text» (for display/labels).
 #                  Keep FALSE for comparisons (missing_chr matching, etc.).
-.normalize_text <- function(x, to_guillemets = FALSE) {
+.normalize_text <- function(x, to_guillemets = FALSE, sanitize = FALSE) {
   if (!is.character(x) || length(x) == 0) return(x)
 
   # 1. Ensure UTF-8 — use stringi when available, fall back to iconv
@@ -166,7 +208,280 @@ import_survey <- function(
   # 5. Trim and collapse internal whitespace runs
   x <- gsub("\\s+", " ", stringr::str_trim(x))
 
+  # 6. Sanitize for storage: replace chars that break downstream parsing
+  if (sanitize) {
+    x <- gsub("|",       " / ", x, fixed = TRUE)  # field separator in SET: lines
+    x <- gsub('"',       "'",   x, fixed = TRUE)  # breaks JSON encoding
+    x <- gsub("\t",      " ",   x, fixed = TRUE)  # TAB = API output field separator
+    x <- gsub("[\r\n]+", " ",   x)                # newlines break line-oriented parsing
+    x <- trimws(gsub("\\s{2,}", " ", x))          # collapse double spaces created above
+  }
+
   x
+}
+
+
+.clean_var_label_for_api <- function(var_label, var_name = NULL) {
+  # Strip Stata-style variable name prefix — redundant since the variable name
+  # is already the JSON key / SET: id field.
+  # Examples stripped: "Q19E_age. ", "EMP10_annee. ", "Q2. ", "NET3. "
+  # When var_name is supplied, match specifically against it (case-insensitive,
+  # allowing a lowercase suffix like "_age" or "_annee" after the base name).
+  # This avoids stripping ordinary French words that happen to start a label.
+  if (!is.null(var_name) && nzchar(var_name)) {
+    pat <- paste0("(?i)^", gsub("([.^$*+?|(){}\\[\\]\\\\])", "\\\\\\1", var_name),
+                  "[a-z0-9_]*[.:]?\\s+")
+    sub(pat, "", var_label, perl = TRUE)
+  } else {
+    # Fallback: generic pattern (only when var_name unavailable)
+    sub("^[A-Za-z][A-Za-z0-9_]*[0-9]*[a-z]?[0-9]*[._]?\\s+", "", var_label)
+  }
+}
+
+
+# Formats one SET: line for the ai_classify_roles() prompt.
+# Used for both real input lines and system-prompt examples so their format is identical.
+# [] and {} inside labels are preserved; only round parentheses are stripped.
+.format_classify_jsonl <- function(var_name, var_label, detected_role,
+                                    labels, values, missing_vals,
+                                    n_distinct, max_labels = 5L) {
+  cur_role <- switch(detected_role,
+    factor_binary  = "factor_binary",
+    factor_nominal = "factor_nominal",
+    integer        = "integer",
+    "unknown")
+
+  is_miss_lbl <- as.character(values) %in% as.character(missing_vals)
+  non_miss    <- .normalize_text(labels[!is_miss_lbl & nzchar(labels)])
+
+  strip_parens <- function(x, max_chars = 50L) {
+    for (i in seq_len(3)) x <- gsub("\\([^()]*\\)", "", x)
+    x <- trimws(gsub("\\s{2,}", " ", x))
+    substr(x, 1L, max_chars)
+  }
+
+  shown   <- strip_parens(head(non_miss, max_labels))
+  n_total <- length(non_miss)
+  if (n_total > max_labels) shown <- c(shown, paste0("+", n_total - max_labels, " more"))
+
+  obj <- list(
+    id     = var_name,
+    label  = substr(.clean_var_label_for_api(var_label, var_name = var_name), 1L, 55L),
+    cur    = cur_role,
+    nd     = as.integer(n_distinct),
+    levels = shown
+  )
+
+  # nd:0 case — only missing codes present, classify from label alone
+  if (n_total == 0L && length(missing_vals) > 0L) {
+    miss_shown <- head(.normalize_text(missing_vals[nzchar(missing_vals)]), max_labels)
+    obj$levels <- NULL
+    obj$miss   <- miss_shown
+  }
+
+  as.character(jsonlite::toJSON(obj, auto_unbox = TRUE))
+}
+
+
+# ---------------------------------------------------------------------------
+# Parse a json_example block from the classify_roles prompt .md file.
+# Input: raw JSON text from inside a ```json_example fenced block.
+# Returns a list of example objects, one per variable in the JSON.
+# Each object has $input_args (for .format_classify_jsonl()) and $expected
+# (a JSONL output string like '{"id":"X","role":"factor_ordinal","desc":"high_first"}').
+# ---------------------------------------------------------------------------
+.parse_json_example_block <- function(json_text) {
+  parsed <- jsonlite::fromJSON(json_text, simplifyVector = FALSE)
+  if (!is.list(parsed) || length(parsed) == 0) return(list())
+
+  # Map cur code (from source JSON) to detected_role for .format_classify_jsonl()
+  cur_to_role <- c(
+    factor_nominal = "factor_nominal", factor_binary = "factor_binary",
+    F = "factor_nominal", B = "factor_binary",
+    I = "integer", "?" = "unknown"
+  )
+
+  purrr::imap(parsed, function(var_def, var_name) {
+    var_label <- var_def$var_label %||% ""
+    role      <- var_def$role %||% "factor_nominal"
+    cur       <- var_def$cur %||% "factor_nominal"
+    levs      <- var_def$levels %||% list()
+
+    # Separate missing from non-missing levels
+    lev_keys    <- names(levs)
+    is_miss     <- purrr::map_lgl(levs, ~ isTRUE(.x$missing) || isTRUE(.x$null_coded))
+    miss_keys   <- lev_keys[is_miss]
+    valid_keys  <- lev_keys[!is_miss]
+    valid_levs  <- levs[valid_keys]
+
+    # Sort non-missing levels by order field (ascending) if present
+    orders <- purrr::map_int(valid_levs, function(lv) {
+      as.integer(lv$order %||% NA_integer_)
+    })
+    if (!all(is.na(orders))) {
+      sort_idx   <- order(orders, na.last = TRUE)
+      valid_keys <- valid_keys[sort_idx]
+      valid_levs <- valid_levs[sort_idx]
+      orders     <- orders[sort_idx]
+    }
+
+    labels_vec <- unname(purrr::map_chr(valid_levs, ~ .x$label %||% ""))
+    n_distinct <- length(valid_keys)
+
+    # Determine direction: explicit "desc" field overrides inference from order
+    dir_code <- ""
+    explicit_desc <- var_def$desc %||% ""
+    if (nzchar(explicit_desc) && explicit_desc %in%
+        c("high_first", "low_first", "unknown")) {
+      dir_code <- explicit_desc
+    } else if (role %in% c("factor_ordinal", "factor_binary") &&
+               n_distinct >= 2 && !all(is.na(orders))) {
+      first_order <- orders[[1]]
+      last_order  <- orders[[n_distinct]]
+      if (!is.na(first_order) && !is.na(last_order)) {
+        if (first_order < last_order) {
+          dir_code <- "high_first"   # order=1 (top rank) is first shown
+        } else if (first_order > last_order) {
+          dir_code <- "low_first"    # order=N (bottom rank) is first shown
+        }
+      }
+    }
+
+    # Build expected output as JSONL string
+    out_obj <- list(id = var_name, role = role)
+    if (nzchar(dir_code)) out_obj$desc <- dir_code
+    expected <- as.character(jsonlite::toJSON(out_obj, auto_unbox = TRUE))
+
+    # Build values vector: use numeric codes if they look numeric, else character
+    values_vec <- if (all(grepl("^[0-9]+$", c(valid_keys, miss_keys)))) {
+      as.integer(c(valid_keys, miss_keys))
+    } else {
+      seq_along(c(valid_keys, miss_keys))
+    }
+
+    # All labels including missing (for .format_classify_jsonl)
+    miss_labels <- unname(purrr::map_chr(levs[miss_keys], ~ .x$label %||% ""))
+    all_labels  <- c(labels_vec, miss_labels)
+    all_values  <- values_vec
+
+    # Missing vals: use the values corresponding to missing keys
+    miss_values <- if (length(miss_keys) > 0) {
+      tail(all_values, length(miss_keys))
+    } else {
+      integer(0)
+    }
+
+    # Map cur to detected_role
+    detected_role <- unname(cur_to_role[cur])
+    if (is.na(detected_role)) detected_role <- "factor_nominal"
+
+    list(
+      input_args = list(
+        var_name      = var_name,
+        var_label     = var_label,
+        detected_role = detected_role,
+        labels        = all_labels,
+        values        = all_values,
+        missing_vals  = miss_values,
+        n_distinct    = as.integer(n_distinct)
+      ),
+      expected = expected
+    )
+  })
+}
+
+
+# ---------------------------------------------------------------------------
+# Build the classify_roles system prompt from the external .md file.
+# Processes conditional sections (ordinal_desc) and replaces json_example
+# blocks with formatted JSONL Input/Output pairs using .format_classify_jsonl().
+# ---------------------------------------------------------------------------
+.build_classify_system_prompt <- function(prompt_path, ordinal_desc,
+                                          max_labels_sent = 5L) {
+  md_text <- paste(
+    readLines(prompt_path, encoding = "UTF-8", warn = FALSE),
+    collapse = "\n"
+  )
+
+  # --- Process conditional sections ---
+  if (ordinal_desc) {
+    # Remove "IF NOT ordinal_desc" blocks, keep "IF ordinal_desc" content
+    md_text <- gsub(
+      "<!-- IF NOT ordinal_desc -->[\\s\\S]*?<!-- ENDIF NOT ordinal_desc -->",
+      "", md_text, perl = TRUE
+    )
+    md_text <- gsub(
+      "<!-- IF ordinal_desc -->|<!-- ENDIF ordinal_desc -->",
+      "", md_text
+    )
+  } else {
+    # Remove "IF ordinal_desc" blocks, keep "IF NOT ordinal_desc" content
+    md_text <- gsub(
+      "<!-- IF ordinal_desc -->[\\s\\S]*?<!-- ENDIF ordinal_desc -->",
+      "", md_text, perl = TRUE
+    )
+    md_text <- gsub(
+      "<!-- IF NOT ordinal_desc -->|<!-- ENDIF NOT ordinal_desc -->",
+      "", md_text
+    )
+  }
+
+  # --- Replace json_example blocks with formatted JSONL Input/Output pairs ---
+  block_pattern <- "```json_example\\s*\\n([\\s\\S]*?)```\\s*\\n?"
+  matches <- gregexpr(block_pattern, md_text, perl = TRUE)[[1]]
+
+  if (matches[[1]] != -1L) {
+    match_starts  <- as.integer(matches)
+    match_lengths <- attr(matches, "match.length")
+
+    # Process in reverse order to preserve positions
+    for (i in rev(seq_along(match_starts))) {
+      full_match <- substr(md_text, match_starts[[i]],
+                           match_starts[[i]] + match_lengths[[i]] - 1L)
+      # Extract JSON content
+      json_text <- sub(
+        "```json_example\\s*\\n([\\s\\S]*?)```\\s*\\n?", "\\1",
+        full_match, perl = TRUE
+      )
+
+      examples <- tryCatch(
+        .parse_json_example_block(json_text),
+        error = function(e) {
+          warning("Failed to parse json_example block: ", e$message)
+          list()
+        }
+      )
+
+      if (length(examples) > 0) {
+        formatted <- purrr::map_chr(examples, function(ex) {
+          args <- ex$input_args
+          input_line <- .format_classify_jsonl(
+            var_name      = args$var_name,
+            var_label     = args$var_label,
+            detected_role = args$detected_role,
+            labels        = args$labels,
+            values        = args$values,
+            missing_vals  = args$missing_vals,
+            n_distinct    = args$n_distinct,
+            max_labels    = max_labels_sent
+          )
+          paste0("Input:  ", input_line, "\nOutput: ", ex$expected)
+        })
+        replacement <- paste0(paste(formatted, collapse = "\n\n"), "\n")
+
+        md_text <- paste0(
+          substr(md_text, 1L, match_starts[[i]] - 1L),
+          replacement,
+          substr(md_text, match_starts[[i]] + match_lengths[[i]], nchar(md_text))
+        )
+      }
+    }
+  }
+
+  # Clean up excess blank lines
+  md_text <- gsub("\n{3,}", "\n\n", md_text)
+
+  md_text
 }
 
 
@@ -177,22 +492,24 @@ import_survey <- function(
 # ---------------------------------------------------------------------------
 # Back up the current meta_json before overwriting it.
 # Creates .survey_meta/ directory next to path if absent.
-# Names: {stem}_{step}_{YYYYMMDD}.json  (appends _2, _3 if already exists).
+# Names: {stem}_{YYYYMMDD_HHMM}_{step}.json  (appends _2, _3 if already exists).
+# "_survey_meta" in stem is shortened to "_meta" for cleaner filenames.
 .backup_meta_json <- function(path, step) {
   if (!file.exists(path)) return(invisible(NULL))
   dir_path  <- dirname(path)
   stem      <- tools::file_path_sans_ext(basename(path))
+  stem      <- sub("_survey_meta$", "_meta", stem)
   backup_dir <- file.path(dir_path, ".survey_meta")
   if (!dir.exists(backup_dir))
     dir.create(backup_dir, recursive = TRUE, showWarnings = FALSE)
 
-  date_str  <- format(Sys.Date(), "%Y%m%d")
-  base_name <- paste0(stem, "_", step, "_", date_str, ".json")
+  date_str  <- format(Sys.time(), "%Y%m%d_%H%M")
+  base_name <- paste0(stem, "_", date_str, "_", step, ".json")
   dest      <- file.path(backup_dir, base_name)
   suffix    <- 2L
   while (file.exists(dest)) {
     dest <- file.path(backup_dir,
-                      paste0(stem, "_", step, "_", date_str, "_", suffix, ".json"))
+                      paste0(stem, "_", date_str, "_", step, "_", suffix, ".json"))
     suffix <- suffix + 1L
   }
   file.copy(path, dest, overwrite = FALSE)
@@ -200,18 +517,101 @@ import_survey <- function(
 }
 
 # ---------------------------------------------------------------------------
-# Read the unified survey_meta.json.
+# Read the unified survey_meta.json, auto-migrating v3 format (desc/null_coded)
+# to v4 format (order/missing) if needed.
 # Returns list(config = list(), variables = list()) if file absent or malformed.
 .read_meta_json <- function(path) {
   empty <- list(config = list(), variables = list())
   if (is.null(path) || !nzchar(path) || !file.exists(path)) return(empty)
-  tryCatch(
+  data <- tryCatch(
     jsonlite::read_json(path, simplifyVector = FALSE),
     error = function(e) {
       warning(".read_meta_json: could not parse '", path, "': ", conditionMessage(e))
       empty
     }
   )
+  # Auto-migrate v3 → v4 if any variable still uses desc/null_coded
+  result <- .migrate_meta_json_v3_to_v4(data, path)
+  result
+}
+
+# ---------------------------------------------------------------------------
+# Migrate v3 JSON format (desc boolean + null_coded) to v4 (order integer + missing).
+# Idempotent: if "order" already exists on a level, it is left unchanged.
+# Writes the migrated JSON back to disk (with backup) only if changes were made.
+.migrate_meta_json_v3_to_v4 <- function(data, path) {
+  vars <- data$variables
+  if (is.null(vars) || length(vars) == 0) return(data)
+
+  n_migrated <- 0L
+  for (vname in names(vars)) {
+    entry  <- vars[[vname]]
+    levels <- entry$levels
+    if (is.null(levels) || length(levels) == 0) next
+
+    has_v3 <- any(purrr::map_lgl(levels, ~ !is.null(.x$null_coded))) ||
+              !is.null(entry$desc)
+    # Check if any level still lacks "order" and is not missing
+    any_needs_order <- any(purrr::map_lgl(levels, function(lev)
+      !isTRUE(lev$missing) && is.null(lev$null_coded) && is.null(lev$order)))
+
+    if (!has_v3 && !any_needs_order) next
+
+    # Determine direction from v3 desc field
+    desc_val <- entry$desc  # TRUE / FALSE / NULL
+    role     <- entry$role
+
+    # Count non-missing levels (those that are neither null_coded nor already missing)
+    non_miss_codes <- names(levels)[!purrr::map_lgl(levels, function(lev)
+      isTRUE(lev$null_coded) || isTRUE(lev$missing))]
+    n_valid <- length(non_miss_codes)
+
+    # Assign sequential order to non-missing levels; apply direction from desc
+    seq_orders <- seq_len(n_valid)
+    if (isTRUE(desc_val) && identical(role, "factor_ordinal") && n_valid >= 2) {
+      # Descending: reverse sequential
+      seq_orders <- rev(seq_orders)
+    }
+
+    valid_idx <- 0L
+    for (val_code in names(levels)) {
+      lev <- levels[[val_code]]
+      # Migrate null_coded → missing
+      if (isTRUE(lev$null_coded)) {
+        vars[[vname]]$levels[[val_code]]$null_coded <- NULL
+        vars[[vname]]$levels[[val_code]]$missing    <- TRUE
+        next
+      }
+      # Assign order if absent
+      if (is.null(lev$order)) {
+        valid_idx <- valid_idx + 1L
+        ord_val   <- seq_orders[[valid_idx]]
+        # For binary: apply desc → swap orders (positive gets 1)
+        if (identical(role, "factor_binary") && !is.null(desc_val)) {
+          if (isTRUE(desc_val) && valid_idx == 1L) ord_val <- 1L
+          if (isTRUE(desc_val) && valid_idx == 2L) ord_val <- 2L
+          if (isFALSE(desc_val) && valid_idx == 1L) ord_val <- 2L
+          if (isFALSE(desc_val) && valid_idx == 2L) ord_val <- 1L
+        }
+        vars[[vname]]$levels[[val_code]]$order <- ord_val
+      }
+    }
+
+    # Remove v3 desc field from variable block
+    vars[[vname]]$desc <- NULL
+    n_migrated <- n_migrated + 1L
+  }
+
+  if (n_migrated == 0L) return(data)
+
+  # Write migrated JSON back with backup
+  data$variables <- vars
+  .backup_meta_json(path, "migrate_v4")
+  .write_meta_json(data, path)
+  message("extract_survey_metadata: migrated ", n_migrated,
+          " variable(s) from v3 JSON format (null_coded/desc \u2192 order/missing) in ",
+          basename(path))
+  data
 }
 
 # ---------------------------------------------------------------------------
@@ -277,7 +677,7 @@ import_survey <- function(
   var_blocks <- character(n_vars)
 
   # scalar field names width (for colon alignment inside variable blocks)
-  scalar_fields <- c("var_label", "role", "desc", "new_name")
+  scalar_fields <- c("var_label", "role", "new_name")
   w_field        <- max(nchar(scalar_fields)) + 2L  # +2 for quotes
 
   for (vi in seq_along(var_names)) {
@@ -296,51 +696,73 @@ import_survey <- function(
       )
     }
 
-    # -- levels sub-block (reuse existing alignment logic) --------------------
+    # -- levels sub-block ------------------------------------------------------
     levels <- entry$levels
     if (is.null(levels) || length(levels) == 0) {
       levels_body <- '      "levels": {}'
     } else {
       n_lev <- length(levels)
-      # has_new_label: only non-null_coded levels with actual new_label
-      has_new_label <- any(purrr::map_lgl(levels, ~ !isTRUE(.x$null_coded) && !is.null(.x$new_label)))
-      has_n         <- any(purrr::map_lgl(levels, ~ !is.null(.x$n)))
-      has_pct       <- any(purrr::map_lgl(levels, ~ !is.null(.x$pct)))
+      # is_missing: level with missing: true (suppressed/non-response)
+      is_missing_vec <- purrr::map_lgl(levels, ~ isTRUE(.x[["missing"]]))
+      has_order     <- any(purrr::map_lgl(levels, ~ !is.null(.x[["order"]])))
+      has_new_label <- any(purrr::map_lgl(levels, ~ !isTRUE(.x[["missing"]]) && !is.null(.x[["new_label"]])))
+      has_n         <- any(purrr::map_lgl(levels, ~ !is.null(.x[["n"]])))
+      has_pct       <- any(purrr::map_lgl(levels, ~ !is.null(.x[["pct"]])))
 
       val_keys  <- names(levels)
       f_key     <- paste0('"', purrr::map_chr(val_keys, esc), '"')
       f_label   <- purrr::map_chr(levels, function(lev)
-                     paste0('"', esc(as.character(lev$label)), '"'))
+                     paste0('"', esc(as.character(lev[["label"]])), '"'))
+      # order column: integer for valid levels, blank for missing levels
+      f_order   <- if (has_order) purrr::map_chr(levels, function(lev)
+                     if (!isTRUE(lev[["missing"]]) && !is.null(lev[["order"]]))
+                       as.character(as.integer(lev[["order"]]))
+                     else "") else NULL
       f_new_lbl <- if (has_new_label) purrr::map_chr(levels, function(lev)
-                     if (!isTRUE(lev$null_coded) && !is.null(lev$new_label))
-                       paste0('"', esc(as.character(lev$new_label)), '"')
+                     if (!isTRUE(lev[["missing"]]) && !is.null(lev[["new_label"]]))
+                       paste0('"', esc(as.character(lev[["new_label"]])), '"')
                      else '""') else NULL
-      f_n       <- if (has_n) purrr::map_chr(levels, function(lev)
-                     if (!is.null(lev$n) && !is.na(lev$n)) as.character(as.integer(lev$n)) else "") else NULL
-      f_pct     <- if (has_pct) purrr::map_chr(levels, function(lev)
-                     if (!is.null(lev$pct) && !is.na(lev$pct)) as.character(as.integer(lev$pct)) else "") else NULL
+      f_n       <- if (has_n) purrr::map_chr(levels, function(lev) {
+                     v <- lev[["n"]]
+                     if (!is.null(v) && length(v) == 1L && !is.na(v)) as.character(as.integer(v)) else ""
+                   }) else NULL
+      f_pct     <- if (has_pct) purrr::map_chr(levels, function(lev) {
+                     v <- lev[["pct"]]
+                     if (!is.null(v) && length(v) == 1L && !is.na(v)) as.character(as.integer(v)) else ""
+                   }) else NULL
 
       w_key   <- max(nchar(f_key,   type = "chars"), na.rm = TRUE)
+      # order column width: max of non-empty order strings (right-aligned integers)
+      w_order <- if (has_order) {
+        non_empty <- f_order[nzchar(f_order)]
+        if (length(non_empty) > 0) max(nchar(non_empty, type = "chars")) else 1L
+      } else 0L
       w_label <- max(nchar(f_label, type = "chars"), na.rm = TRUE)
       w_new   <- if (has_new_label) max(nchar(f_new_lbl, type = "chars"), na.rm = TRUE) else 0L
-      w_n     <- if (has_n)   max(nchar(f_n,   type = "chars"), na.rm = TRUE) else 0L
-      w_pct   <- if (has_pct) max(nchar(f_pct, type = "chars"), na.rm = TRUE) else 0L
+      w_n     <- if (has_n) { ne <- f_n[nzchar(f_n)];     if (length(ne) > 0) max(nchar(ne,  type = "chars")) else 1L } else 0L
+      w_pct   <- if (has_pct) { ne <- f_pct[nzchar(f_pct)]; if (length(ne) > 0) max(nchar(ne,  type = "chars")) else 1L } else 0L
 
       level_lines <- character(n_lev)
       for (i in seq_len(n_lev)) {
         lev     <- levels[[i]]
-        is_null <- isTRUE(lev$null_coded)
+        is_miss <- is_missing_vec[[i]]
         tokens  <- character(0)
-        tokens  <- c(tokens, paste0('"label": ', rpad(f_label[[i]], w_label)))
-        # new_label: only for non-null_coded levels
-        if (has_new_label && !is_null)
+        # "order" before "label" — right-aligned integer; only for non-missing levels
+        if (has_order && !is_miss && !is.null(lev[["order"]])) {
+          ord_str <- formatC(f_order[[i]], width = w_order, flag = " ")
+          tokens  <- c(tokens, paste0('"order": ', ord_str))
+        }
+        # "missing": true before "label" for missing levels
+        if (is_miss) tokens <- c(tokens, '"missing": true')
+        tokens <- c(tokens, paste0('"label": ', rpad(f_label[[i]], w_label)))
+        # new_label: only for non-missing levels
+        if (has_new_label && !is_miss)
           tokens <- c(tokens, paste0('"new_label": ', rpad(f_new_lbl[[i]], w_new)))
-        if (is_null) {
-          tokens <- c(tokens, '"null_coded": true')
-        } else {
-          if (has_n && !is.null(lev$n))
+        # n / pct: only for non-missing levels
+        if (!is_miss) {
+          if (has_n && !is.null(lev[["n"]]))
             tokens <- c(tokens, paste0('"n": ',   formatC(f_n[[i]],   width = w_n,   flag = " ")))
-          if (has_pct && !is.null(lev$pct))
+          if (has_pct && !is.null(lev[["pct"]]))
             tokens <- c(tokens, paste0('"pct": ', formatC(f_pct[[i]], width = w_pct, flag = " ")))
         }
         level_lines[[i]] <- paste0('        ', rpad(f_key[[i]], w_key), ': { ',
@@ -383,16 +805,16 @@ import_survey <- function(
     '      "config.missing_chr"              : "Libell\u00e9s textuels trait\u00e9s comme valeurs manquantes ou non-r\u00e9ponses",\n',
     '      "config.yes_labels"               : "Libell\u00e9s qui d\u00e9signent la modalit\u00e9 positive des variables binaires (ex : Oui, Choisi)",\n',
     '      "config.no_labels"                : "Libell\u00e9s qui d\u00e9signent la modalit\u00e9 n\u00e9gative des variables binaires (ex : Non, Non choisi)",\n',
-    '      "variables.VAR.var_label"         : "Intitul\u00e9 original de la question dans le questionnaire (peut \u00eatre modifi\u00e9 pour la documentation)",\n',
-    '      "variables.VAR.role"              : "Type de variable : factor_binary = binaire, factor_ordinal = ordinale (ordre significatif), factor_nominal = nominale (cat\u00e9gories sans ordre), integer_scale = \u00e9chelle num\u00e9rique, integer_count = comptage, double = continu, identifier = identifiant, integer = entier, other = autre",\n',
-    '      "variables.VAR.desc"              : "Sens du tri des modalit\u00e9s. Pour une binaire : true = la modalit\u00e9 positive est en premier. Pour une ordinale : true = ordre d\u00e9croissant (la modalit\u00e9 la plus \u00e9lev\u00e9e en premier). null = non applicable ou inconnu.",\n',
-    '      "variables.VAR.new_name"          : "Nom de la variable dans le fichier de donn\u00e9es final \u2014 c\'est ce nom qu\'il faut utiliser pour conseiller les \u00e9tudiant\u00b7es",\n',
-    '      "variables.VAR.doc_note"          : "Note de documentation libre sur la variable (ajout\u00e9e manuellement)",\n',
-    '      "variables.VAR.levels.CODE.label"     : "Libell\u00e9 original de cette modalit\u00e9 de r\u00e9ponse",\n',
-    '      "variables.VAR.levels.CODE.new_label" : "Libell\u00e9 court pour l\'affichage dans les tableaux (sugg\u00e9r\u00e9 par l\'IA, modifiable)",\n',
-    '      "variables.VAR.levels.CODE.null_coded": "true = cette modalit\u00e9 est une non-r\u00e9ponse ou valeur manquante, exclue de l\'analyse",\n',
-    '      "variables.VAR.levels.CODE.n"         : "Nombre de r\u00e9pondant\u00b7es ayant choisi cette modalit\u00e9",\n',
-    '      "variables.VAR.levels.CODE.pct"       : "Pourcentage de r\u00e9pondant\u00b7es ayant choisi cette modalit\u00e9 (hors valeurs manquantes)"\n',
+    '      "variables.VAR.var_label"              : "Intitul\u00e9 original de la question dans le questionnaire (peut \u00eatre modifi\u00e9 pour la documentation)",\n',
+    '      "variables.VAR.role"                   : "Type de variable : factor_binary = binaire, factor_ordinal = ordinale (ordre significatif), factor_nominal = nominale (cat\u00e9gories sans ordre), integer_scale = \u00e9chelle num\u00e9rique, integer_count = comptage, double = continu, identifier = identifiant, integer = entier, other = autre",\n',
+    '      "variables.VAR.new_name"               : "Nom de la variable dans le fichier de donn\u00e9es final \u2014 c\'est ce nom qu\'il faut utiliser pour conseiller les \u00e9tudiant\u00b7es",\n',
+    '      "variables.VAR.doc_note"               : "Note de documentation libre sur la variable (ajout\u00e9e manuellement)",\n',
+    '      "variables.VAR.levels.CODE.order"      : "Entier \u22651 = position de cette modalit\u00e9 dans le facteur de sortie (ordre croissant). Modalit\u00e9s partageant le m\u00eame entier sont fusionn\u00e9es avant la suggestion de libell\u00e9s (IA). Binaire : 1 = modalit\u00e9 positive (Oui\u2026), 2 = n\u00e9gative. Absent pour les valeurs manquantes.",\n',
+    '      "variables.VAR.levels.CODE.missing"    : "true = cette modalit\u00e9 est une non-r\u00e9ponse ou valeur manquante, exclue de l\'analyse. Pas de champ \'order\' dans ce cas.",\n',
+    '      "variables.VAR.levels.CODE.label"      : "Libell\u00e9 original de cette modalit\u00e9 de r\u00e9ponse",\n',
+    '      "variables.VAR.levels.CODE.new_label"  : "Libell\u00e9 court pour l\'affichage dans les tableaux (sugg\u00e9r\u00e9 par l\'IA, modifiable)",\n',
+    '      "variables.VAR.levels.CODE.n"          : "Nombre de r\u00e9pondant\u00b7es ayant choisi cette modalit\u00e9",\n',
+    '      "variables.VAR.levels.CODE.pct"        : "Pourcentage de r\u00e9pondant\u00b7es ayant choisi cette modalit\u00e9 (hors valeurs manquantes)"\n',
     '    }\n',
     '  }'
   )
@@ -436,17 +858,17 @@ import_survey <- function(
 #'                        non-missing values are classed "integer" (not factor).
 #' @param meta_json       Recommended. Path to the unified \code{*.survey_meta.json}
 #'                        file. If the file does not exist yet, it is created from
-#'                        the current extraction (with auto-detected roles/desc and
+#'                        the current extraction (with auto-detected roles and
 #'                        the config parameters written to the JSON). If the file
 #'                        exists, its \code{config} section is used as defaults for
 #'                        missing_num/missing_chr/yes_labels/no_labels (R args
 #'                        override if explicitly supplied), and its
 #'                        \code{variables} section overrides auto-detected role,
-#'                        desc, new_labels, new_name for each variable.
+#'                        order, new_labels, new_name for each variable.
 #'                        Edit the JSON between steps for manual corrections.
 #'
 #' @return A tibble with columns:
-#'   var_name, var_label, r_class, n_distinct, detected_role, desc,
+#'   var_name, var_label, r_class, n_distinct, detected_role, order,
 #'   values, labels, missing_vals, new_labels, new_name
 #'
 #' Role taxonomy:
@@ -494,24 +916,15 @@ extract_survey_metadata <- function(
       no_labels <- as.character(unlist(.cfg$no_labels))
   }
 
-  # JSON variable-level role/desc overrides (auto-detected < JSON < R args)
+  # JSON variable-level role overrides (auto-detected < JSON < R args)
   .json_role_overrides <- if (length(.json_vars) > 0) {
     purrr::compact(purrr::imap(.json_vars, ~ {
       r <- .x$role; if (!is.null(r) && nzchar(r)) r else NULL
     }))
   } else list()
-  .json_desc_overrides <- if (length(.json_vars) > 0) {
-    # Keep FALSE (explicit FALSE != NULL); drop NULL and empty list() from JSON null
-    # (jsonlite::write_json serializes R NULL as {}, so filter both NULL and list())
-    Filter(
-      function(x) !is.null(x) && !(is.list(x) && length(x) == 0L),
-      purrr::imap(.json_vars, ~ .x$desc)
-    )
-  } else list()
 
-  # Role/desc overrides come from JSON variables section only
+  # Role overrides come from JSON variables section only
   .effective_roles <- .json_role_overrides
-  .effective_descs <- .json_desc_overrides
 
   default_yes <- c("oui", "choisi", "yes", "vrai", "true",
                    "présent", "actif", "sélectionné", "concerné",
@@ -535,14 +948,18 @@ extract_survey_metadata <- function(
     "\\[nsp\\]|\\[refus\\]|\\[nr\\])"
   )
 
-  binary_lines <- character(0)  # collect console output
+  binary_lines  <- character(0)  # collect console output
+  dropped_lines <- character(0)  # val_labs codes not observed in data
 
   meta <- purrr::imap(df, function(col, vname) {
 
     # --- variable label ---
     var_lbl <- var_labels_list[[vname]]
     if (is.null(var_lbl) || is.na(var_lbl)) var_lbl <- ""
-    var_lbl <- .normalize_text(var_lbl)
+    # Sanitize and strip Stata-style "VARNAME. " prefix — redundant since the
+    # variable name is already the key in the JSON and the tibble var_name column.
+    # Parentheses/brackets are kept (useful for relabeling reference).
+    var_lbl <- .clean_var_label_for_api(.normalize_text(var_lbl, sanitize = TRUE), var_name = vname)
 
     # --- R class: strip haven_labelled/vctrs_vctr to get underlying type ---
     all_classes <- class(col)
@@ -560,15 +977,49 @@ extract_survey_metadata <- function(
 
     # --- values and labels vectors (ALL, including missing candidates) ---
     if (has_val_labs) {
-      raw_values <- unname(val_labs)
-      raw_labels <- .normalize_text(names(val_labs))
+      # Sort by numeric value code — Stata's label-definition order may be
+      # alphabetical by label text, but we always want code-ascending order.
+      sorted_idx <- order(val_labs)
+      all_codes  <- unname(val_labs)[sorted_idx]   # numeric codes
+      all_labels <- .normalize_text(names(val_labs)[sorted_idx], sanitize = TRUE)
+
+      # Inner join: keep only codes that are actually observed in the data.
+      # Strategy: try numeric-numeric match first (handles double/integer columns
+      # where the stored value may be 1.0 but the label code is 1L); fall back to
+      # string comparison when either side contains non-numeric codes (e.g. SPSS
+      # string variables with text value labels).
+      obs_num  <- suppressWarnings(as.numeric(as.character(vals_present)))
+      code_num <- suppressWarnings(as.numeric(as.character(all_codes)))
+      if (!anyNA(obs_num) && !anyNA(code_num)) {
+        keep <- code_num %in% obs_num
+      } else {
+        obs_chr  <- as.character(vals_present)
+        keep     <- as.character(all_codes) %in% obs_chr
+      }
+
+      # Collect dropped codes for a single summary message after the loop.
+      dropped_codes  <- all_codes[!keep]
+      dropped_labels <- all_labels[!keep]
+      if (length(dropped_codes) > 0) {
+        dropped_lines <<- c(dropped_lines,
+          purrr::map_chr(seq_along(dropped_codes), function(di) {
+            sprintf("  %-20s  code=%-6s  \"%s\"",
+                    vname,
+                    as.character(dropped_codes[[di]]),
+                    dropped_labels[[di]])
+          })
+        )
+      }
+
+      raw_values <- all_codes[keep]
+      raw_labels <- all_labels[keep]
     } else if (is.factor(col)) {
       raw_values <- levels(col)
-      raw_labels <- .normalize_text(levels(col))
+      raw_labels <- .normalize_text(levels(col), sanitize = TRUE)
     } else {
       sorted_vals <- sort(vals_present)
       raw_values  <- as.character(sorted_vals)
-      raw_labels  <- .normalize_text(as.character(sorted_vals))
+      raw_labels  <- .normalize_text(as.character(sorted_vals), sanitize = TRUE)
     }
 
     # --- flag candidate missing values (unified: numeric code + label text) ---
@@ -594,20 +1045,11 @@ extract_survey_metadata <- function(
       n_clean, vals_clean, lbls_clean, yes_kw, no_kw, r_class
     )
     detected_role <- role_out$role
-    desc_auto     <- role_out$desc
+    pos_idx_auto  <- role_out$pos_idx   # 1L/2L/NA for binary; NA for others
 
     # Override role: from JSON variables section
     if (vname %in% names(.effective_roles)) {
       detected_role <- .effective_roles[[vname]]
-    }
-    # Override desc: from JSON variables section
-    desc_val <- if (vname %in% names(.effective_descs)) {
-      # Coerce to logical scalar; guard against stray list() from JSON null
-      d <- .effective_descs[[vname]]
-      if (is.null(d) || (is.list(d) && length(d) == 0L)) NA
-      else as.logical(d[[1]])
-    } else {
-      desc_auto
     }
 
     # --- new_labels: copy of labels with missing candidates pre-marked as "NULL" ---
@@ -618,25 +1060,54 @@ extract_survey_metadata <- function(
       raw_values      <- character(0)
       raw_labels      <- character(0)
       new_labels_init <- character(0)
+      is_miss         <- logical(0)
+    }
+
+    # --- order vector: initial sequential assignment for non-missing levels ---
+    # For binary vars with known positive position, assign order=1 to positive.
+    # order column is populated from JSON by metadata_apply_meta_json(); here we
+    # just create a default sequential vector as the baseline.
+    n_lev <- length(raw_values)
+    order_init <- if (n_lev > 0) {
+      valid_pos <- 0L
+      purrr::imap_int(seq_len(n_lev), function(idx, ...) {
+        if (length(is_miss) >= idx && is_miss[[idx]]) {
+          NA_integer_
+        } else {
+          valid_pos <<- valid_pos + 1L
+          valid_pos
+        }
+      })
+    } else integer(0)
+
+    # For binary with known positive: swap order so positive=1, negative=2
+    if (detected_role == "factor_binary" && !is.na(pos_idx_auto) && n_lev >= 2) {
+      non_null_idx <- which(!is_miss)
+      if (length(non_null_idx) >= 2) {
+        pos_in_nonnull <- if (pos_idx_auto == 1L) non_null_idx[1] else non_null_idx[2]
+        neg_in_nonnull <- if (pos_idx_auto == 1L) non_null_idx[2] else non_null_idx[1]
+        order_init[pos_in_nonnull] <- 1L
+        order_init[neg_in_nonnull] <- 2L
+      }
     }
 
     # --- console output for factor_binary detection ---
     if (detected_role == "factor_binary") {
       lv1 <- if (length(lbls_clean) >= 1) lbls_clean[[1]] else "?"
       lv2 <- if (length(lbls_clean) >= 2) lbls_clean[[2]] else "?"
-      if (is.na(desc_val)) {
+      if (is.na(pos_idx_auto)) {
         tag      <- "[factor_binary?]"
-        desc_str <- "desc=NA, needs review"
-      } else if (isTRUE(desc_val)) {
+        pos_str  <- "positive unknown — needs ai_classify_roles()"
+      } else if (pos_idx_auto == 1L) {
         tag      <- "[factor_binary] "
-        desc_str <- "positive=first (desc=TRUE) \u2713"
+        pos_str  <- "positive=first \u2713"
       } else {
         tag      <- "[factor_binary] "
-        desc_str <- "positive=second (desc=FALSE)"
+        pos_str  <- "positive=second"
       }
       binary_lines <<- c(binary_lines,
         sprintf("%s %-20s: \"%s\" vs \"%s\" \u2014 %s",
-                tag, vname, lv1, lv2, desc_str))
+                tag, vname, lv1, lv2, pos_str))
     }
 
     tibble::tibble(
@@ -645,31 +1116,57 @@ extract_survey_metadata <- function(
       r_class       = r_class,
       n_distinct    = n_dist,
       detected_role = detected_role,
-      desc          = desc_val,
       values        = list(raw_values),
       labels        = list(raw_labels),
       missing_vals  = list(missing_vals_vec),
       new_labels    = list(new_labels_init),
-      new_name      = vname
+      new_name      = vname,
+      order         = list(order_init)
     )
   }) |>
     dplyr::bind_rows()
 
   # --- Console summary ---
+  # Binary vars needing review: factor_binary where no level has order=1
+  # (positive not yet resolved — order still at sequential default 1,2 from auto-detect)
+  binary_needs_review <- purrr::map_lgl(seq_len(nrow(meta)), function(i) {
+    row <- meta[i, ]
+    if (row$detected_role != "factor_binary") return(FALSE)
+    ord <- row$order[[1]]
+    non_miss <- ord[!is.na(ord)]
+    # If all orders are sequential (no swap), positive is unknown
+    length(non_miss) >= 2 && !any(non_miss == 1L & non_miss != seq_along(non_miss[!is.na(ord)]))
+  })
   n_needs_ai <- sum(meta$detected_role %in% c("factor_nominal", "integer") |
-                    (meta$detected_role == "factor_binary" & is.na(meta$desc)))
+                    binary_needs_review)
   message("\nextract_survey_metadata: ", nrow(meta), " variables | ",
           nrow(df), " observations")
   message("  Roles: ",
           paste(names(table(meta$detected_role)),
                 table(meta$detected_role), sep = "=", collapse = "  "))
+  if (length(dropped_lines) > 0) {
+    hdr <- paste0("\nextract_survey_metadata: ",
+                  length(dropped_lines),
+                  " value label(s) dropped (code not observed in data):")
+    if (length(dropped_lines) <= 900L) {
+      message(hdr, "\n", paste(dropped_lines, collapse = "\n"))
+    } else {
+      tmp <- tempfile(fileext = ".txt")
+      writeLines(c(sub("^\n", "", hdr), dropped_lines), tmp)
+      message(hdr, "\n  (output too long — opening in editor: ", tmp, ")")
+      tryCatch(
+        rstudioapi::navigateToFile(tmp),
+        error = function(e) utils::file.edit(tmp)
+      )
+    }
+  }
   if (length(binary_lines) > 0) {
     message("\nBinary variables (factor_binary) detected:")
     purrr::walk(binary_lines, message)
   }
   if (n_needs_ai > 0) {
     message("\n[!] ", n_needs_ai, " variable(s) may need role refinement",
-            " (factor_nominal / integer / factor_binary with desc=NA).")
+            " (factor_nominal / integer / factor_binary with unknown positive level).")
     message("    Run ai_classify_roles(meta, meta_json = meta_json) to classify roles.")
   }
 
@@ -702,8 +1199,8 @@ extract_survey_metadata <- function(
                                datapath    = attr(df, "path"))
       message("extract_survey_metadata: created ", meta_json)
     } else {
-      # On re-run: sync null_coded flags and optionally update config
-      .updated_vars <- .update_null_coded_in_meta_json(.meta_json_data$variables, meta)
+      # On re-run: sync missing flags and optionally update config
+      .updated_vars <- .update_missing_in_meta_json(.meta_json_data$variables, meta)
       .updated_cfg  <- .meta_json_data$config
       if (.missing_num_explicit)
         .updated_cfg$missing_num <- as.list(.missing_num_used)
@@ -718,7 +1215,7 @@ extract_survey_metadata <- function(
           !identical(.updated_cfg,  .meta_json_data$config)) {
         .backup_meta_json(meta_json, "reextract")
         .write_meta_json(list(config = .updated_cfg, variables = .updated_vars), meta_json)
-        message("extract_survey_metadata: updated null_coded/config in ", meta_json)
+        message("extract_survey_metadata: updated missing flags/config in ", meta_json)
       }
     }
   }
@@ -727,7 +1224,10 @@ extract_survey_metadata <- function(
 }
 
 
-# Internal role detection v3 — not exported
+# Internal role detection v4 — not exported
+# Returns list(role, pos_idx) where pos_idx is:
+#   - For factor_binary: 1L if positive label is first, 2L if second, NA_integer_ if unknown
+#   - For all other roles: NA_integer_
 .detect_role_v3 <- function(
     vname, col, has_val_labs, n_dist_total, n_rows,
     n_clean, vals_clean, lbls_clean, yes_kw, no_kw, r_class
@@ -735,25 +1235,25 @@ extract_survey_metadata <- function(
   # 1. Identifier: ID name or all (total) values unique
   id_pattern <- "^(IDENT|IDENTIF|IDENTIFIANT|ID|_ID|ID_|NUMEN|NUMIDENT)$"
   if (grepl(id_pattern, vname, ignore.case = TRUE) || n_dist_total == n_rows) {
-    return(list(role = "identifier", desc = NA))
+    return(list(role = "identifier", pos_idx = NA_integer_))
   }
 
   # 2. Labelled column → factor_binary (2 clean levels) or factor_nominal (>=3)
   if (has_val_labs) {
     if (n_clean == 2) {
-      desc <- .find_binary_desc(lbls_clean, yes_kw, no_kw)
-      return(list(role = "factor_binary", desc = desc))
+      pos_idx <- .find_binary_desc(lbls_clean, yes_kw, no_kw)
+      return(list(role = "factor_binary", pos_idx = pos_idx))
     }
-    return(list(role = "factor_nominal", desc = NA))
+    return(list(role = "factor_nominal", pos_idx = NA_integer_))
   }
 
   # 3. Factor column (no val_labs but is.factor)
   if (is.factor(col)) {
     if (n_clean == 2) {
-      desc <- .find_binary_desc(lbls_clean, yes_kw, no_kw)
-      return(list(role = "factor_binary", desc = desc))
+      pos_idx <- .find_binary_desc(lbls_clean, yes_kw, no_kw)
+      return(list(role = "factor_binary", pos_idx = pos_idx))
     }
-    return(list(role = "factor_nominal", desc = NA))
+    return(list(role = "factor_nominal", pos_idx = NA_integer_))
   }
 
   # 4. Unlabelled numeric: distinguish double (any non-whole value) from integer
@@ -761,28 +1261,29 @@ extract_survey_metadata <- function(
     vals_num <- suppressWarnings(as.numeric(vals_clean))
     vals_num <- vals_num[!is.na(vals_num)]
     if (length(vals_num) > 0 && any(vals_num != floor(vals_num))) {
-      return(list(role = "double", desc = FALSE))
+      return(list(role = "double", pos_idx = NA_integer_))
     }
-    return(list(role = "integer", desc = FALSE))
+    return(list(role = "integer", pos_idx = NA_integer_))
   }
 
   # 5. Character column without labels
   if (is.character(col)) {
     all_int_str <- length(vals_clean) > 0 &&
       all(grepl("^-?[0-9]+$", vals_clean[vals_clean != ""]))
-    if (all_int_str) return(list(role = "integer", desc = FALSE))
-    return(list(role = "factor_nominal", desc = NA))
+    if (all_int_str) return(list(role = "integer", pos_idx = NA_integer_))
+    return(list(role = "factor_nominal", pos_idx = NA_integer_))
   }
 
-  list(role = "other", desc = NA)
+  list(role = "other", pos_idx = NA_integer_)
 }
 
 
-# Internal: determine desc for a 2-level binary variable
-# desc=TRUE  → label order is [positive, negative] e.g. ["Oui","Non"] → "1-Oui","2-Non"
-# desc=FALSE → label order is [negative, positive] e.g. ["Non","Oui"] → will be reordered
+# Internal: determine the position index of the positive label for a 2-level binary variable.
+# Returns 1L if the positive label is first, 2L if second, NA_integer_ if unknown.
+# Used by extract_survey_metadata() to write initial "order" integers to JSON:
+#   pos_idx=1 → order: [1, 2]; pos_idx=2 → order: [2, 1] (positive always gets order=1).
 .find_binary_desc <- function(lbls_clean, yes_kw, no_kw) {
-  if (length(lbls_clean) != 2) return(NA)
+  if (length(lbls_clean) != 2) return(NA_integer_)
 
   lbl_lower    <- tolower(.normalize_text(lbls_clean))
   # Remove numeric prefix: "1-Oui", "1 - Oui", "1. Oui", "1 Oui" → "oui"
@@ -802,14 +1303,14 @@ extract_survey_metadata <- function(
   is_yes <- purrr::map_lgl(lbl_stripped, lbl_matches_kw, kws = yes_kw_lc)
   is_no  <- purrr::map_lgl(lbl_stripped, lbl_matches_kw, kws = no_kw_lc)
 
-  # Exactly one label matches yes and not no → use it
+  # Exactly one label matches yes and not no → return its position index (1 or 2)
   yes_only <- is_yes & !is_no
-  if (sum(yes_only) == 1) return(which(yes_only) == 1L)
+  if (sum(yes_only) == 1) return(as.integer(which(yes_only)))
 
-  # If both labels claim yes (shouldn't happen with good kw lists), return NA
-  if (sum(is_yes) == 1) return(which(is_yes) == 1L)
+  # If both labels claim yes (shouldn't happen with good kw lists), use first match
+  if (sum(is_yes) == 1) return(as.integer(which(is_yes)))
 
-  NA
+  NA_integer_
 }
 
 
@@ -952,6 +1453,152 @@ metadata_add_level_stats <- function(metadata, df, meta_json = NULL) {
 }
 
 
+# ============================================================
+# 2c. metadata_merge_ordinal_levels()
+# ============================================================
+
+#' Compute and write merge groups for ordinal factor levels
+#'
+#' Reads the \code{order} integers already stored in \code{metadata$order}
+#' (set by \code{ai_classify_roles()}), groups contiguous non-missing levels
+#' that fall below the frequency/count thresholds, and re-emits consecutive
+#' group integers so that merged levels share the same \code{order} value.
+#' The result is written back to \code{metadata$order} and, if \code{meta_json}
+#' is supplied, persisted to the JSON file (with a backup).
+#'
+#' Run between \code{metadata_add_level_stats()} and \code{ai_suggest_labels()}.
+#' After this step, review the JSON manually and adjust \code{order} integers
+#' as needed before calling \code{ai_suggest_labels()}.
+#'
+#' @param metadata  Varmod tibble with an \code{order} list-column.
+#' @param vars      Character vector of variable names to process.
+#'                  \code{NULL} (default) = all \code{factor_ordinal} variables.
+#' @param min_pct   Merge threshold as a fraction (e.g. \code{0.05} = 5 \%).
+#'                  Contiguous levels whose cumulative percentage is below this
+#'                  threshold are merged. \code{0} disables percentage threshold.
+#' @param min_n     Merge threshold as an absolute count. \code{0} (default)
+#'                  disables count threshold.
+#' @param meta_json Path to \code{*.survey_meta.json}. When provided, the
+#'                  updated \code{order} integers are written to the file
+#'                  (after a backup). Default \code{NULL}.
+#'
+#' @return Modified metadata tibble (visibly). Variables where at least one
+#'   merge group contains more than one level are reported to the console.
+metadata_merge_ordinal_levels <- function(
+    metadata,
+    vars      = NULL,
+    min_pct   = 0.05,
+    min_n     = 0L,
+    meta_json = NULL
+) {
+  # Target: factor_ordinal rows, optionally filtered by vars
+  target_mask <- metadata$detected_role == "factor_ordinal"
+  if (!is.null(vars)) target_mask <- target_mask & metadata$var_name %in% vars
+  target_idx  <- which(target_mask)
+
+  if (length(target_idx) == 0L) {
+    message("metadata_merge_ordinal_levels: No factor_ordinal variables found.")
+    return(metadata)
+  }
+
+  if (!"order" %in% names(metadata)) {
+    warning("metadata_merge_ordinal_levels: metadata$order column absent. ",
+            "Re-run extract_survey_metadata() with meta_json first.")
+    return(metadata)
+  }
+
+  merged_vars <- character(0)   # variables where at least one merge happened
+
+  for (i in target_idx) {
+    ord_ints  <- metadata$order[[i]]        # integer vector, NA = missing level
+    nls       <- metadata$new_labels[[1L + (i - 1L)]]  # parallel labels
+    # Safer: access list-column element by index
+    nls       <- metadata$new_labels[[i]]
+
+    if (length(ord_ints) == 0L || all(is.na(ord_ints))) next
+
+    # Non-missing level positions (in stored vector order)
+    valid_pos <- which(!is.na(ord_ints))
+    if (length(valid_pos) < 2L) next
+
+    # Sort valid positions by their current order integer (encodes direction)
+    sorted_pos <- valid_pos[order(ord_ints[valid_pos])]
+
+    # Retrieve level stats for merge threshold computation
+    cnts <- metadata$level_counts[[i]]
+    frqs <- metadata$level_freqs[[i]]
+
+    # Build parallel vectors for non-missing levels in sorted order
+    val_codes  <- as.character(metadata$values[[i]])[sorted_pos]
+    counts_s   <- if (!is.null(cnts) && length(cnts) == length(ord_ints))
+                    cnts[sorted_pos] else rep(NA_integer_, length(sorted_pos))
+    freqs_s    <- if (!is.null(frqs) && length(frqs) == length(ord_ints))
+                    frqs[sorted_pos] else rep(NA_real_,    length(sorted_pos))
+
+    # Run merge-group algorithm
+    grp_ids <- .compute_merge_groups(val_codes, counts_s, freqs_s,
+                                     min_pct = min_pct, min_n = min_n)
+
+    # Check if any merge actually happened (group spans > 1 level)
+    grp_tbl <- table(grp_ids)
+    if (any(grp_tbl > 1L)) merged_vars <- c(merged_vars, metadata$var_name[[i]])
+
+    # Re-emit consecutive group integers (1 … n_groups) preserving order.
+    # Levels in the same group get the same integer.
+    n_groups    <- max(grp_ids)
+    new_ord_sorted <- grp_ids  # already consecutive 1…n_groups from .compute_merge_groups
+
+    # Map back to original vector positions
+    new_ord <- ord_ints
+    for (j in seq_along(sorted_pos)) {
+      new_ord[sorted_pos[[j]]] <- new_ord_sorted[[j]]
+    }
+    metadata$order[[i]] <- new_ord
+  }
+
+  # --- Write updated order integers to JSON ---
+  if (!is.null(meta_json)) {
+    .backup_meta_json(meta_json, "merge_ordinal_levels")
+    existing <- .read_meta_json(meta_json)
+
+    for (i in target_idx) {
+      vn       <- metadata$var_name[[i]]
+      if (is.null(existing$variables[[vn]])) next
+      ord_ints <- metadata$order[[i]]
+      vals     <- metadata$values[[i]]
+      levs     <- existing$variables[[vn]]$levels
+      if (is.null(levs)) next
+
+      for (j in seq_along(vals)) {
+        key <- as.character(vals[[j]])
+        if (!key %in% names(levs)) next
+        if (isTRUE(levs[[key]]$missing)) next   # skip missing levels
+        if (is.na(ord_ints[[j]])) next
+        existing$variables[[vn]]$levels[[key]]$order <- ord_ints[[j]]
+      }
+    }
+    .write_meta_json(existing, meta_json)
+    message("metadata_merge_ordinal_levels: order integers written to ",
+            basename(meta_json))
+  }
+
+  # Console report: which variables had at least one merge group
+  if (length(merged_vars) > 0L) {
+    quoted  <- paste0('"', merged_vars, '"', collapse = ',\n      ')
+    message("metadata_merge_ordinal_levels: merges applied to ",
+            length(merged_vars), " variable(s):\n\n",
+            "  meta |>\n",
+            "    filter(\n",
+            "      var_name %in% c(\n",
+            "        ", quoted, ") ) |>\n",
+            "    export_metadata_excel(path = metadata_review_path)\n")
+  } else {
+    message("metadata_merge_ordinal_levels: no levels merged (all above threshold).")
+  }
+
+  metadata
+}
+
 
 # ============================================================
 # 3. metadata_apply_codebook()
@@ -1025,82 +1672,67 @@ metadata_apply_codebook <- function(
 # 4. metadata_fix_binary()
 # ============================================================
 
-#' Standardise binary variable labels using the desc column
+#' Standardise binary variable labels using the order column
 #'
-#' For rows with detected_role == "factor_binary" and desc != NA:
-#'   - desc = TRUE  → labels[[1]] is positive, labels[[2]] is negative
-#'   - desc = TRUE  → labels[[1]] is positive (already first)
-#'   - desc = FALSE → labels[[2]] is positive; values and new_labels are both
-#'     reordered so positive comes first (preserving values↔labels alignment)
+#' For rows with detected_role == "factor_binary" and a valid order vector:
+#'   - The level with order=1 is the positive level (Oui, Choisi…)
+#'   - The level with order=2 is the negative level (Non, Non choisi…)
 #'   - Positive level → "1-<var_label>" (or original label if use_var_label=FALSE)
 #'   - Negative level → "2-Non"
-#'   - Any remaining levels (missing candidates already "NULL") → "NULL"
-#'   - After fix: fct_relevel(..., sort) gives correct 1→2 order in factors
+#'   - Missing levels (order=NA) keep "NULL" sentinel
+#'   - apply_survey_formats() sorts levels by order ascending, so no vector reorder needed
 #'
-#' For rows with desc == NA:
-#'   - Warns and skips. Set desc in the meta_json variables section first.
+#' For binary rows where positive is not yet resolved (no level with order=1):
+#'   - Warns and skips. Run ai_classify_roles() first.
 #'
-#' @param metadata       Varmod tibble.
+#' @param metadata       Varmod tibble (must have order list-column).
 #' @param use_var_label  If TRUE (default), positive level → "1-<var_label>".
-#'                       If FALSE, keeps original positive label text (still adds "1-" prefix).
+#'                       If FALSE, uses original positive label text (still adds "1-" prefix).
 #'
-#' @return Updated metadata tibble. Both new_labels and values reordered for desc=FALSE rows.
+#' @return Updated metadata tibble with new_labels set for binary variables.
 metadata_fix_binary <- function(metadata, use_var_label = TRUE) {
-  unresolved <- metadata |>
-    dplyr::filter(detected_role == "factor_binary", is.na(desc)) |>
-    dplyr::pull(var_name)
+  if (!"order" %in% names(metadata)) {
+    warning("metadata_fix_binary: 'order' column missing. Run extract_survey_metadata() first.")
+    return(metadata)
+  }
 
-  if (length(unresolved) > 0) {
-    warning(length(unresolved), " factor_binary variable(s) with desc=NA skipped: ",
-            paste(unresolved, collapse = ", "),
-            "\nSet desc in the meta_json variables section, then re-run extract_survey_metadata().")
+  # Identify binary rows where positive is not yet resolved (no level with order=1)
+  unresolved <- purrr::map_lgl(seq_len(nrow(metadata)), function(i) {
+    row <- metadata[i, ]
+    if (row$detected_role != "factor_binary") return(FALSE)
+    ord      <- row$order[[1]]
+    non_miss <- ord[!is.na(ord)]
+    length(non_miss) < 2 || !1L %in% non_miss
+  })
+
+  if (any(unresolved)) {
+    warning(sum(unresolved), " factor_binary variable(s) with unresolved positive level skipped: ",
+            paste(metadata$var_name[unresolved], collapse = ", "),
+            "\nRun ai_classify_roles(meta, meta_json = meta_json) to assign order.")
   }
 
   metadata |>
     dplyr::mutate(
-      # Reorder values in sync with new_labels when desc=FALSE
-      values = purrr::pmap(
-        list(detected_role, values, new_labels, desc),
-        function(role, vals, nls, dsc) {
-          if (role != "factor_binary" || is.na(dsc) || isTRUE(dsc)) return(vals)
-          # desc=FALSE: positive is currently second → reorder to [pos, neg, others…]
-          non_null <- which(nls != "NULL")
-          if (length(non_null) < 2) return(vals)
-          pos_idx <- non_null[[2]]; neg_idx <- non_null[[1]]
-          other   <- setdiff(seq_along(vals), c(pos_idx, neg_idx))
-          vals[c(pos_idx, neg_idx, other)]
-        }
-      ),
       new_labels = purrr::pmap(
-        list(detected_role, var_label, new_labels, desc),
-        function(role, lbl, nls, dsc) {
-          if (role != "factor_binary" || is.na(dsc)) return(nls)
+        list(detected_role, var_label, new_labels,
+             if ("order" %in% names(metadata)) order else vector("list", nrow(metadata))),
+        function(role, lbl, nls, ord) {
+          if (role != "factor_binary") return(nls)
+          non_miss <- which(!is.na(ord))
+          if (length(non_miss) < 2) return(nls)
+          # Find the level with order=1 (positive) and order=2 (negative)
+          pos_idx <- non_miss[which(ord[non_miss] == 1L)]
+          neg_idx <- non_miss[which(ord[non_miss] == 2L)]
+          if (length(pos_idx) == 0 || length(neg_idx) == 0) return(nls)
+          pos_idx <- pos_idx[[1]]; neg_idx <- neg_idx[[1]]
 
-          # Identify the two non-NULL positions
-          non_null <- which(nls != "NULL")
-          if (length(non_null) < 2) return(nls)
+          pos_orig  <- nls[[pos_idx]]
+          pos_label <- if (use_var_label && lbl != "") paste0("1-", lbl) else paste0("1-", pos_orig)
+          neg_label <- "2-Non"
 
-          # desc=TRUE: positive is first; desc=FALSE: positive is second
-          pos_idx <- if (isTRUE(dsc)) non_null[[1]] else non_null[[2]]
-          neg_idx <- if (isTRUE(dsc)) non_null[[2]] else non_null[[1]]
-
-          pos_orig <- nls[[pos_idx]]
-          pos_label <- if (use_var_label && lbl != "") {
-            paste0("1-", lbl)
-          } else {
-            paste0("1-", pos_orig)
-          }
-          neg_label <- paste0("2-Non")
-
-          result <- rep("NULL", length(nls))
-          result[[pos_idx]] <- pos_label
-          result[[neg_idx]] <- neg_label
-
-          # If desc=FALSE, reorder so positive (now "1-…") is first
-          if (!isTRUE(dsc)) {
-            other <- setdiff(seq_along(result), c(pos_idx, neg_idx))
-            result <- result[c(pos_idx, neg_idx, other)]
-          }
+          result              <- rep("NULL", length(nls))
+          result[[pos_idx]]   <- pos_label
+          result[[neg_idx]]   <- neg_label
           result
         }
       )
@@ -1121,7 +1753,7 @@ metadata_fix_binary <- function(metadata, use_var_label = TRUE) {
 #' @param metadata        Varmod tibble from extract_survey_metadata().
 #' @param path            Output path. Default: "metadata_review.xlsx".
 #' @param highlight_roles detected_role values to highlight orange.
-#'                        Default: factor_nominal, factor_binary (desc=NA), integer.
+#'                        Default: factor_nominal, factor_binary (order unresolved), integer.
 #' @param show_missing    If FALSE (default), the labels column shows only
 #'                        non-missing labels. If TRUE, shows all labels including
 #'                        missing-flagged ones.
@@ -1177,24 +1809,27 @@ export_metadata_excel <- function(
         list(labels, values, missing_vals),
         ~ collapse_labels(..1, ..2, ..3)
       ),
-      new_labels_str    = purrr::map_chr(new_labels, collapse_new_labels),
-      desc_str          = dplyr::case_when(
-        is.na(desc)  ~ "NA",
-        desc == TRUE ~ "TRUE",
-        .default      = "FALSE"
-      )
+      new_labels_str    = purrr::map_chr(new_labels, collapse_new_labels)
     ) |>
     dplyr::select(
-      var_name, var_label, r_class, detected_role, desc = desc_str, n_distinct,
+      var_name, var_label, r_class, detected_role, n_distinct,
       missing_vals = missing_vals_str,
       labels       = labels_str,
       new_labels   = new_labels_str,
       new_name
     )
 
-  # Also highlight factor_binary rows with desc=NA
-  highlight_rows_extra <- if ("factor_binary" %in% metadata$detected_role) {
-    which(metadata$detected_role == "factor_binary" & is.na(metadata$desc))
+  # Highlight factor_binary rows where positive level is not yet resolved
+  # (no level with order=1 among non-missing levels)
+  highlight_rows_extra <- if ("factor_binary" %in% metadata$detected_role &&
+                               "order" %in% names(metadata)) {
+    which(purrr::map_lgl(seq_len(nrow(metadata)), function(i) {
+      row <- metadata[i, ]
+      if (row$detected_role != "factor_binary") return(FALSE)
+      ord      <- row$order[[1]]
+      non_miss <- ord[!is.na(ord)]
+      length(non_miss) < 2 || !1L %in% non_miss
+    }))
   } else integer(0)
 
   # Remove hidden columns
@@ -1214,9 +1849,9 @@ export_metadata_excel <- function(
   openxlsx::freezePane(wb, "metadata", firstRow = TRUE)
 
   # Column widths — adapt to which columns remain
-  all_cols   <- c("var_name", "var_label", "r_class", "detected_role", "desc",
+  all_cols   <- c("var_name", "var_label", "r_class", "detected_role",
                   "n_distinct", "missing_vals", "labels", "new_labels", "new_name")
-  all_widths <- c(20,          40,           12,        22,              8,
+  all_widths <- c(20,          40,           12,        22,
                   10,           30,            45,        45,             20)
   shown_cols <- intersect(names(df_excel), all_cols)
   shown_w    <- all_widths[match(shown_cols, all_cols)]
@@ -1224,7 +1859,7 @@ export_metadata_excel <- function(
     openxlsx::setColWidths(wb, "metadata", cols = col, widths = w)
   })
 
-  # Orange rows = highlight_roles + factor_binary with desc=NA
+  # Orange rows = highlight_roles + factor_binary with unresolved positive level
   orange_idx <- union(
     which(df_excel$detected_role %in% highlight_roles),
     highlight_rows_extra
@@ -1262,7 +1897,9 @@ export_metadata_excel <- function(
 #'
 #' Terminal step. Applies factor recoding to factor_binary/nominal/ordinal roles.
 #' Values in missing_vals are mapped to NA. new_labels == "NULL" → NA.
-#' factor_ordinal variables keep explicit level order (not alphabetically sorted).
+#' factor_ordinal and factor_binary variables sort levels by the "order" integer
+#' (ascending) from the metadata$order list-column. factor_nominal levels are
+#' sorted alphabetically. Falls back to default factor() when order is absent.
 #'
 #' @param df               Tibble from import_survey().
 #' @param metadata         Fully-reviewed varmod tibble.
@@ -1282,7 +1919,9 @@ apply_survey_formats <- function(df, metadata, uppercase_names = TRUE) {
     nls       <- row$new_labels[[1]]
     miss_vals <- row$missing_vals[[1]]
     role      <- row$detected_role
+    ord_ints  <- if ("order" %in% names(row)) row$order[[1]] else NULL
     is_ord    <- role == "factor_ordinal"
+    is_bin    <- role == "factor_binary"
 
     if (role %in% non_factor_roles) next
     if (length(vals) == 0 || length(nls) == 0) next
@@ -1297,8 +1936,17 @@ apply_survey_formats <- function(df, metadata, uppercase_names = TRUE) {
     miss_char <- as.character(miss_vals)
     recoded   <- dplyr::if_else(raw_char %in% miss_char, NA_character_, recoded)
 
-    df[[vname]] <- factor(recoded)
-    if (!is_ord) df[[vname]] <- forcats::fct_relevel(df[[vname]], sort)
+    # Determine factor level order
+    if ((is_ord || is_bin) && length(ord_ints) == length(nls)) {
+      # Sort non-missing levels by order integer ascending
+      keep_ord  <- ord_ints[keep_mask]
+      ord_order <- order(keep_ord, na.last = NA)
+      lvl_order <- unique(nls[keep_mask][ord_order])
+      df[[vname]] <- factor(recoded, levels = lvl_order, ordered = is_ord)
+    } else {
+      df[[vname]] <- factor(recoded)
+      if (!(is_ord || is_bin)) df[[vname]] <- forcats::fct_relevel(df[[vname]], sort)
+    }
   }
 
   # Rename
@@ -1519,10 +2167,17 @@ ai_call_claude <- function(
   )
   if (!is.null(system)) body$system <- system
 
-  httr2::request("https://api.anthropic.com/v1/messages") |>
-    httr2::req_headers("x-api-key" = api_key,
-                       "anthropic-version" = "2023-06-01",
-                       "content-type"      = "application/json") |>
+  # When system is a list (content blocks with cache_control), add the
+  # prompt-caching beta header required by Anthropic.
+  use_cache <- is.list(system) && !is.null(system)
+  headers <- list("x-api-key"         = api_key,
+                  "anthropic-version" = "2023-06-01",
+                  "content-type"      = "application/json")
+  if (use_cache)
+    headers[["anthropic-beta"]] <- "prompt-caching-2024-07-31"
+
+  do.call(httr2::req_headers, c(list(httr2::request("https://api.anthropic.com/v1/messages")),
+                                 headers)) |>
     httr2::req_body_json(body) |>
     httr2::req_error(is_error = function(resp) FALSE) |>
     httr2::req_perform() |>
@@ -1555,10 +2210,16 @@ ai_batch_submit <- function(
     list(custom_id = req$custom_id, params = params)
   }))
 
-  resp <- httr2::request("https://api.anthropic.com/v1/messages/batches") |>
-    httr2::req_headers("x-api-key" = api_key,
-                       "anthropic-version" = "2023-06-01",
-                       "content-type"      = "application/json") |>
+  use_cache <- is.list(system) && !is.null(system)
+  batch_headers <- list("x-api-key"         = api_key,
+                        "anthropic-version" = "2023-06-01",
+                        "content-type"      = "application/json")
+  if (use_cache)
+    batch_headers[["anthropic-beta"]] <- "prompt-caching-2024-07-31"
+
+  resp <- do.call(httr2::req_headers,
+                  c(list(httr2::request("https://api.anthropic.com/v1/messages/batches")),
+                    batch_headers)) |>
     httr2::req_body_json(list(requests = batch_requests)) |>
     httr2::req_error(is_error = function(resp) FALSE) |>
     httr2::req_perform() |>
@@ -1644,8 +2305,8 @@ ai_batch_retrieve <- function(
 #' Only sends variables that genuinely need refinement:
 #'   - factor_nominal  (all: may be ordinal)
 #'   - integer         (all: may be integer_scale or integer_count)
-#'   - factor_binary with desc=NA (needs desc confirmed)
-#' NOT sent: identifier, double, factor_binary with desc resolved,
+#'   - factor_binary with no order=1 level (needs positive level confirmed)
+#' NOT sent: identifier, double, factor_binary with order resolved,
 #'           factor_ordinal/integer_scale/integer_count (already refined).
 #'
 #' Deduplicates by unique label set before sending — if 50 variables share
@@ -1654,7 +2315,7 @@ ai_batch_retrieve <- function(
 #' Role codes:
 #'   F = factor_nominal  — unordered categories (professions, régions…)
 #'   O = factor_ordinal  — ordered categories (niveau de diplôme, satisfaction…)
-#'   B = factor_binary   — 2-level yes/no variable (desc=NA ones only)
+#'   B = factor_binary   — 2-level yes/no variable (positive level unknown only)
 #'   S = integer_scale   — numeric scale (1–7 gauche/droite, 0–10 satisfaction)
 #'   C = integer_count   — count integer (nb enfants, nb pièces…)
 #'   Q = double          — truly continuous (reclassify integer → double)
@@ -1665,12 +2326,23 @@ ai_batch_retrieve <- function(
 #'   T = descending/positive-first  (O: high→low; B: positive level is listed first)
 #'   F = ascending/positive-second  (O: low→high; B: positive level is listed second)
 #'   ? = cannot determine
+#'   → Translated to "order" integers in the JSON:
+#'     O+T: reverse sequential (n, n-1, …, 1)  O+F: sequential (1, 2, …, n)
+#'     B+T: order=1 for first label, order=2 for second
+#'     B+F: order=2 for first label, order=1 for second
+#'     O+?: assumes ascending data order; reverses when ordinal_desc=TRUE
 #'
 #' @param metadata         Varmod tibble from extract_survey_metadata().
 #' @param meta_json        Path to the unified \code{*.survey_meta.json} file
-#'                         (required). Results (role, desc) are written directly
-#'                         to this file after a backup. Re-run
+#'                         (required). Results (role, order integers) are written
+#'                         directly to this file after a backup. Re-run
 #'                         extract_survey_metadata() to reload.
+#' @param ordinal_desc     Logical. Controls the display order for ordinal variables.
+#'                         \code{TRUE} = highest category first (order=1); when
+#'                         Haiku returns "?" the fallback assumes labels in the data
+#'                         are stored in ascending order (the norm) and reverses them.
+#'                         \code{FALSE} = lowest category first; "?" fallback keeps
+#'                         the data order as-is. Default \code{FALSE}.
 #' @param role_examples    Named list of character vectors: example label sets for
 #'                         each role, to guide Haiku. Names must be role codes:
 #'                         F, O, B, S, C.
@@ -1685,46 +2357,58 @@ ai_batch_retrieve <- function(
 #' @param dry_run          If TRUE, print the system/user prompts without calling
 #'                         the API or writing any file. Default FALSE.
 #' @param max_labels_sent  Max non-missing labels per unique label set sent to AI.
-#'                         Default 8. Increase for variables with many levels.
+#'                         Default 5. Increase for variables with many levels.
 #'
 #' @return Invisibly returns \code{meta_json}.
 #'         In dry_run mode: invisibly returns the list of user prompt strings.
 ai_classify_roles <- function(
     metadata,
     meta_json        = NULL,
-    role_examples    = list(),
+    ordinal_desc     = FALSE,
     chunk_size       = 400L,
     use_batch        = FALSE,
     dry_run          = FALSE,
     api_key          = Sys.getenv("ANTHROPIC_API_KEY"),
     model            = "claude-haiku-4-5",
-    max_labels_sent  = 8L
+    max_labels_sent  = 5L,
+    log_raw_answer   = FALSE
 ) {
   if (is.null(meta_json))
     stop("ai_classify_roles: meta_json is required. ",
          "Provide the path to your *.survey_meta.json file.")
   # --- Filter to ambiguous variables only ---
+  # Binary variables are included only when positive level not yet resolved
+  # (no level has order = 1L).
+  bin_unresolved <- if ("order" %in% names(metadata)) {
+    purrr::map_lgl(metadata$order, function(ord) !any(ord == 1L, na.rm = TRUE))
+  } else {
+    rep(TRUE, nrow(metadata))
+  }
+
   target <- metadata |>
     dplyr::filter(
       detected_role %in% c("factor_nominal", "integer") |
-        (detected_role == "factor_binary" & is.na(desc))
+        (detected_role == "factor_binary" & bin_unresolved)
     )
 
   if (nrow(target) == 0) {
     message("ai_classify_roles: No ambiguous variables to classify.",
-            " (factor_binary with desc resolved, double, identifier already clear.)")
+            " (factor_binary with order resolved, double, identifier already clear.)")
     return(invisible(meta_json))
   }
 
   message("ai_classify_roles: ", nrow(target), " variable(s) to classify.")
 
   # --- Build label key per variable (non-missing labels, sorted for dedup) ---
+  # Use value codes (not label strings) to identify missing levels correctly.
   target <- target |>
     dplyr::mutate(
-      .lbl_key = purrr::map2_chr(labels, missing_vals, function(lbls, miss) {
-        clean <- sort(.normalize_text(lbls[!lbls %in% miss & nzchar(lbls)]))
-        paste(clean, collapse = "\x01")
-      })
+      .lbl_key = purrr::pmap_chr(list(labels, values, missing_vals),
+        function(lbls, vals, miss) {
+          is_miss_lbl <- as.character(vals) %in% as.character(miss)
+          clean <- sort(.normalize_text(lbls[!is_miss_lbl & nzchar(lbls)]))
+          paste(clean, collapse = "\x01")
+        })
     )
 
   # --- Deduplicate by label set: classify each unique set once ---
@@ -1739,111 +2423,35 @@ ai_classify_roles <- function(
   # --- Build prompt lines: one per unique label set ---
   prompt_lines <- purrr::pmap_chr(
     list(unique_sets$var_name, unique_sets$var_label, unique_sets$r_class,
-         unique_sets$n_distinct, unique_sets$labels, unique_sets$missing_vals,
-         unique_sets$detected_role, unique_sets$.lbl_key),
-    function(var_name, var_label, r_class, n_distinct, labels, missing_vals,
-             detected_role, lbl_key) {
-      non_miss <- .normalize_text(labels[!labels %in% missing_vals & nzchar(labels)])
-      shown    <- head(non_miss, max_labels_sent)
-      n_total  <- length(non_miss)
-      lbl_str  <- paste0('"', shown, '"', collapse = ", ")
-      suffix   <- if (n_total > max_labels_sent)
-        paste0(", +", n_total - max_labels_sent, " more") else ""
-      # When all labels are missing codes (nd:0, empty non_miss), append them
-      # with a "miss:" prefix so the model sees them as context — not as values.
-      # This lets it infer role from the variable label (age, count, year…).
-      miss_ctx <- if (n_total == 0 && length(missing_vals) > 0) {
-        miss_shown <- head(.normalize_text(missing_vals[nzchar(missing_vals)]),
-                           max_labels_sent)
-        paste0(", miss:", paste0('"', miss_shown, '"', collapse = ","))
-      } else ""
-      cur_code <- switch(detected_role,
-        factor_binary  = "B", factor_nominal = "F", integer = "I", "?")
-      sprintf("SET:%s|%s|cur:%s|nd:%d|[%s%s%s]",
-              var_name, substr(.normalize_text(var_label), 1, 55),
-              cur_code, n_distinct, lbl_str, suffix, miss_ctx)
+         unique_sets$n_distinct, unique_sets$labels, unique_sets$values,
+         unique_sets$missing_vals, unique_sets$detected_role, unique_sets$.lbl_key),
+    function(var_name, var_label, r_class, n_distinct, labels, values,
+             missing_vals, detected_role, lbl_key) {
+      .format_classify_jsonl(var_name, var_label, detected_role,
+                             labels, values, missing_vals,
+                             n_distinct, max_labels = max_labels_sent)
     }
   )
 
-  # --- Build examples block from role_examples arg ---
-  default_examples <- list(
-    F = c("Région parisienne / Bassin parisien / Nord / Est / Ouest / Sud-ouest / Centre-est / Méditerranée", 
-      "Agriculteurs exploitants / Artisans, commerçants et chefs d'entreprise / Cadres et professions intellectuelles supérieures / Professions intermédiaires / Employés / Ouvriers"),
-    O = c("Très satisfait/Satisfait/Peu satisfait/Pas du tout satisfait", 
-      "1 enfant / 2 enfants / 3 enfants ou plus", "Moins de 10 / 10 et 49 / 50 à 499 / 500 et plus", 
-      "18-24 ans/25-34 ans/35-44 ans/45-54 ans/55-64 ans/65-79 ans", 
-      "Moins de 650 €/De 650 à moins de 950 €/De 950 à moins de 1200 €",
-      "Aucun / Moins de 6 / De 6 à moins de 12"),
-    S = c("Gauche / 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9 / Droite"),
-    C = c("1 / 2 / 3 / 4 / 5 / 7 / 10 / 12 / 17 / 20 / 21",
-      "1 enfant / 2 enfants / 3 enfants / 4 enfants / 5 enfants / 6 enfants"),
-    B = c("Oui / Non", "Choisi/Non choisi"),
-    X = c("6-1-4-5-2-3-7 / 6-1-4-5-2-7-3 / 6-1-4-7-3-2-5 / ...")
-  )
-  ex <- modifyList(default_examples, role_examples)
-
-  fmt_ex <- function(code, lbls) {
-    if (is.null(lbls) || length(lbls) == 0) return(NULL)
-    paste0("  ", code, ": ", paste0('"', head(lbls, 4), '"', collapse = ", "))
+  # --- Load system prompt from external .md file ---
+  .prompt_path <- file.path(getwd(), "instructions", "classify_roles_prompt.md")
+  if (!file.exists(.prompt_path)) {
+    .pkg_name <- utils::packageName()
+    if (!is.null(.pkg_name) && nzchar(.pkg_name)) {
+      pkg_path <- system.file("instructions/classify_roles_prompt.md",
+                              package = .pkg_name)
+      if (nzchar(pkg_path) && file.exists(pkg_path)) .prompt_path <- pkg_path
+    }
   }
-  examples_block <- paste(c(
-    fmt_ex("O", ex[["O"]]),
-    fmt_ex("S", ex[["S"]]),
-    fmt_ex("C", ex[["C"]]),
-    fmt_ex("B", ex[["B"]])
-  ), collapse = "\n")
+  if (!file.exists(.prompt_path))
+    stop("ai_classify_roles: instructions/classify_roles_prompt.md not found.")
 
-  # Concrete nd:0 examples (no regular labels, infer from variable label)
-  nd0_examples_block <- paste0(
-    "## nd:0 EXAMPLES (all labels are missing codes — classify from variable label)\n",
-    "  SET:Q19E_AGE|quel est votre age ?|cur:I|nd:0|[miss:\"NSP\",\"NVPD\"]  → C\n",
-    "  SET:Q19E_ANNEE|annee de naissance|cur:I|nd:0|[miss:\"NSP\",\"NVPD\"]  → C\n",
-    "  SET:EA3A|combien de freres|cur:I|nd:0|[miss:\"NSP\",\"NVPD\"]          → C\n",
-    "  SET:SEX1|combien de relations de couple|cur:I|nd:0|[miss:\"NSP\"]     → C\n",
-    "  SET:EMP10|en quelle annee avez-vous commence|cur:I|nd:0|[miss:\"NSP\"] → C"
+  system_prompt <- .build_classify_system_prompt(
+    .prompt_path, ordinal_desc, max_labels_sent
   )
-
-  # --- System prompt ---
-  system_prompt <- paste0(
-    "You classify French social survey variables by their value labels.\n\n",
-    "## ROLES\n",
-    "F  factor_nominal  : unordered categories (regions, professions, parties)\n",
-    "O  factor_ordinal  : ordered categories with a meaningful rank\n",
-    "   (satisfaction scales, education levels, frequency: jamais→toujours)\n",
-    "B  factor_binary   : exactly 2 levels, one positive / one negative\n",
-    "   (only sent when the positive level is unknown)\n",
-    "S  integer_scale   : numeric integer used as a scale endpoint-labelled\n",
-    "   (political left/right 1–7, satisfaction 0–10, agreement 1–5)\n",
-    "C  integer_count   : integer counting real-world items\n",
-    "   (number of children, rooms, jobs…)\n",
-    "Q  double          : reclassify integer → truly continuous numeric\n",
-    "X  other           : genuinely unclassifiable (mixed types, free text, answer orders...)\n",
-    "?  unclear         : leave unchanged, user will decide\n\n",
-    "## EXAMPLES\n",
-    examples_block, "\n\n",
-    nd0_examples_block, "\n\n",
-    "## desc FIELD (add after a TAB, for O and B only)\n",
-    "T = descending / positive-first\n",
-    "  O: labels go from highest to lowest (Très satisfait … Pas du tout)\n",
-    "  B: positive level is listed FIRST in the label set shown\n",
-    "F = ascending / positive-second\n",
-    "  O: labels go from lowest to highest (Pas du tout … Très satisfait)\n",
-    "  B: positive level is listed SECOND\n",
-    "? = cannot determine from the labels shown\n\n",
-    "## INPUT FORMAT\n",
-    "SET:id|variable label|cur:CURRENT_CODE|nd:N_DISTINCT|[\"lv1\", \"lv2\", ...]\n",
-    "  nd = number of distinct NON-MISSING values\n",
-    "  When nd:0 the bracket may contain miss:\"...\" entries — these are the\n",
-    "  ONLY labels present (all are missing codes like NSP, NVPD, 88, 99).\n",
-    "  In that case, classify from the variable label alone:\n",
-    "  - age, année de naissance, durée, nombre de…, combien → C\n",
-    "  - échelle, score, position → S\n",
-    "  - nominal list → F\n\n",
-    "## OUTPUT FORMAT — one line per SET, no blank lines, no explanations\n",
-    "SET:id TAB CODE [TAB desc] [TAB miss:\"label\"]\n",
-    "- Omit desc entirely for F, S, C, Q, X, ?\n",
-    "- miss: flag only if a shown label is clearly a missing-value code\n",
-    "  (NSP, Refus, NR, non-réponse…) that was not already filtered out"
+  system_prompt_cached <- list(
+    list(type = "text", text = system_prompt,
+         cache_control = list(type = "ephemeral"))
   )
 
   # --- Split unique_sets into chunks and build one prompt per chunk ---
@@ -1890,7 +2498,8 @@ ai_classify_roles <- function(
     results_text <- purrr::imap(prompts, function(p, i) {
       message("  Chunk ", i, "/", length(prompts))
       resp <- ai_call_claude(p, model = model, api_key = api_key,
-                             system = system_prompt, max_tokens = max_tok)
+                             system = system_prompt_cached,
+                             max_tokens = max_tok)
       resp$content[[1]]$text
     })
   } else {
@@ -1898,7 +2507,8 @@ ai_classify_roles <- function(
     requests <- purrr::imap(prompts, ~ list(custom_id = paste0("classify_", .y),
                                             prompt     = .x))
     batch    <- ai_batch_submit(requests, model = model, api_key = api_key,
-                                system = system_prompt, max_tokens = max_tok)
+                                system = system_prompt_cached,
+                                max_tokens = max_tok)
     message("Batch submitted. ID: ", batch$id)
     raw          <- ai_batch_retrieve(batch$id, api_key = api_key)
     results_text <- purrr::map(purrr::set_names(names(raw)), ~ raw[[.x]])
@@ -1906,54 +2516,55 @@ ai_classify_roles <- function(
 
   raw_text <- paste(unlist(results_text), collapse = "\n")
 
-  # --- Role code → full role name ---
-  role_map <- c(
-    F = "factor_nominal",
-    O = "factor_ordinal",
-    B = "factor_binary",
-    S = "integer_scale",
-    C = "integer_count",
-    Q = "double",
-    X = "other",
-    "?" = "???"  # unclear → keep nominal, user decides
-  )
+  if (log_raw_answer) {
+    message(strrep("-", 60))
+    message("RAW HAIKU ANSWER")
+    message(strrep("-", 60))
+    message(raw_text)
+    message(strrep("-", 60))
+  }
 
-  # Parse response: map set IDs back to full variable lists
+  # --- Valid roles and desc codes ---
+  valid_roles <- c("factor_nominal", "factor_ordinal", "factor_binary",
+                   "integer_scale", "integer_count", "double", "other", "unclear")
+  valid_descs <- c("high_first", "low_first", "unknown")
+
+  # Parse JSONL response: one JSON object per line
   set_roles   <- character(0)   # keyed by var_name of unique set
-  set_descs   <- list()
+  set_dirs    <- character(0)   # "high_first", "low_first", or "unknown" per set id
   set_missing <- character(0)
 
-  resp_lines <- stringr::str_split(stringr::str_trim(raw_text), "\n")[[1]]
+  resp_lines <- strsplit(trimws(raw_text), "\n")[[1]]
   resp_lines <- resp_lines[nzchar(resp_lines)]
 
   for (ln in resp_lines) {
-    parts <- stringr::str_split(ln, "\t")[[1]]
-    if (length(parts) < 2) next
-
-    set_id_raw <- stringr::str_trim(parts[[1]])
-    # Strip "SET:" prefix if echoed back
-    set_id <- stringr::str_remove(set_id_raw, "^SET:")
-    code   <- stringr::str_trim(parts[[2]])
-
-    if (!set_id %in% unique_sets$var_name) next
-    if (!code %in% names(role_map)) next
-
-    set_roles[[set_id]] <- role_map[[code]]
-
-    # desc (for B and O)
-    if (code %in% c("B", "O") && length(parts) >= 3) {
-      desc_raw <- stringr::str_trim(parts[[3]])
-      if (!stringr::str_starts(desc_raw, "miss:") && nzchar(desc_raw)) {
-        set_descs[[set_id]] <- switch(desc_raw, T = TRUE, F = FALSE, "?" = NA,
-                                      NA)  # unknown token → NA
-      }
+    parsed <- tryCatch(jsonlite::fromJSON(ln), error = function(e) NULL)
+    if (is.null(parsed)) {
+      warning("ai_classify_roles: skipping malformed JSONL line: ",
+              substr(ln, 1, 80))
+      next
     }
 
-    # Extra missing
-    miss_part <- purrr::keep(parts[-(1:2)], ~ stringr::str_starts(.x, "miss:"))
-    if (length(miss_part) > 0) {
-      set_missing[[set_id]] <- .normalize_text(
-        stringr::str_remove_all(stringr::str_remove(miss_part[[1]], "^miss:"), '"'))
+    set_id <- parsed$id
+    role   <- parsed$role
+    if (is.null(set_id) || is.null(role)) next
+    if (!set_id %in% unique_sets$var_name) next
+    if (!role %in% valid_roles) next
+
+    # Map "unclear" to internal "???" sentinel
+    set_roles[[set_id]] <- if (role == "unclear") "???" else role
+
+    # desc (direction) for binary and ordinal
+    desc <- parsed$desc
+    should_parse_dir <- role == "factor_binary" ||
+      (role == "factor_ordinal" && ordinal_desc)
+    if (should_parse_dir && !is.null(desc) && desc %in% valid_descs) {
+      set_dirs[[set_id]] <- desc
+    }
+
+    # Extra missing-value label
+    if (!is.null(parsed$miss)) {
+      set_missing[[set_id]] <- .normalize_text(parsed$miss)
     }
   }
 
@@ -1961,7 +2572,7 @@ ai_classify_roles <- function(
   key_to_set <- purrr::set_names(unique_sets$.lbl_key, unique_sets$var_name)
 
   detected_roles <- character(0)
-  desc_overrides <- logical(0)
+  dir_overrides  <- character(0)   # "T", "F", or "?" per variable
   extra_missing  <- character(0)
 
   for (vn in target$var_name) {
@@ -1969,24 +2580,73 @@ ai_classify_roles <- function(
     set_id <- names(key_to_set)[key_to_set == key]
     if (length(set_id) == 0 || !set_id %in% names(set_roles)) next
     detected_roles[[vn]] <- set_roles[[set_id]]
-    if (set_id %in% names(set_descs))   desc_overrides[[vn]] <- set_descs[[set_id]]
+    if (set_id %in% names(set_dirs))    dir_overrides[[vn]]  <- set_dirs[[set_id]]
     if (set_id %in% names(set_missing)) extra_missing[[vn]]  <- set_missing[[set_id]]
   }
 
-  # --- Write role/desc results directly to meta_json ---
+  # --- Write role + order integers to meta_json ---
   .backup_meta_json(meta_json, "classify_roles")
   existing <- .read_meta_json(meta_json)
 
   n_updated <- 0L
   for (vn in names(detected_roles)) {
-    if (!is.null(existing$variables[[vn]])) {
-      existing$variables[[vn]]$role <- detected_roles[[vn]]
-      n_updated <- n_updated + 1L
-    }
-  }
-  for (vn in names(desc_overrides)) {
-    if (!is.null(existing$variables[[vn]])) {
-      existing$variables[[vn]]$desc <- desc_overrides[[vn]]
+    if (is.null(existing$variables[[vn]])) next
+    new_role <- detected_roles[[vn]]
+    existing$variables[[vn]]$role <- new_role
+    n_updated <- n_updated + 1L
+
+    # Write "order" integers based on direction for ordinal and binary
+    dir_code <- if (vn %in% names(dir_overrides)) dir_overrides[[vn]] else "unknown"
+    levs <- existing$variables[[vn]]$levels
+    if (is.null(levs) || length(levs) == 0) next
+
+    # Identify non-missing levels (those without missing: true)
+    non_miss_keys <- purrr::keep(names(levs), ~ !isTRUE(levs[[.x]]$missing))
+    n_valid <- length(non_miss_keys)
+    if (n_valid == 0) next
+
+    if (new_role == "factor_ordinal") {
+      # ordinal_desc=FALSE → leave existing order field unchanged
+      if (!ordinal_desc) next
+      # "unknown" fallback: assume labels in data are ascending (the norm for French
+      # survey data — youngest ages first, lowest diploma first).
+      # When ordinal_desc=TRUE we want highest-first display, so invert ascending data
+      # (same logic as an explicit "low_first" reply from Haiku).
+      desc_flag <- switch(dir_code,
+        high_first = TRUE, low_first = FALSE, !ordinal_desc)
+      if (desc_flag) {
+        # Descending: first shown level is highest → order 1
+        new_orders <- seq_len(n_valid)
+      } else {
+        # Ascending: last shown level is highest → order 1
+        new_orders <- seq(n_valid, 1L)
+      }
+      for (j in seq_along(non_miss_keys)) {
+        existing$variables[[vn]]$levels[[non_miss_keys[[j]]]]$order <- new_orders[[j]]
+      }
+
+    } else if (new_role == "factor_binary" && n_valid == 2L) {
+      # For binary: determine which label is positive using .find_binary_desc()
+      yes_kw <- existing$config$yes_labels %||% character(0)
+      no_kw  <- existing$config$no_labels  %||% character(0)
+      lv1_lbl <- levs[[non_miss_keys[[1]]]]$label %||% ""
+      lv2_lbl <- levs[[non_miss_keys[[2]]]]$label %||% ""
+      shown_lbls <- c(lv1_lbl, lv2_lbl)
+      pos_idx <- .find_binary_desc(shown_lbls, yes_kw, no_kw)
+
+      if (!is.na(pos_idx) && dir_code != "unknown") {
+        # high_first = positive is first shown; low_first = positive is second
+        pos_in_shown <- switch(dir_code,
+          high_first = 1L, low_first = 2L, pos_idx)
+      } else {
+        pos_in_shown <- if (!is.na(pos_idx)) pos_idx else NA_integer_
+      }
+
+      if (!is.na(pos_in_shown)) {
+        neg_in_shown <- if (pos_in_shown == 1L) 2L else 1L
+        existing$variables[[vn]]$levels[[non_miss_keys[[pos_in_shown]]]]$order <- 1L
+        existing$variables[[vn]]$levels[[non_miss_keys[[neg_in_shown]]]]$order <- 2L
+      }
     }
   }
 
@@ -1994,7 +2654,7 @@ ai_classify_roles <- function(
 
   message("\n", strrep("=", 60))
   message("ai_classify_roles: ", n_updated, " variable(s) updated in: ", meta_json)
-  message("Review role/desc fields in the JSON, then re-run extract_survey_metadata().")
+  message("Review role/order fields in the JSON, then re-run extract_survey_metadata().")
 
   if (length(extra_missing) > 0) {
     uniq_miss <- unique(unname(extra_missing))
@@ -2003,6 +2663,59 @@ ai_classify_roles <- function(
   }
 
   message(strrep("=", 60))
+  invisible(meta_json)
+}
+
+
+# ============================================================
+# 9b. invert_ordinal_order()
+# ============================================================
+
+#' Invert the "order" field for all factor_ordinal variables in a meta JSON
+#'
+#' Reads the unified survey_meta.json, finds every variable with
+#' `role = "factor_ordinal"`, and reverses the numeric `order` values of its
+#' non-missing levels (e.g. [1,2,3,4] → [4,3,2,1]).  The actual level order in
+#' the JSON is never changed — only the `order` integers are updated.
+#'
+#' Use this when all ordinal `order` fields are currently ascending and you want
+#' descending (positive/best level = order 1) without calling the API again.
+#'
+#' @param meta_json Path to the `.survey_meta.json` file.
+#'
+#' @return `meta_json` invisibly.
+#' @export
+invert_ordinal_order <- function(meta_json) {
+  existing <- .read_meta_json(meta_json)
+  n_updated <- 0L
+
+  for (vn in names(existing$variables)) {
+    var <- existing$variables[[vn]]
+    if (!identical(var$role, "factor_ordinal")) next
+
+    levs <- var$levels
+    if (is.null(levs) || length(levs) == 0L) next
+
+    non_miss_keys <- purrr::keep(names(levs), ~ !isTRUE(levs[[.x]]$missing))
+    if (length(non_miss_keys) == 0L) next
+
+    orders <- purrr::map_int(non_miss_keys, ~ {
+      o <- levs[[.x]]$order
+      if (is.null(o)) NA_integer_ else as.integer(o)
+    })
+
+    if (anyNA(orders)) next
+
+    rev_orders <- (max(orders) + 1L) - orders
+    for (j in seq_along(non_miss_keys)) {
+      existing$variables[[vn]]$levels[[non_miss_keys[[j]]]]$order <- rev_orders[[j]]
+    }
+    n_updated <- n_updated + 1L
+  }
+
+  .backup_meta_json(meta_json, "invert_ordinal_order")
+  .write_meta_json(existing, meta_json)
+  message("invert_ordinal_order: ", n_updated, " variable(s) updated in: ", meta_json)
   invisible(meta_json)
 }
 
@@ -2282,7 +2995,33 @@ ai_suggest_missing <- function(
                  (use_n   && last_n   < min_n)
     if (still_low) {
       groups[last_ids] <- gid - 1L
+      gid <- gid - 1L
     }
+  }
+
+  # ---- Post-pass: merge first group downward if still below threshold ------
+  # Symmetric guard for the first group (endpoint on the low end).
+  if (gid > 1L) {
+    first_ids  <- which(groups == 1L)
+    first_pct  <- sum(freqs[first_ids],  na.rm = TRUE)
+    first_n    <- sum(counts[first_ids], na.rm = TRUE)
+    still_low  <- (use_pct && first_pct < min_pct_100) ||
+                  (use_n   && first_n   < min_n)
+    if (still_low) {
+      # Merge first group into the second group by renaming group 2 → 1
+      # and shifting all higher group ids down by 1.
+      groups[groups == 2L] <- 1L
+      groups[groups >  2L] <- groups[groups > 2L] - 1L
+      gid <- gid - 1L
+    }
+  }
+
+  # ---- Two-level failsafe: ensure at least 2 distinct groups ---------------
+  # If all levels ended up in one group, split at the midpoint so the caller
+  # always has at least 2 distinct order values to work with.
+  if (length(unique(groups)) == 1L && n >= 2L) {
+    mid         <- ceiling(n / 2)
+    groups[seq(mid + 1L, n)] <- 2L
   }
 
   groups
@@ -2290,36 +3029,401 @@ ai_suggest_missing <- function(
 
 
 # ============================================================
-# 11. ai_suggest_labels()
+# 11. ai_merge_levels()
 # ============================================================
 
-#' Use Haiku to suggest concise French factor level labels and merge ordinal levels
+#' Use Haiku to semantically merge factor level groups
 #'
-#' Sends factor variables to Claude (as JSON) and asks it to:
-#'   - Shorten all factor level labels to <= 30 characters.
-#'   - For factor_ordinal only: merge very small contiguous levels
-#'     (freq < 5% AND count < 30) by giving them the same new label.
+#' Sends ordinal (and optionally nominal) variables to Claude Haiku and asks it
+#' to decide which adjacent categories should be merged based on frequencies,
+#' semantic logic, and sociological conventions.  The function writes new
+#' \code{order} integers into \code{meta_json} only — label renaming is left
+#' for \code{ai_suggest_labels()}, which already reads the \code{order} field
+#' and proposes group names.
+#'
+#' ## Workflow position
+#'   Run \emph{after} \code{ai_classify_roles()} (which sets roles) and
+#'   \emph{after} \code{metadata_add_level_stats()} (which provides n/pct,
+#'   and applies the zero-n → missing rule).
+#'   Run \emph{before} \code{ai_suggest_labels()}.
+#'
+#' ## Arguments
+#' @param metadata     Varmod tibble with \code{detected_role}, \code{order},
+#'                     \code{level_counts}, and \code{level_freqs} columns.
+#' @param meta_json    Path to \code{*.survey_meta.json} (required).
+#' @param vars         Optional character vector of var_name to restrict to.
+#' @param exclude      Character vector of var_names to skip entirely.
+#' @param nominal      If TRUE, also process \code{factor_nominal} variables
+#'                     (default FALSE — ordinal only).
+#' @param optimal_levels Integer vector of acceptable group counts.  Default
+#'   \code{2:5}.  Passed as context to Haiku; used as guidance, not hard rule.
+#' @param min_pct      Minimum percentage per group (integer, 0–100 scale).
+#'   Default 5.  Passed as context to Haiku; Haiku may deviate with justification.
+#' @param max_levels   Maximum total non-missing level count across all variables
+#'   in one API chunk.  Default 250.  Controls chunking like \code{ai_suggest_labels()}.
+#'   With average 3–5 levels per variable this gives 50–80 variables per chunk,
+#'   enough for Haiku to detect batteries (R7).  Lower if JSON parse errors occur.
+#' @param max_levels_in_single_var  Variables with more non-missing levels than
+#'   this threshold are skipped (too granular for Haiku).  Default 30.
+#' @param use_batch    Logical.  Use Anthropic Message Batch API (cheaper, async).
+#'   Default FALSE.
+#' @param dry_run      If TRUE, print prompts without calling the API.
+#' @param api_key      ANTHROPIC_API_KEY env var by default.
+#' @param model        Default: Haiku 4.5.
+#'
+#' @return Invisibly returns \code{meta_json}.  In dry_run mode returns the
+#'         prompt list invisibly.
+ai_merge_levels <- function(
+    metadata,
+    meta_json                = NULL,
+    vars                     = NULL,
+    exclude                  = character(),
+    nominal                  = FALSE,
+    optimal_levels           = 2:5,
+    min_pct                  = 5L,
+    max_levels               = 250L,
+    max_levels_in_single_var = 30L,
+    use_batch                = FALSE,
+    dry_run                  = FALSE,
+    api_key                  = Sys.getenv("ANTHROPIC_API_KEY"),
+    model                    = "claude-haiku-4-5"
+) {
+  if (is.null(meta_json))
+    stop("ai_merge_levels: meta_json is required. ",
+         "Provide the path to your *.survey_meta.json file.")
+
+  if (!"level_counts" %in% names(metadata))
+    stop("ai_merge_levels: metadata must have level_counts column. ",
+         "Run metadata_add_level_stats() first.")
+
+  roles_to_process <- if (nominal) c("factor_ordinal", "factor_nominal")
+                      else "factor_ordinal"
+
+  target <- metadata |>
+    dplyr::filter(detected_role %in% roles_to_process) |>
+    dplyr::filter(!var_name %in% exclude)
+
+  if (!is.null(vars)) target <- dplyr::filter(target, var_name %in% vars)
+
+  if (nrow(target) == 0L) {
+    message("ai_merge_levels: No variables to process.")
+    return(invisible(meta_json))
+  }
+
+  # Read meta JSON once — used to get freshest missing status per level
+  existing_for_filter <- .read_meta_json(meta_json)
+
+  # Count non-missing levels for each variable using the JSON (freshest status)
+  target <- target |>
+    dplyr::mutate(
+      .n_valid_levels = purrr::map_int(var_name, function(vn) {
+        levs <- existing_for_filter$variables[[vn]]$levels
+        if (is.null(levs)) return(0L)
+        sum(!purrr::map_lgl(levs, ~ isTRUE(.x$missing)))
+      })
+    )
+
+  # Skip vars with too many levels
+  oversized <- dplyr::filter(target, .n_valid_levels > max_levels_in_single_var)
+  if (nrow(oversized) > 0L) {
+    message("ai_merge_levels: ", nrow(oversized), " variable(s) skipped (> ",
+            max_levels_in_single_var, " non-missing levels): ",
+            paste(oversized$var_name, collapse = ", "))
+    target <- dplyr::filter(target, .n_valid_levels <= max_levels_in_single_var)
+  }
+
+  # Skip vars with < 2 valid levels (nothing to merge)
+  target <- dplyr::filter(target, .n_valid_levels >= 2L)
+
+  if (nrow(target) == 0L) {
+    message("ai_merge_levels: No variables remaining after filtering.")
+    return(invisible(meta_json))
+  }
+
+  message("ai_merge_levels: ", nrow(target), " variable(s) to process.")
+
+  # Build per-variable JSON input block
+  .build_var_json_merge <- function(vn, var_label, detected_role,
+                                    values, order_ints, level_counts, level_freqs,
+                                    existing_vars) {
+    levs_json <- existing_vars[[vn]]$levels
+    if (is.null(levs_json)) return(NULL)
+
+    # Order non-missing levels by order integer
+    non_miss_keys <- purrr::keep(names(levs_json), ~ !isTRUE(levs_json[[.x]]$missing))
+    if (length(non_miss_keys) < 2L) return(NULL)
+
+    # Get order integers from JSON (most up-to-date after ai_classify_roles)
+    ord_vals <- purrr::map_int(non_miss_keys, function(k) {
+      o <- levs_json[[k]]$order
+      if (is.null(o)) NA_integer_ else as.integer(o)
+    })
+    sorted_idx <- order(ord_vals, na.last = TRUE)
+    sorted_keys <- non_miss_keys[sorted_idx]
+
+    type_str <- if (detected_role == "factor_ordinal") "ordinal" else "nominal"
+    desc_clean <- .clean_var_label_for_api(var_label, var_name = vn)
+    esc <- function(x) gsub('"', '\\"', x, fixed = TRUE)
+
+    level_entries <- purrr::map_chr(sorted_keys, function(k) {
+      lev  <- levs_json[[k]]
+      lbl  <- lev$label %||% ""
+      n_v  <- lev$n
+      pct_v <- lev$pct
+      n_str   <- if (!is.null(n_v))   paste0('"n":', as.integer(n_v)) else NULL
+      pct_str <- if (!is.null(pct_v)) paste0('"pct":', as.integer(pct_v)) else NULL
+      fields  <- c(paste0('"key":"', esc(k), '"'),
+                   paste0('"label":"', esc(lbl), '"'),
+                   n_str, pct_str)
+      paste0("{", paste(fields[!is.null(fields)], collapse = ","), "}")
+    })
+
+    paste0('{"var":"', esc(vn),
+           '","type":"', type_str,
+           '","desc":"', esc(substr(desc_clean, 1L, 120L)), '",',
+           '"levels":[', paste(level_entries, collapse = ","), "]}",
+           collapse = "")
+  }
+
+  var_jsons <- purrr::pmap(
+    dplyr::select(target, var_name, var_label, detected_role,
+                  values, dplyr::any_of(c("order", "level_counts", "level_freqs"))),
+    function(var_name, var_label, detected_role, values,
+             order = NULL, level_counts = integer(0), level_freqs = numeric(0)) {
+      .build_var_json_merge(var_name, var_label, detected_role,
+                            values, order, level_counts, level_freqs,
+                            existing_for_filter$variables)
+    }
+  ) |> purrr::compact()
+
+  # Attach computed json strings back to target for chunking
+  var_json_map <- purrr::set_names(var_jsons, target$var_name[seq_along(var_jsons)])
+
+  # Chunk by max_levels budget
+  chunks <- local({
+    chunk_ids <- integer(nrow(target))
+    cid <- 1L; cumul <- 0L
+    for (i in seq_len(nrow(target))) {
+      n <- target$.n_valid_levels[[i]]
+      if (cumul + n > max_levels && cumul > 0L) { cid <- cid + 1L; cumul <- 0L }
+      chunk_ids[[i]] <- cid
+      cumul <- cumul + n
+    }
+    split(target$var_name, chunk_ids)
+  })
+
+  opt_str <- paste0(min(optimal_levels), "-", max(optimal_levels))
+  build_prompt <- function(vnames) {
+    jsons <- purrr::map_chr(vnames, ~ var_json_map[[.x]] %||% "")
+    jsons <- jsons[nzchar(jsons)]
+    if (length(jsons) == 0L) return(NULL)
+    paste0("optimal_levels:", opt_str, " min_pct:", min_pct, "%\n\n",
+           "[\n", paste(jsons, collapse = ",\n"), "\n]")
+  }
+  prompts <- purrr::map(chunks, build_prompt) |> purrr::compact()
+
+  if (length(prompts) == 0L) {
+    message("ai_merge_levels: No valid prompts to send.")
+    return(invisible(meta_json))
+  }
+
+  # Load system prompt from file; pass with cache_control for Haiku caching
+  # (Haiku 4.5 minimum cacheable block: 2048 tokens)
+  prompt_path <- file.path(getwd(), "instructions", "merge_levels_prompt.md")
+  if (!file.exists(prompt_path)) {
+    pkg_path <- system.file("instructions/merge_levels_prompt.md",
+                            package = utils::packageName() %||% "")
+    if (nzchar(pkg_path) && file.exists(pkg_path)) prompt_path <- pkg_path
+  }
+  if (!file.exists(prompt_path))
+    stop("ai_merge_levels: instructions/merge_levels_prompt.md not found.")
+
+  system_prompt_text <- paste(
+    readLines(prompt_path, encoding = "UTF-8", warn = FALSE), collapse = "\n")
+
+  # System prompt as cacheable content block list (Anthropic extended-cache beta)
+  system_prompt_cached <- list(
+    list(type = "text", text = system_prompt_text,
+         cache_control = list(type = "ephemeral"))
+  )
+
+  # Each level needs ~20 tokens in output (key + order integer in JSON).
+  # Add 20% headroom. Floor at 1024 to handle fixed overhead.
+  max_tok <- max(1024L, ceiling(max_levels * 20L * 1.5))
+
+  # Dry run
+  if (dry_run) {
+    message(strrep("=", 60))
+    message("DRY RUN — no API call made")
+    message(strrep("=", 60))
+    message("Variables: ", nrow(target), "  |  Chunks: ", length(prompts),
+            "  |  Levels budget: ", max_levels, " per chunk",
+            "  |  Route: ", if (use_batch) "batch" else "synchronous",
+            "  |  max_tokens: ", max_tok)
+    message("\n", strrep("-", 60))
+    message("SYSTEM PROMPT")
+    message(strrep("-", 60))
+    cat(system_prompt_text, "\n")
+    purrr::iwalk(prompts, function(p, i) {
+      message("\n", strrep("-", 60))
+      message("USER MESSAGE ", i, "/", length(prompts))
+      message(strrep("-", 60))
+      cat(p, "\n")
+    })
+    message(strrep("=", 60))
+    return(invisible(prompts))
+  }
+
+  # API route
+  if (!use_batch) {
+    message("ai_merge_levels: synchronous (", nrow(target), " var(s), ",
+            length(prompts), " chunk(s))")
+    results_text <- purrr::imap(prompts, function(p, i) {
+      message("  Chunk ", i, "/", length(prompts))
+      resp <- ai_call_claude(p, model = model, api_key = api_key,
+                             system = system_prompt_cached,
+                             max_tokens = max_tok)
+      resp$content[[1]]$text
+    })
+  } else {
+    message("ai_merge_levels: batch mode (", nrow(target), " var(s))")
+    requests <- purrr::imap(prompts, ~ list(custom_id = paste0("merge_", .y),
+                                            prompt     = .x))
+    batch <- ai_batch_submit(requests, model = model, api_key = api_key,
+                             system = system_prompt_cached,
+                             max_tokens = max_tok)
+    message("Batch submitted. ID: ", batch$id)
+    raw <- ai_batch_retrieve(batch$id, api_key = api_key)
+    results_text <- purrr::map(purrr::set_names(names(raw)), ~ raw[[.x]])
+  }
+
+  # Parse response: each chunk may be wrapped in markdown fences; extract the
+  # outermost {...} from each response individually, then merge all results.
+  parsed <- list()
+  for (txt in results_text) {
+    if (is.null(txt) || !nzchar(txt)) next
+    tryCatch({
+      json_str <- stringr::str_extract(txt, "(?s)\\{.+\\}")
+      if (is.na(json_str)) stop("No JSON object found")
+      chunk_parsed <- jsonlite::fromJSON(json_str, simplifyVector = FALSE)
+      parsed <- c(parsed, chunk_parsed)
+    }, error = function(e) {
+      warning("ai_merge_levels: JSON parse error: ", conditionMessage(e))
+    })
+  }
+
+  if (length(parsed) == 0L) {
+    warning("ai_merge_levels: No valid JSON response to apply.")
+    return(invisible(meta_json))
+  }
+
+  # Apply merged order integers to JSON and metadata
+  .backup_meta_json(meta_json, "merge_levels")
+  existing <- .read_meta_json(meta_json)
+
+  n_updated  <- 0L
+  n_binary   <- 0L
+  bad_vars   <- character(0)
+
+  for (vn in names(parsed)) {
+    if (is.null(existing$variables[[vn]])) next
+    groups_raw <- parsed[[vn]]   # list of {order, keys}
+
+    # Validate: must be a list of groups each with order + keys
+    if (!is.list(groups_raw) || length(groups_raw) == 0L) {
+      bad_vars <- c(bad_vars, vn); next
+    }
+    valid_groups <- purrr::keep(groups_raw, function(g)
+      !is.null(g$order) && !is.null(g$keys) && length(g$keys) > 0L)
+    if (length(valid_groups) == 0L) { bad_vars <- c(bad_vars, vn); next }
+
+    # Build key → new_order_int map
+    key_order_map <- character(0)
+    for (g in valid_groups) {
+      ord_int <- as.integer(g$order)
+      for (k in g$keys) key_order_map[as.character(k)] <- ord_int
+    }
+
+    # Get non-missing level keys currently in JSON
+    levs <- existing$variables[[vn]]$levels
+    non_miss_keys <- purrr::keep(names(levs), ~ !isTRUE(levs[[.x]]$missing))
+
+    # Validate coverage: every non-missing input key must appear in response
+    missing_from_response <- setdiff(non_miss_keys, names(key_order_map))
+    extra_in_response     <- setdiff(names(key_order_map), non_miss_keys)
+    if (length(missing_from_response) > 0L || length(extra_in_response) > 0L) {
+      warning("ai_merge_levels: key mismatch for '", vn, "' — skipping. ",
+              if (length(missing_from_response) > 0L)
+                paste0("Missing from response: ", paste(missing_from_response, collapse = ","), ". "),
+              if (length(extra_in_response) > 0L)
+                paste0("Extra in response: ", paste(extra_in_response, collapse = ","), "."))
+      next
+    }
+
+    # Write new order integers into JSON
+    for (k in non_miss_keys) {
+      new_ord <- key_order_map[k]
+      if (!is.na(new_ord))
+        existing$variables[[vn]]$levels[[k]]$order <- as.integer(new_ord)
+    }
+
+    # Detect binary collapse: if Haiku returned exactly 2 distinct order values
+    new_orders_distinct <- length(unique(as.integer(key_order_map[non_miss_keys])))
+    meta_idx <- which(metadata$var_name == vn)
+    if (new_orders_distinct == 2L &&
+        length(meta_idx) == 1L &&
+        metadata$detected_role[[meta_idx]] == "factor_ordinal") {
+      existing$variables[[vn]]$role <- "factor_binary"
+      metadata$detected_role[[meta_idx]] <- "factor_binary"
+      n_binary <- n_binary + 1L
+    }
+
+    n_updated <- n_updated + 1L
+  }
+
+  .write_meta_json(existing, meta_json)
+
+  message("\n", strrep("=", 60))
+  message("ai_merge_levels: ", n_updated, " variable(s) updated in: ", meta_json)
+  if (n_binary > 0L)
+    message("  ", n_binary, " variable(s) recoded to factor_binary (collapsed to 2 groups).")
+  if (length(bad_vars) > 0L)
+    message("  [!] Malformed response for: ", paste(bad_vars, collapse = ", "))
+  message("Review order fields in the JSON, then re-run extract_survey_metadata().")
+  message("Next step: ai_suggest_labels() to name the merged groups.")
+  message(strrep("=", 60))
+
+  invisible(meta_json)
+}
+
+
+# ============================================================
+# 12. ai_suggest_labels()
+# ============================================================
+
+#' Use Haiku to suggest concise French factor level labels
+#'
+#' Sends factor variables to Claude (as JSON) and asks it to shorten all factor
+#' level labels to <= 30 characters.
 #'
 #' Numeric label prefixes ("1-", "01-") are NOT sent to Haiku — they are rebuilt
 #' after merging based on the number of remaining distinct levels.
 #'
-#' ## Ordering sent to Haiku
-#'   - factor_binary, desc=FALSE  : positive sent first (swap stored order);
-#'     result is un-swapped before saving.
-#'   - factor_binary, desc=TRUE or desc=NA : sent in stored order.
-#'   - factor_ordinal, ordinal_desc=TRUE : non-NULL labels sent in reversed order;
-#'     un-reversed before saving.
-#'   - factor_ordinal, ordinal_desc=FALSE (default) : sent in STORED order as-is.
-#'   - factor_nominal : always sent in stored order, never reordered.
+#' ## Ordering and merging
+#'   Levels are sorted by the \code{order} integer stored in
+#'   \code{metadata$order} (set by \code{ai_classify_roles()} and optionally
+#'   refined by \code{metadata_merge_ordinal_levels()}).  Levels sharing the
+#'   same \code{order} integer are collapsed into one entry sent to Haiku
+#'   (label = original labels joined by " / "). Run
+#'   \code{metadata_merge_ordinal_levels()} before this function to pre-compute
+#'   merge groups. factor_nominal levels are sorted alphabetically if no
+#'   \code{order} is available.
 #'
 #' ## max_levels vs use_batch
 #'   max_levels controls how many non-null factor levels go into one API request.
-#'   This is a better proxy than a fixed variable count because a chunk of 30
-#'   binary variables (60 levels) is far lighter than 30 ordinal/nominal variables
-#'   (90–300 levels).  Default 150 gives ~75 variables for binary-heavy surveys
-#'   and ~12–20 variables for nominal-heavy surveys.  Variables whose level count
-#'   alone exceeds max_levels are skipped with a warning (they would cost too much
-#'   API credit for no useful output).
+#'   For ordinal/binary variables the count used is the number of distinct
+#'   \code{order} integers (= entries sent to Haiku), which is typically smaller
+#'   than the raw level count when merges have been applied.
 #'   use_batch=TRUE submits everything as a single Anthropic Message Batch job
 #'   (cheaper, but asynchronous — requires polling to retrieve results and can
 #'   take minutes).  Keep use_batch=FALSE (default) for interactive use; set it
@@ -2334,26 +3438,12 @@ ai_suggest_missing <- function(
 #'   dry_run=TRUE prints every prompt that would be sent without making any
 #'   API call.  Use this to validate prompts before spending tokens.
 #'
-#' Sends level counts and frequencies to Haiku for ordinal variables if the
-#' metadata table already has level_counts/level_freqs columns (added by
-#' metadata_add_level_stats()).  If those columns are absent, labels are sent
-#' without counts and Haiku still suggests new labels.
-#'
-#' @param metadata     Varmod tibble.
+#' @param metadata     Varmod tibble with an \code{order} list-column.
 #' @param vars         Optional character vector of var_name to restrict to.
-#' @param ordinal_desc Logical. If TRUE, send factor_ordinal labels to Haiku in
-#'                     descending (high->low) order.  Default FALSE = stored order.
-#' @param min_pct      For factor_ordinal merging: close a merge group when the
-#'                     running percentage reaches this fraction (0–1 scale).
-#'                     Default 0.05 (5 %).  Set to 0 to disable the pct threshold.
-#' @param min_n        For factor_ordinal merging: close a merge group when the
-#'                     running count reaches this value.  Default 0 (disabled).
-#'                     Both min_pct and min_n at 0 disables merging entirely.
-#' @param max_levels   Maximum total non-null levels per API request.  Default 150.
-#'   For ordinal variables, the level count used for chunking is the number of
-#'   merge groups (not raw levels), which is typically much smaller.
-#'   Variables whose individual level/group count exceeds max_levels are skipped
-#'   with a warning.
+#' @param meta_json    Path to \code{*.survey_meta.json} (required).
+#' @param max_levels   Maximum total non-null level entries per API request.
+#'   Default 150. Variables whose individual entry count exceeds max_levels are
+#'   skipped with a warning.
 #' @param chunk_size   Deprecated. Use max_levels instead.  If supplied, sets
 #'   max_levels = chunk_size * 5L with a warning.
 #' @param use_batch    Logical. Use the Anthropic Message Batch API (cheaper,
@@ -2368,11 +3458,9 @@ ai_suggest_missing <- function(
 ai_suggest_labels <- function(
     metadata,
     vars          = NULL,
-    ordinal_desc  = FALSE,
-    min_pct       = 0.05,
-    min_n         = 0L,
     meta_json     = NULL,
-    max_levels    = 150L,
+    max_levels               = 150L,
+    max_levels_in_single_var = 30L,
     chunk_size    = NULL,
     use_batch     = FALSE,
     dry_run       = FALSE,
@@ -2388,6 +3476,8 @@ ai_suggest_labels <- function(
     stop("ai_suggest_labels: meta_json is required. ",
          "Provide the path to your *.survey_meta.json file.")
 
+  has_order_col <- "order" %in% names(metadata)
+
   # ---------- filter target variables --------------------------------------
   target <- metadata |>
     dplyr::filter(detected_role %in% c("factor_binary", "factor_nominal",
@@ -2398,73 +3488,68 @@ ai_suggest_labels <- function(
     return(invisible(meta_json))
   }
 
-  # ---------- compute send_order permutation --------------------------------
-  # send_order[i] = j means stored position i is sent at position j.
-  # NULL-coded levels keep their index so they can be re-inserted exactly.
-  # ordinal_desc=FALSE => identity permutation (stored order kept as-is).
+  # ---------- build send permutation and group IDs from order col -----------
+  # For ordinal/binary: sort non-missing levels by order integer ascending.
+  # Levels sharing the same order integer = one merged entry sent to Haiku.
+  # For nominal (or when order col absent): identity permutation.
+  #
+  # .send_order: integer vector (length = n levels), gives the position in the
+  #   sorted sequence for each stored level. NA-coded levels keep their index.
+  # .merge_groups: integer vector parallel to new_labels; levels with the same
+  #   integer belong to the same merge group. NULL-coded levels get a unique id.
   target <- target |>
     dplyr::mutate(
+      .ord_for_send = if (has_order_col) order else vector("list", dplyr::n()),
       .send_order = purrr::pmap(
-        list(detected_role, desc, new_labels),
-        function(role, dsc, nls) {
+        list(detected_role, new_labels, .ord_for_send),
+        function(role, nls, ord_ints) {
           idx <- seq_along(nls)
-          if (role == "factor_binary" && isFALSE(dsc)) {
-            # positive is stored second among non-NULL; swap to first
+          if ((role %in% c("factor_ordinal", "factor_binary")) &&
+              length(ord_ints) == length(nls)) {
+            # Sort non-missing (non-NULL) levels by order integer
             non_null <- which(nls != "NULL")
-            if (length(non_null) >= 2) {
-              tmp              <- idx[non_null[1]]
-              idx[non_null[1]] <- idx[non_null[2]]
-              idx[non_null[2]] <- tmp
+            if (length(non_null) >= 2L && !all(is.na(ord_ints[non_null]))) {
+              sorted_pos        <- non_null[order(ord_ints[non_null], na.last = TRUE)]
+              idx[non_null]     <- sorted_pos
             }
-          } else if (role == "factor_ordinal" && isTRUE(ordinal_desc)) {
-            non_null      <- which(nls != "NULL")
-            idx[non_null] <- rev(idx[non_null])
           }
-          idx  # ordinal_desc=FALSE or nominal => untouched identity permutation
+          idx
         }
-      )
-    ) |>
-    dplyr::mutate(
-      # For ordinal variables: compute merge groups using level stats (if
-      # available), then use group count for chunking budget.  For binary /
-      # nominal: no merging, each non-NULL level is its own "group".
+      ),
       .merge_groups = purrr::pmap(
-        list(detected_role, values, new_labels,
-             if ("level_counts" %in% names(target)) level_counts else vector("list", nrow(target)),
-             if ("level_freqs"  %in% names(target)) level_freqs  else vector("list", nrow(target)),
-             .send_order),
-        function(role, vals, nls, counts, freqs, send_ord) {
-          n_tot <- length(nls)
-          # Default: each position gets its own singleton group id
-          groups_full <- seq_len(n_tot)
-          if (role == "factor_ordinal" &&
-              (isTRUE(min_pct > 0) || isTRUE(min_n > 0)) &&
-              length(counts) == n_tot && length(freqs) == n_tot) {
-            # Work in the send-order permutation so groups respect ordinal direction
-            non_null_idx <- which(nls[send_ord] != "NULL")
-            if (length(non_null_idx) >= 2L) {
-              vals_s   <- as.character(vals)[send_ord][non_null_idx]
-              counts_s <- counts[send_ord][non_null_idx]
-              freqs_s  <- freqs[send_ord][non_null_idx]
-              grp_s    <- .compute_merge_groups(vals_s, counts_s, freqs_s,
-                                                min_pct = min_pct, min_n = min_n)
-              # Place groups back into the full-length (send-order) vector
-              groups_send <- seq_len(n_tot)
-              groups_send[non_null_idx] <- grp_s
-              # Un-permute to original stored order
-              inv_ord <- order(send_ord)
-              groups_full <- groups_send[inv_ord]
+        list(detected_role, new_labels, .ord_for_send, .send_order),
+        function(role, nls, ord_ints, send_ord) {
+          n_tot       <- length(nls)
+          groups_full <- seq_len(n_tot)   # default: each level is its own group
+
+          if ((role %in% c("factor_ordinal", "factor_binary")) &&
+              length(ord_ints) == n_tot) {
+            # Map order integers to group IDs in send order
+            non_null_send <- which(nls[send_ord] != "NULL")
+            if (length(non_null_send) >= 2L) {
+              ords_send <- ord_ints[send_ord][non_null_send]
+              if (!all(is.na(ords_send))) {
+                # Convert unique order integers to consecutive group IDs
+                uniq_ords <- unique(ords_send[!is.na(ords_send)])
+                grp_map   <- purrr::set_names(seq_along(uniq_ords), uniq_ords)
+                grp_ids   <- grp_map[as.character(ords_send)]
+                grp_ids[is.na(ords_send)] <- max(uniq_ords) + seq_len(sum(is.na(ords_send)))
+                groups_send <- seq_len(n_tot)
+                groups_send[non_null_send] <- grp_ids
+                # Un-permute back to stored order
+                inv_ord     <- order(send_ord)
+                groups_full <- groups_send[inv_ord]
+              }
             }
           }
-          groups_full   # integer vector, length == length(nls), NULLs get their own id
+          groups_full
         }
       ),
       .n_levels = purrr::pmap_int(
         list(detected_role, new_labels, .merge_groups),
         function(role, nls, grps) {
           non_null <- nls != "NULL"
-          if (role == "factor_ordinal") {
-            # Count distinct merge groups among non-null levels
+          if (role %in% c("factor_ordinal", "factor_binary")) {
             length(unique(grps[non_null]))
           } else {
             sum(non_null)
@@ -2472,6 +3557,19 @@ ai_suggest_labels <- function(
         }
       )
     )
+
+  # Skip vars with too many levels in a single variable (cost-saving guard)
+  oversized_single <- dplyr::filter(target, .n_levels > max_levels_in_single_var)
+  if (nrow(oversized_single) > 0L) {
+    message("ai_suggest_labels: ", nrow(oversized_single), " variable(s) skipped (> ",
+            max_levels_in_single_var, " non-null level/group count): ",
+            paste(oversized_single$var_name, collapse = ", "))
+    target <- dplyr::filter(target, .n_levels <= max_levels_in_single_var)
+  }
+  if (nrow(target) == 0L) {
+    message("ai_suggest_labels: No variables remaining after filtering by max_levels_in_single_var.")
+    return(invisible(meta_json))
+  }
 
   # Skip variables whose level/group count alone exceeds max_levels (would cost
   # too much API credit and produce no useful output).
@@ -2488,7 +3586,7 @@ ai_suggest_labels <- function(
   }
 
   # ---------- JSON builder for one variable ---------------------------------
-  .build_var_json <- function(var_name, var_label, detected_role, desc,
+  .build_var_json <- function(var_name, var_label, detected_role,
                                values, labels, new_labels, send_order,
                                merge_groups, level_counts, level_freqs) {
     values_ord      <- as.character(values)[send_order]
@@ -2522,14 +3620,15 @@ ai_suggest_labels <- function(
 
     # Strip variable name prefix from var_label before sending to AI
     # (Stata labels often start with "VARNAME. " or "VARNAMEa. " — redundant tokens)
-    var_label_clean <- sub("^[A-Za-z][A-Za-z0-9_]*[a-z]?[0-9]*\\.\\s*", "", var_label)
+    var_label_clean <- .clean_var_label_for_api(var_label, var_name = var_name)
 
-    # ---- For ordinal variables: collapse groups before sending to AI --------
+    # ---- For ordinal/binary: collapse groups before sending to AI -----------
     # Each group is one entry: key = first value code of the group (in send-order),
     # label = original labels joined by " / ", counts/freqs summed.
     # .parse_labels_json_responses() matches AI output by that key and expands
     # the label back to all member levels.
-    if (detected_role == "factor_ordinal" && length(unique(groups_keep)) < length(groups_keep)) {
+    if (detected_role %in% c("factor_ordinal", "factor_binary") &&
+        length(unique(groups_keep)) < length(groups_keep)) {
       gids      <- unique(groups_keep)
       n_groups  <- length(gids)
 
@@ -2599,13 +3698,13 @@ ai_suggest_labels <- function(
   # ---------- user message builder for a chunk (data only) ------------------
   build_prompt <- function(chunk_df) {
     json_objects <- purrr::pmap(
-      dplyr::select(chunk_df, var_name, var_label, detected_role, desc,
+      dplyr::select(chunk_df, var_name, var_label, detected_role,
                     values, labels, new_labels, .send_order, .merge_groups,
                     dplyr::any_of(c("level_counts", "level_freqs"))),
-      function(var_name, var_label, detected_role, desc,
+      function(var_name, var_label, detected_role,
                values, labels, new_labels, .send_order, .merge_groups,
                level_counts = integer(0), level_freqs = numeric(0)) {
-        .build_var_json(var_name, var_label, detected_role, desc,
+        .build_var_json(var_name, var_label, detected_role,
                         values, labels, new_labels, .send_order, .merge_groups,
                         level_counts, level_freqs)
       }
@@ -2640,6 +3739,7 @@ ai_suggest_labels <- function(
     message(strrep("=", 60))
     message("Variables: ", nrow(target), "  |  Chunks: ", length(prompts),
             "  |  Levels budget: ", max_levels, " per chunk",
+            "  |  Max levels/var: ", max_levels_in_single_var,
             "  |  Route: ", if (use_batch) "batch" else "synchronous")
     message("\n", strrep("-", 60))
     message("SYSTEM PROMPT")
@@ -2719,8 +3819,8 @@ ai_suggest_labels <- function(
 #   "prfc1_Q1": {
 #     "role": "factor_binary",
 #     "levels": {
-#       "1": { "label": "Oui, choisie", "new_label": "Choisie", "n": 451, "pct": 61 },
-#       "9": { "label": "NSP",          "null_coded": true }
+#       "1": { "order": 1, "label": "Oui, choisie", "new_label": "Choisie", "n": 451, "pct": 61 },
+#       "9": { "missing": true, "label": "NSP" }
 #     }
 #   }
 #
@@ -2742,53 +3842,63 @@ ai_suggest_labels <- function(
     }
 
     # ---- per-level raw field strings (unpadded) ----------------------------
-    has_new_label <- any(purrr::map_lgl(levels, ~ !is.null(.x$new_label)))
-    has_null      <- any(purrr::map_lgl(levels, ~ isTRUE(.x$null_coded)))
-    has_n         <- any(purrr::map_lgl(levels, ~ !is.null(.x$n)))
-    has_pct       <- any(purrr::map_lgl(levels, ~ !is.null(.x$pct)))
+    is_missing_vec <- purrr::map_lgl(levels, ~ isTRUE(.x[["missing"]]))
+    has_order     <- any(purrr::map_lgl(levels, ~ !is.null(.x[["order"]])))
+    has_new_label <- any(purrr::map_lgl(levels, ~ !isTRUE(.x[["missing"]]) && !is.null(.x[["new_label"]])))
+    has_n         <- any(purrr::map_lgl(levels, ~ !is.null(.x[["n"]])))
+    has_pct       <- any(purrr::map_lgl(levels, ~ !is.null(.x[["pct"]])))
 
     val_keys   <- names(levels)
     f_key      <- paste0('"', purrr::map_chr(val_keys, esc), '"')
     f_label    <- purrr::map_chr(levels, function(lev)
-                    paste0('"', esc(lev$label), '"'))
+                    paste0('"', esc(lev[["label"]]), '"'))
+    f_order    <- if (has_order) purrr::map_chr(levels, function(lev)
+                    if (!isTRUE(lev[["missing"]]) && !is.null(lev[["order"]]))
+                      as.character(as.integer(lev[["order"]]))
+                    else "") else NULL
     f_new_lbl  <- if (has_new_label) purrr::map_chr(levels, function(lev)
-                    if (!is.null(lev$new_label)) paste0('"', esc(lev$new_label), '"') else '""') else NULL
-    f_n        <- if (has_n) purrr::map_chr(levels, function(lev)
-                    if (!is.null(lev$n)) as.character(as.integer(lev$n)) else "") else NULL
-    f_pct      <- if (has_pct) purrr::map_chr(levels, function(lev)
-                    if (!is.null(lev$pct)) as.character(as.integer(lev$pct)) else "") else NULL
+                    if (!isTRUE(lev[["missing"]]) && !is.null(lev[["new_label"]]))
+                      paste0('"', esc(lev[["new_label"]]), '"') else '""') else NULL
+    f_n        <- if (has_n) purrr::map_chr(levels, function(lev) {
+                    v <- lev[["n"]]
+                    if (!is.null(v) && length(v) == 1L && !is.na(v)) as.character(as.integer(v)) else ""
+                  }) else NULL
+    f_pct      <- if (has_pct) purrr::map_chr(levels, function(lev) {
+                    v <- lev[["pct"]]
+                    if (!is.null(v) && length(v) == 1L && !is.na(v)) as.character(as.integer(v)) else ""
+                  }) else NULL
 
     # ---- column widths (max across all levels of this variable) ------------
     w_key   <- max(nchar(f_key,   type = "chars"))
+    w_order <- if (has_order) {
+      non_empty <- f_order[nzchar(f_order)]
+      if (length(non_empty) > 0) max(nchar(non_empty, type = "chars")) else 1L
+    } else 0L
     w_label <- max(nchar(f_label, type = "chars"))
     w_new   <- if (has_new_label) max(nchar(f_new_lbl, type = "chars")) else 0L
-    # null_coded is always 4 chars ("true") when present; no variable width needed
-    w_n     <- if (has_n)   max(nchar(f_n,   type = "chars")) else 0L
-    w_pct   <- if (has_pct) max(nchar(f_pct, type = "chars")) else 0L
+    w_n     <- if (has_n) { ne <- f_n[nzchar(f_n)];     if (length(ne) > 0) max(nchar(ne,  type = "chars")) else 1L } else 0L
+    w_pct   <- if (has_pct) { ne <- f_pct[nzchar(f_pct)]; if (length(ne) > 0) max(nchar(ne,  type = "chars")) else 1L } else 0L
 
     # ---- assemble one line per level ---------------------------------------
-    # Each field is padded to the column-max width for this variable.
-    # null_coded rows omit n/pct; real rows omit null_coded — no blank gaps.
     level_lines <- character(n_lev)
     for (i in seq_len(n_lev)) {
       lev     <- levels[[i]]
-      is_null <- isTRUE(lev$null_coded)
+      is_miss <- is_missing_vec[[i]]
 
       tokens <- character(0)
-      # label — always present, padded to column width
+      if (has_order && !is_miss && !is.null(lev[["order"]])) {
+        ord_str <- formatC(f_order[[i]], width = w_order, flag = " ")
+        tokens  <- c(tokens, paste0('"order": ', ord_str))
+      }
+      if (is_miss) tokens <- c(tokens, '"missing": true')
       tokens <- c(tokens, paste0('"label": ', rpad(f_label[[i]], w_label)))
-      # new_label — present only when at least one level has it
-      if (has_new_label)
+      if (has_new_label && !is_miss)
         tokens <- c(tokens, paste0('"new_label": ', rpad(f_new_lbl[[i]], w_new)))
-      # null_coded — only emitted on null rows (no blank placeholder on real rows,
-      # so n/pct stay directly after label on real rows without a gap)
-      if (is_null) {
-        tokens <- c(tokens, '"null_coded": true')
-      } else {
+      if (!is_miss) {
         # n and pct: right-aligned to their column width
-        if (has_n && !is.null(lev$n))
+        if (has_n && !is.null(lev[["n"]]))
           tokens <- c(tokens, paste0('"n": ', formatC(f_n[[i]], width = w_n, flag = " ")))
-        if (has_pct && !is.null(lev$pct))
+        if (has_pct && !is.null(lev[["pct"]]))
           tokens <- c(tokens, paste0('"pct": ', formatC(f_pct[[i]], width = w_pct, flag = " ")))
       }
 
@@ -2877,7 +3987,7 @@ ai_suggest_labels <- function(
       # ---- Keyed format: join by value code or group key -------------------
       result_ord <- nl_ord   # default: keep existing label; "NULL" preserved
 
-      if (role == "factor_ordinal" &&
+      if (role %in% c("factor_ordinal", "factor_binary") &&
           length(unique(groups_ord[keep])) < sum(keep)) {
         # Group-based matching: AI returned one label per group, keyed by the
         # first code of each group.  Expand the group label to all members.
@@ -2942,8 +4052,8 @@ ai_suggest_labels <- function(
 # Each variable entry has the form:
 #   { "role": "factor_binary",
 #     "levels": {
-#       "1": { "label": "Oui — choisie",  "new_label": "Choisie", "n": 451, "pct": 61 },
-#       "9": { "label": "NSP / NR",       "null_coded": true }
+#       "1": { "order": 1, "label": "Oui — choisie",  "new_label": "Choisie", "n": 451, "pct": 61 },
+#       "9": { "missing": true, "label": "NSP / NR" }
 #     }
 #   }
 #
@@ -2990,7 +4100,7 @@ ai_suggest_labels <- function(
           if (!is.null(ai_vec) && !is_null)
             entry[["new_label"]] <- as.character(ai_vec[[i]])
           if (is_null)
-            entry[["null_coded"]] <- TRUE
+            entry[["missing"]] <- TRUE
           if (has_n && !is_null) entry[["n"]]   <- as.integer(counts[[i]])
           if (has_p && !is_null) entry[["pct"]] <- as.integer(freqs[[i]])
           entry
@@ -3024,7 +4134,7 @@ ai_suggest_labels <- function(
 # ---------------------------------------------------------------------------
 # Merge a labels_map (from .build_levels_map / .enrich_labels_map_with_stats)
 # into the $variables section of a unified survey_meta.json list.
-# Only updates the "levels" sub-object; preserves var_label, role, desc,
+# Only updates the "levels" sub-object; preserves var_label, role,
 # new_name untouched.
 .merge_labels_into_meta_vars <- function(meta_vars, labels_map) {
   for (vname in names(labels_map)) {
@@ -3038,7 +4148,6 @@ ai_suggest_labels <- function(
       meta_vars[[vname]] <- list(
         var_label = "",
         role      = as.character(entry$role[[1]]),
-        desc      = NULL,
         new_name  = vname,
         levels    = levels
       )
@@ -3053,15 +4162,15 @@ ai_suggest_labels <- function(
         if (is.null(existing_levels[[val_code]])) {
           existing_levels[[val_code]] <- new_lev
         } else {
-          # Keep existing label; update new_label, n, pct, null_coded
+          # Keep existing label; update new_label, n, pct, missing
           if (!is.null(new_lev$new_label))
             existing_levels[[val_code]]$new_label <- new_lev$new_label
           if (!is.null(new_lev$n))
             existing_levels[[val_code]]$n <- new_lev$n
           if (!is.null(new_lev$pct))
             existing_levels[[val_code]]$pct <- new_lev$pct
-          if (isTRUE(new_lev$null_coded))
-            existing_levels[[val_code]]$null_coded <- TRUE
+          if (isTRUE(new_lev$missing))
+            existing_levels[[val_code]]$missing <- TRUE
         }
       }
       meta_vars[[vname]]$levels <- existing_levels
@@ -3499,11 +4608,11 @@ ai_suggest_varnames <- function(
 
 
 # ---------------------------------------------------------------------------
-# Sync null_coded flags in the JSON variables section with freshly-computed
+# Sync "missing": true flags in the JSON variables section with freshly-computed
 # missing_vals from extract_survey_metadata(). Called on every re-run when
 # meta_json already exists, so new missing_chr entries take effect in the JSON.
 # Returns the updated json_vars list (unchanged object if no differences found).
-.update_null_coded_in_meta_json <- function(json_vars, metadata) {
+.update_missing_in_meta_json <- function(json_vars, metadata) {
   for (vname in names(json_vars)) {
     row <- metadata[metadata$var_name == vname, ]
     if (nrow(row) == 0) next
@@ -3511,16 +4620,21 @@ ai_suggest_varnames <- function(
     levels    <- json_vars[[vname]]$levels
     if (is.null(levels) || length(levels) == 0) next
 
-    changed <- FALSE
     for (val_code in names(levels)) {
-      should_be_null <- val_code %in% miss_vals
-      currently_null <- isTRUE(levels[[val_code]]$null_coded)
-      if (should_be_null && !currently_null) {
-        json_vars[[vname]]$levels[[val_code]]$null_coded <- TRUE
-        changed <- TRUE
-      } else if (!should_be_null && currently_null) {
-        json_vars[[vname]]$levels[[val_code]]$null_coded <- NULL
-        changed <- TRUE
+      should_be_miss <- val_code %in% miss_vals
+      currently_miss <- isTRUE(levels[[val_code]]$missing)
+      if (should_be_miss && !currently_miss) {
+        json_vars[[vname]]$levels[[val_code]]$missing <- TRUE
+        # Remove "order" from newly-missing levels
+        json_vars[[vname]]$levels[[val_code]]$order <- NULL
+      } else if (!should_be_miss && currently_miss) {
+        json_vars[[vname]]$levels[[val_code]]$missing <- NULL
+        # Assign a sequential order if not already set
+        if (is.null(json_vars[[vname]]$levels[[val_code]]$order)) {
+          non_miss_codes <- names(levels)[!purrr::map_lgl(levels, ~ isTRUE(.x$missing))]
+          next_ord <- length(non_miss_codes) + 1L
+          json_vars[[vname]]$levels[[val_code]]$order <- next_ord
+        }
       }
     }
   }
@@ -3531,8 +4645,9 @@ ai_suggest_varnames <- function(
 # Apply a unified survey_meta.json variables section to a metadata table.
 # Called internally by extract_survey_metadata() when meta_json is supplied.
 # json_vars: the $variables list read from .read_meta_json() (already in memory).
-# Updates: new_labels (from levels[*].new_label), level_counts/freqs (from n/pct),
-#          new_name, detected_role, desc — all matched by variable name + value code.
+# Updates: new_labels (from levels[*].new_label / missing), order (from levels[*].order),
+#          level_counts/freqs (from n/pct), new_name, detected_role
+#          — all matched by variable name + value code.
 metadata_apply_meta_json <- function(metadata, json_vars) {
   if (is.null(json_vars) || length(json_vars) == 0) return(metadata)
 
@@ -3547,20 +4662,37 @@ metadata_apply_meta_json <- function(metadata, json_vars) {
     if (!is.null(nn) && nzchar(nn) && nn != vname)
       out$new_name <- nn
 
-    # new_labels + level stats from levels block (matched by value code)
+    # new_labels, order, level stats from levels block (matched by value code)
     levels_obj <- entry[["levels"]]
     if (!is.null(levels_obj) && length(levels_obj) > 0) {
       meta_vals <- as.character(row$values[[1]])
 
-      has_new <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$new_label)))
-      if (has_new) {
+      # new_labels: use new_label from JSON; missing:true levels → "NULL" sentinel
+      has_new  <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$new_label)))
+      has_miss <- any(purrr::map_lgl(levels_obj, ~ isTRUE(.x$missing)))
+      if (has_new || has_miss) {
         nls <- row$new_labels[[1]]
         for (i in seq_along(meta_vals)) {
           lev <- levels_obj[[meta_vals[[i]]]]
-          if (!is.null(lev) && !is.null(lev$new_label))
-            nls[[i]] <- as.character(lev$new_label)
+          if (!is.null(lev)) {
+            if (isTRUE(lev$missing))
+              nls[[i]] <- "NULL"
+            else if (!is.null(lev$new_label))
+              nls[[i]] <- as.character(lev$new_label)
+          }
         }
         out$new_labels <- list(nls)
+      }
+
+      # order: read per-level "order" integer; missing levels → NA_integer_
+      has_order <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$order)))
+      if (has_order || has_miss) {
+        ord <- purrr::map_int(meta_vals, function(v) {
+          lev <- levels_obj[[v]]
+          if (is.null(lev) || isTRUE(lev$missing)) return(NA_integer_)
+          if (!is.null(lev$order)) as.integer(lev$order) else NA_integer_
+        })
+        out$order <- list(ord)
       }
 
       has_stats <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$n)))
@@ -3585,10 +4717,11 @@ metadata_apply_meta_json <- function(metadata, json_vars) {
   if (nrow(update_rows) == 0) return(metadata)
 
   # Ensure list columns exist before rows_update
-  for (col in c("level_counts", "level_freqs")) {
+  for (col in c("level_counts", "level_freqs", "order")) {
     if (col %in% names(update_rows) && !col %in% names(metadata)) {
       metadata[[col]] <- vector("list", nrow(metadata))
-      metadata[[col]][] <- list(if (col == "level_counts") integer(0) else numeric(0))
+      metadata[[col]][] <- list(switch(col,
+        level_counts = integer(0), level_freqs = numeric(0), order = integer(0)))
     }
   }
 
@@ -3596,10 +4729,12 @@ metadata_apply_meta_json <- function(metadata, json_vars) {
   has_nl  <- "new_labels"   %in% names(update_rows)
   has_nn  <- "new_name"     %in% names(update_rows)
   has_st  <- "level_counts" %in% names(update_rows)
+  has_ord <- "order"        %in% names(update_rows)
   message("metadata_apply_meta_json: ", n_updated, " variable(s) updated",
-          if (has_nn) paste0(" (new_name: ",     sum(!is.na(update_rows$new_name)),    ")") else "",
-          if (has_nl) paste0(" (new_labels: ",   sum(!is.null(update_rows$new_labels)),")")  else "",
-          if (has_st) paste0(" (stats: ",        n_updated,                            ")")  else "")
+          if (has_nn)  paste0(" (new_name: ",  sum(!is.na(update_rows$new_name)), ")")  else "",
+          if (has_nl)  paste0(" (new_labels: ", n_updated, ")")  else "",
+          if (has_ord) paste0(" (order: ",      n_updated, ")")  else "",
+          if (has_st)  paste0(" (stats: ",      n_updated, ")")  else "")
 
   dplyr::rows_update(metadata, update_rows, by = "var_name", unmatched = "ignore")
 }
@@ -3632,28 +4767,41 @@ metadata_apply_meta_json <- function(metadata, json_vars) {
     function(i, vname) {
       row    <- metadata[i, ]
       role   <- row$detected_role
-      desc   <- row$desc
       vals   <- row$values[[1]]
       labs   <- row$labels[[1]]
       mnulls <- row$missing_vals[[1]]
+      # order list-col: use existing if present, otherwise NULL (sequential default)
+      ord_vec <- if ("order" %in% names(row)) row$order[[1]] else NULL
 
-      # Build levels: original labels, null_coded for missing
+      # Build levels: sequential "order" for non-missing, "missing": true for missing
       levels_list <- if (length(vals) > 0) {
+        vals_chr    <- as.character(vals)
+        valid_pos   <- 0L  # counter for sequential order among non-missing levels
         purrr::set_names(
-          purrr::map2(as.character(vals), labs, function(v, l) {
+          purrr::imap(vals_chr, function(v, idx) {
             is_miss <- v %in% as.character(mnulls)
-            entry   <- list(label = l)
-            if (is_miss) entry$null_coded <- TRUE
+            entry   <- list(label = labs[[idx]])
+            if (is_miss) {
+              entry$missing <- TRUE
+            } else {
+              # Use existing order value if available, else sequential
+              ord_val <- if (!is.null(ord_vec) && idx <= length(ord_vec) && !is.na(ord_vec[[idx]]))
+                as.integer(ord_vec[[idx]])
+              else {
+                valid_pos <<- valid_pos + 1L
+                valid_pos
+              }
+              entry$order <- ord_val
+            }
             entry
           }),
-          as.character(vals)
+          vals_chr
         )
       } else list()
 
       list(
         var_label = row$var_label,
         role      = role,
-        desc      = desc,
         new_name  = vname,
         levels    = levels_list
       )

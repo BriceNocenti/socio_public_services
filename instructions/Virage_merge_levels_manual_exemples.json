@@ -1,0 +1,524 @@
+{
+
+// ############## 1. ORDINAL VARIABLES ###################################
+    "Q26E_DUREE": {
+      "var_label": "Depuis combien de temps avez-vous cessé de travailler ? ou Depuis combien de temps avez-vous cessé de travailler à temps plein ? (Synthèse des variables Q26E & Q26Ea)",
+      "role"     : "factor_ordinal",
+      "new_name" : "Q26E_DUREE",
+      "levels": {
+        "0"  : { "order":  5, "label": "Moins d'un mois"                        , "n":  173, "pct":  2 },
+        "1"  : { "order":  5, "label": "1 mois"                                 , "n":  119, "pct":  1 },
+        "2"  : { "order":  5, "label": "2 mois"                                 , "n":  156, "pct":  2 },
+        "3"  : { "order":  5, "label": "3 mois"                                 , "n":  156, "pct":  2 },
+        "4"  : { "order":  5, "label": "4 mois"                                 , "n":  123, "pct":  1 },
+        "5"  : { "order":  5, "label": "5 mois"                                 , "n":  120, "pct":  1 },
+        "6"  : { "order":  5, "label": "6 mois"                                 , "n":  209, "pct":  2 },
+        "7"  : { "order":  5, "label": "7 mois"                                 , "n":   74, "pct":  1 },
+        "8"  : { "order":  5, "label": "8 mois"                                 , "n":   94, "pct":  1 },
+        "9"  : { "order":  5, "label": "9 mois"                                 , "n":   78, "pct":  1 },
+        "10" : { "order":  5, "label": "10 mois"                                , "n":   62, "pct":  1 },
+        "11" : { "order":  5, "label": "11 mois"                                , "n":   38, "pct":  0 },
+        "12" : { "order":  4, "label": "1 an"                                   , "n":  909, "pct":  9 },
+        "24" : { "order":  4, "label": "2 ans"                                  , "n": 1065, "pct": 11 },
+        "36" : { "order":  4, "label": "3 ans"                                  , "n":  766, "pct":  8 },
+        "48" : { "order":  4, "label": "4 ans"                                  , "n":  636, "pct":  7 },
+        "60" : { "order":  3, "label": "5 ans"                                  , "n":  797, "pct":  8 },
+        "72" : { "order":  3, "label": "6 ans"                                  , "n":  548, "pct":  6 },
+        "84" : { "order":  3, "label": "7 ans"                                  , "n":  617, "pct":  6 },
+        "96" : { "order":  3, "label": "8 ans"                                  , "n":  609, "pct":  6 },
+        "108": { "order":  3, "label": "9 ans"                                  , "n":  488, "pct":  5 },
+        "120": { "order":  2, "label": "10 ans"                                 , "n":  556, "pct":  6 },
+        "132": { "order":  2, "label": "11 ans"                                 , "n":  128, "pct":  1 },
+        "144": { "order":  2, "label": "12 ans"                                 , "n":  173, "pct":  2 },
+        "156": { "order":  2, "label": "13 ans"                                 , "n":  127, "pct":  1 },
+        "168": { "order":  2, "label": "14 ans"                                 , "n":   85, "pct":  1 },
+        "180": { "order":  2, "label": "15 ans"                                 , "n":  167, "pct":  2 },
+        "192": { "order":  1, "label": "Plus de 15 ans"                         , "n":  585, "pct":  6 },
+        "777": { "missing": true, "label": "Non concerné"                            },
+        "888": { "missing": true, "label": "NVPD"                                    },
+        "999": { "missing": true, "label": "NSP ou préfère dire depuis quelle année" }
+      }
+    },
+
+    "Q29E_9GR": {
+        "var_label": "Diplôme en 9 modalités",
+        "role"     : "factor_ordinal",
+        "new_name" : "Q29E_9GR",
+        "levels": {
+          "00": { "order": 5, "label": "Aucun diplôme"           , "n": 1302, "pct":  5 },
+          "10": { "order": 5, "label": "Primaire"                , "n": 1137, "pct":  4 },
+          "20": { "order": 4, "label": "Secondaire"              , "n": 7872, "pct": 29 },
+          "30": { "order": 3, "label": "Bac"                     , "n": 5384, "pct": 20 },
+          "40": { "order": 2, "label": "Bac+2"                   , "n": 4148, "pct": 15 },
+          "50": { "order": 2, "label": "Bac+3"                   , "n": 2579, "pct":  9 },
+          "60": { "order": 2, "label": "Bac+4"                   , "n": 1229, "pct":  5 },
+          "70": { "order": 1, "label": "Bac+5"                   , "n": 2721, "pct": 10 },
+          "80": { "order": 1, "label": "Bac+6 et plus"           , "n":  792, "pct":  3 },
+          "88": { "missing": true, "label": "Ne souhaite pas répondre" },
+          "99": { "missing": true, "label": "Ne sais pas"              }
+        }
+      },
+
+      "E1A": {
+        "var_label": "Au cours des 12 derniers mois, ces contacts ont-ils été...",
+        "role"     : "factor_ordinal",
+        "new_name" : "E1A",
+        "levels": {
+          "01": { "order": 3, "label": "Toujours bons ou sans problèmes", "n": 1645, "pct": 67 },
+          "02": { "order": 2, "label": "Quelques fois difficiles"       , "n":  575, "pct": 23 },
+          "03": { "order": 1, "label": "Toujours difficiles"            , "n":  246, "pct": 10 },
+          "88": { "missing": true, "label": "NVPD"                            },
+          "99": { "missing": true, "label": "NSP"                             }
+        }
+      },
+
+      "EMP1A": {
+        "var_label": "Etait-ce un emploi …",
+        "role"     : "factor_ordinal",
+        "new_name" : "EMP1A",
+        "levels": {
+          "01": { "order": 2, "label": "Régulier, au moins une fois par semaine"    , "n":  85, "pct": 31 },
+          "02": { "order": 2, "label": "Régulier, mais moins d'une fois par semaine", "n":   9, "pct":  3 },
+          "03": { "order": 1, "label": "occasionnel, pendant les vacances scolaires", "n": 184, "pct": 66 },
+          "88": { "missing": true, "label": "NVPD"                                        },
+          "99": { "missing": true, "label": "NSP"                                         }
+        }
+      },
+
+      "EMP14": {
+        "var_label": "Dans votre travail, êtes-vous/ étiez-vous régulièrement en contact avec du public, ou une clientèle, en face à face, au téléphone ou par mail ?",
+        "role"     : "factor_ordinal",
+        "new_name" : "EMP14",
+        "levels": {
+          "00": { "order": 4, "label": "Non"                                       , "n": 4466, "pct": 24 },
+          "01": { "order": 3, "label": "Oui, en face à face"                       , "n": 7126, "pct": 38 },
+          "02": { "order": 2, "label": "Oui, par téléphone ou mail"                , "n": 1535, "pct":  8 },
+          "03": { "order": 1, "label": "Oui, en face à face, par téléphone ou mail", "n": 5556, "pct": 30 },
+          "88": { "missing": true, "label": "NVPD"                                       },
+          "99": { "missing": true, "label": "NSP"                                        }
+        }
+      },
+
+      "EMP18A": {
+        "var_label": "Vous arrive-t-il/vous arrivait-il de commencer votre travail ou de le terminer entre 21 heures et 6 heures du matin ?",
+        "role"     : "factor_ordinal",
+        "new_name" : "EMP18A",
+        "levels": {
+          "00": { "order": 3, "label": "Non, jamais"           , "n": 12758, "pct": 68 },
+          "01": { "order": 2, "label": "Oui, régulièrement"    , "n":  2729, "pct": 15 },
+          "02": { "order": 1, "label": "Oui, occasionnellement", "n":  3187, "pct": 17 },
+          "88": { "missing": true, "label": "NVPD"                   },
+          "99": { "missing": true, "label": "NSP"                    }
+        }
+      },
+
+      "REV2": {
+        "var_label": "(Ne parlez que de vos ressources individuelles)",
+        "role"     : "factor_ordinal",
+        "new_name" : "REV2",
+        "levels": {
+          "00": { "order": 5, "label": "Aucun revenu"                 , "n":  998, "pct":  4 },
+          "01": { "order": 5, "label": "Moins de 700 euros"           , "n": 1773, "pct":  7 },
+          "02": { "order": 4, "label": "De 700 à moins de 1000 euros" , "n": 2521, "pct": 10 },
+          "03": { "order": 4, "label": "De 1000 à moins de 1300 euros", "n": 3421, "pct": 14 },
+          "04": { "order": 3, "label": "De 1300 à moins de 1600 euros", "n": 4024, "pct": 17 },
+          "05": { "order": 3, "label": "De 1600 à moins de 2000 euros", "n": 4065, "pct": 17 },
+          "06": { "order": 2, "label": "De 2000 à moins de 2500 euros", "n": 3284, "pct": 13 },
+          "07": { "order": 2, "label": "De 2500 à moins de 3000 euros", "n": 1821, "pct":  7 },
+          "08": { "order": 1, "label": "Plus de 3000 euros"           , "n": 2460, "pct": 10 },
+          "09": { "order": 5, "label": "Aucun revenu"                 , "n":    0, "pct":  0 }, // Misscoded to 1 in order
+          "88": { "missing": true, "label": "NVPD"                          },
+          "99": { "missing": true, "label": "NSP"                           }
+        }
+      },
+
+      "REV4": {
+        "var_label": "Pour votre ménage, diriez-vous que financièrement ?",
+        "role"     : "factor_ordinal",
+        "new_name" : "REV4",
+        "levels": {
+          "01": { "order": 5, "label": "Vous êtes-étiez très à l aise"                                       , "n":  2501, "pct":  9 },
+          "02": { "order": 4, "label": "Ca va - ça allait"                                                   , "n": 12604, "pct": 47 },
+          "03": { "order": 3, "label": "C est / c était juste"                                               , "n":  7612, "pct": 28 },
+          "04": { "order": 2, "label": "Vous y arrivez/Vous y arriv(i)ez difficilement"                      , "n":  3680, "pct": 14 },
+          "05": { "order": 1, "label": "Vous ne pouvez /Vous ne pouv(i)ez pas y arriver sans faire de dettes", "n":   682, "pct":  3 }, // even if below min_pct, but not too much below, it’s important here, semantically, to keep this strong category, and keep rarity of this extreme category
+          "88": { "missing": true, "label": "NVPD"                                                                 },
+          "99": { "missing": true, "label": "NSP"                                                                  }
+        }
+      },
+
+      "CF1A": {
+        "var_label": "Dites-moi si vous êtes tout-à-fait d'accord, plutôt d'accord, pas du tout d'accord avec cette proposition : < Dans un couple, il faut tout faire ensemble >.",
+        "role"     : "factor_ordinal",
+        "new_name" : "CF1A",
+        "levels": {
+          "01": { "order": 1, "label": "Tout à fait d'accord", "n":  7620, "pct": 28 },
+          "02": { "order": 2, "label": "Plutôt d'accord"     , "n": 10701, "pct": 40 },
+          "03": { "order": 3, "label": "Plutôt pas d'accord" , "n":  6433, "pct": 24 },
+          "04": { "order": 4, "label": "Pas du tout d'accord", "n":  2302, "pct":  9 },
+          "88": { "missing": true, "label": "NVPD"                 },
+          "99": { "missing": true, "label": "NSP"                  }
+        }
+      },
+
+      // Here, even with 3% < min_pct, it may seem important to keep the "Souvent + tout le temps" category, as it is semantically important to distinguish it from "Parfois" (there is enough n for that). But in the same time, the user may prefer to have only binary variables in this set of variables (ease of use), so we go binary.
+      "CF5A": {
+        "var_label": "CF5. Au cours des 12 derniers mois, vous êtes-vous disputé-e ou avez-vous eu des conflits avec votre au sujet...a) De la répartition des tâches dans la vie quotidienne",
+        "role"     : "factor_ordinal",
+        "new_name" : "CF5A",
+        "levels": {
+          "00": { "order": 2, "label": "Non"                     , "n": 12272, "pct": 75 },
+          "01": { "order": 1, "label": "Parfois"                 , "n":  3494, "pct": 21 },
+          "02": { "order": 1, "label": "Souvent"                 , "n":   510, "pct":  3 },
+          "03": { "order": 1, "label": "tout le temps ou presque", "n":     0, "pct":  0 },
+          "88": { "missing": true, "label": "NVPD"                     },
+          "99": { "missing": true, "label": "NSP"                      }
+        }
+      },
+
+      // Here, it’s not really possible to "save" an extreme category (0 + 1 = 1%), so we fall back to binary Done / Not done
+      "CF5C1": {
+        "var_label": "CF5. Au cours des 12 derniers mois, vous êtes-vous disputé-e ou avez-vous eu des conflits avec votre au sujet...c1) De l'idée d'avoir des enfants",
+        "role"     : "factor_ordinal",
+        "new_name" : "CF5C1",
+        "levels": {
+          "00": { "order": 2, "label": "Non"                     , "n": 11528, "pct": 95 },
+          "01": { "order": 1, "label": "Parfois"                 , "n":   539, "pct":  4 },
+          "02": { "order": 1, "label": "Souvent"                 , "n":   116, "pct":  1 },
+          "03": { "order": 1, "label": "tout le temps ou presque", "n":     0, "pct":  0 },
+          "88": { "missing": true, "label": "NVPD"                     },
+          "99": { "missing": true, "label": "NSP"                      }
+        }
+      },
+
+      // Here, it’s not at all possible to save an extreme category, and even the Done category (binany Done / Not done) is very small, but we keep it not to end up with only one category.
+      "CF5C2": {
+        "var_label": "CF5. Au cours des 12 derniers mois, vous êtes-vous disputé-e ou avez-vous eu des conflits avec votre au sujet...c2) De la contraception",
+        "role"     : "factor_ordinal",
+        "new_name" : "CF5C2",
+        "levels": {
+          "00": { "order": 2, "label": "Non"                     , "n": 11486, "pct": 98 },
+          "01": { "order": 2, "label": "Parfois"                 , "n":   209, "pct":  2 },
+          "02": { "order": 1, "label": "Souvent"                 , "n":    58, "pct":  0 },
+          "03": { "order": 1, "label": "tout le temps ou presque", "n":     0, "pct":  0 },
+          "88": { "missing": true, "label": "NVPD"                     },
+          "99": { "missing": true, "label": "NSP"                      }
+        }
+      },
+
+       // Here, no 5 levels variable seems right, it seems nearly impossible to group levels in another way, and frequencies are already A shaped
+      "REV4BIS": {
+        "var_label": "Diriez-vous que votre revenu est/était …",
+        "role"     : "factor_ordinal",
+        "new_name" : "REV4BIS",
+        "levels": {
+          "01": { "order": 6, "label": "Très supérieur à celui de votre conjoint-e", "n": 1223, "pct":  7 },
+          "02": { "order": 5, "label": "Supérieur à celui de votre conjoint-e"     , "n": 4780, "pct": 27 },
+          "03": { "order": 4, "label": "Equivalent à celui de votre conjoint-e"    , "n": 3859, "pct": 22 },
+          "04": { "order": 3, "label": "Inférieur à celui de votre conjoint-e"     , "n": 5181, "pct": 30 },
+          "05": { "order": 2, "label": "Très inférieur à celui de votre conjoint-e", "n": 1759, "pct": 10 },
+          "06": { "order": 1, "label": "Votre conjoint-e n' pas de revenu"         , "n":  642, "pct":  4 },
+          "88": { "missing": true, "label": "NVPD"                                       },
+          "99": { "missing": true, "label": "NSP"                                        }
+        }
+      },
+
+      // Here the "Non" of activité sportives is frequent and we keep it, but we merge it with "De temps en temps" for contacts ami·es because it’s below min_pct = 5%
+      "SOC2B": {
+        "var_label": "Au cours des 12 derniers mois, est-ce que...b) Vous avez eu des contacts avec des ami-e-s ?",
+        "role"     : "factor_ordinal",
+        "new_name" : "SOC2B",
+        "levels": {
+          "00": { "order": 3, "label": "Non"              , "n":   809, "pct":  3 },
+          "01": { "order": 3, "label": "De temps en temps", "n":  4489, "pct": 16 },
+          "02": { "order": 2, "label": "Souvent"          , "n": 11956, "pct": 44 },
+          "03": { "order": 1, "label": "Très souvent"     , "n":  9995, "pct": 37 },
+          "88": { "missing": true, "label": "NVPD"              },
+          "99": { "missing": true, "label": "NSP"               }
+        }
+      },
+      "SOC2C": {
+        "var_label": "Au cours des 12 derniers mois, est-ce que...c) Vous avez participé à des activités sportives, de loisir",
+        "role"     : "factor_ordinal",
+        "new_name" : "SOC2C",
+        "levels": {
+          "00": { "order": 4, "label": "Non"              , "n": 6838, "pct": 25 },
+          "01": { "order": 3, "label": "De temps en temps", "n": 7548, "pct": 28 },
+          "02": { "order": 2, "label": "Souvent"          , "n": 8814, "pct": 32 },
+          "03": { "order": 1, "label": "Très souvent"     , "n": 4050, "pct": 15 },
+          "88": { "missing": true, "label": "NVPD"              },
+          "99": { "missing": true, "label": "NSP"               }
+        }
+      },
+
+      "SEX8B1": {
+        "var_label": "Cette personne était-elle ...",
+        "role"     : "factor_ordinal",
+        "new_name" : "SEX8B1",
+        "levels": {
+          "01": { "order": 1, "label": "Beaucoup plus âgée que vous (10 ans et plus)" , "n":  63, "pct":  5 },
+          "02": { "order": 2, "label": "Plus âgée que vous (de 3 à 9 ans de plus)"    , "n": 299, "pct": 26 },
+          "03": { "order": 3, "label": "A peu près du même âge"                       , "n": 727, "pct": 63 },
+          "04": { "order": 4, "label": "Plus jeune que vous (de 3 à 9 ans de moins)"  , "n":  69, "pct":  6 },
+          "05": { "order": 4, "label": "Beaucoup plus jeune que vous (10 ans et plus)", "n":   3, "pct":  0 },
+          "88": { "missing": true, "label": "NVPD"                                          },
+          "99": { "missing": true, "label": "NSP"                                           }
+        }
+      },
+
+      // This one is a bit complex
+      "SEX17": {
+        "var_label": "Au cours des 12 derniers mois, votre [précédent-e / dernier-e] conjoint-e ou partenaire a-t-il/elle eu des rapports sexuels avec d'autres personnes que vous ?",
+        "role"     : "factor_ordinal",
+        "new_name" : "SEX17",
+        "levels": {
+          "00": { "order": 2, "label": "Non"                          , "n": 10876, "pct": 64 },
+          "01": { "order": 2, "label": "Vous pensez que non"          , "n":   230, "pct":  1 },
+          "02": { "order": 1, "label": "Oui"                          , "n":  4892, "pct": 29 },
+          "03": { "order": 1, "label": "Vous pensez que oui"          , "n":    75, "pct":  0 },
+          "04": { "missing": true, "label": "Vous ne savez pas"             },
+          "05": { "order": 3, "label": "Vous ne cherchez pas à savoir", "n":   804, "pct":  5 }, // Exception = last
+          "88": { "missing": true, "label": "NVPD"                          },
+          "99": { "missing": true, "label": "NSP"                           }
+        }
+      },
+
+      // 
+      "DIFFAGE_PREMRS": {
+        "var_label": "Ecart d'âge partenaire première relation sexuelle",
+        "role"     : "factor_ordinal",
+        "new_name" : "DIFFAGE_PREMRS",
+        "levels": {
+          "01": { "order": 1, "label": "Beaucoup plus âgée que vous (10 ans et plus)" , "n":  1096, "pct":  4 }, // A bit below min_pct = 5%, but we keep it as a strong category (there is enough n for that), also because it’s not a simple Done / Not done behaviour that we could reduce to binary
+          "02": { "order": 2, "label": "Plus âgée que vous (de 3 à 9 ans de plus)"    , "n":  6123, "pct": 24 },
+          "03": { "order": 3, "label": "A peu près du même âge"                       , "n": 17455, "pct": 69 },
+          "04": { "order": 4, "label": "Plus jeune que vous (de 3 à 9 ans de moins)"  , "n":   501, "pct":  2 }, // We merge Plus jeune and Beaucoup plus jeune, since frequencies are very low, and it makes an extreme rare category that would have ne sense merging with the middle one, semantically, here ("same age" is the center of the answers)
+          "05": { "order": 4, "label": "Beaucoup plus jeune que vous (10 ans et plus)", "n":   238, "pct":  1 },
+          "88": { "missing": true, "label": "NVPD"                                          },
+          "99": { "missing": true, "label": "NSP"                                           }
+        }
+      },
+
+      // Here, the distribution is not A-Shaped but \ shaped (decreasing), so we merge "Moyennemenet bien" and "Mal" to avoid a very small middle category ("Moyennement bien")
+      "C50B1": {
+        "var_label": "Comment avez-vous été accueilli-e ?",
+        "role"     : "factor_ordinal",
+        "new_name" : "C50B1",
+        "levels": {
+          "01": { "order": 1, "label": "Très bien"       , "n": 6, "pct": 35 },
+          "02": { "order": 2, "label": "Bien"            , "n": 6, "pct": 35 },
+          "03": { "order": 3, "label": "Moyennement bien", "n": 1, "pct":  6 },
+          "04": { "order": 3, "label": "Mal"             , "n": 2, "pct": 12 },
+          "05": { "order": 4, "label": "Très mal"        , "n": 2, "pct": 12 },
+          "88": { "missing": true, "label": "NVPD"             },
+          "99": { "missing": true, "label": "NSP"              }
+        }
+      },
+
+      // Here, we don’t mix Non and Oui, but we merge <1 an and 1-2 ans since they have low frequencies (6 + 4) without being extreme categories
+      "E1D": {
+        "var_label": "Avec cette personne, avez-vous habité ensemble dans un même logement ? Si oui, pendant combien de temps ?",
+        "role"     : "factor_ordinal",
+        "new_name" : "E1D",
+        "levels": {
+          "00": { "order": 4, "label": "Non"                          , "n": 160, "pct": 21 },
+          "01": { "order": 3, "label": "Oui, pendant moins d'un an"   , "n":  44, "pct":  6 },
+          "02": { "order": 3, "label": "Oui, 1 an à moins de deux ans", "n":  35, "pct":  4 },
+          "03": { "order": 2, "label": "Oui, 2 ans à moins de 5 ans"  , "n": 100, "pct": 13 },
+          "04": { "order": 1, "label": "Oui, 5 ans ou plus"           , "n": 439, "pct": 56 },
+          "88": { "missing": true, "label": "NVPD"                          },
+          "99": { "missing": true, "label": "NSP"                           }
+        }
+      },
+
+
+      // Here it’s binary for the whole set, since most non-not answers are very rare : a set of binary variables Done / Not done will be easier to use, without much losses of extreme categories here
+      "E3A": {
+        "var_label": "Au cours des 12 derniers mois, est-ce que votre ex-conjoint-e ou ex-partenaire vous a...a) Insulté-e, harcelé-e, en face à face ou par téléphone, par mail, par SMS",
+        "role"     : "factor_ordinal",
+        "new_name" : "E3A",
+        "levels": {
+          "00": { "order": 2, "label": "Non"                        , "n": 504, "pct": 61 },
+          "01": { "order": 1, "label": "Une fois"                   , "n":  48, "pct":  6 },
+          "02": { "order": 1, "label": "Quelques fois (2 à 5 fois)" , "n": 173, "pct": 21 },
+          "03": { "order": 1, "label": "Souvent (6 fois ou plus)"   , "n":  73, "pct":  9 },
+          "04": { "order": 1, "label": "Presque toutes les semaines", "n":  23, "pct":  3 },
+          "88": { "missing": true, "label": "NVPD"                        },
+          "99": { "missing": true, "label": "NSP"                         }
+        }
+      },
+      "E3B": {
+        "var_label": "Au cours des 12 derniers mois, est-ce que votre ex-conjoint-e ou ex-partenaire vous a...b) Insulté-e, harcelé-e sur les réseaux sociaux...",
+        "role"     : "factor_ordinal",
+        "new_name" : "E3B",
+        "levels": {
+          "00": { "order": 2, "label": "Non"                        , "n": 771, "pct": 94 },
+          "01": { "order": 1, "label": "Une fois"                   , "n":  11, "pct":  1 },
+          "02": { "order": 1, "label": "Quelques fois (2 à 5 fois)" , "n":  20, "pct":  2 },
+          "03": { "order": 1, "label": "Souvent (6 fois ou plus)"   , "n":  13, "pct":  2 },
+          "04": { "order": 1, "label": "Presque toutes les semaines", "n":   5, "pct":  1 },
+          "88": { "missing": true, "label": "NVPD"                        },
+          "99": { "missing": true, "label": "NSP"                         }
+        }
+      },
+      "E3C": {
+        "var_label": "Au cours des 12 derniers mois, est-ce que votre ex-conjoint-e ou ex-partenaire vous a...c) Suivi-e, harcelé-e à votre domicile",
+        "role"     : "factor_ordinal",
+        "new_name" : "E3C",
+        "levels": {
+          "00": { "order": 2, "label": "Non"                        , "n": 757, "pct": 92 },
+          "01": { "order": 1, "label": "Une fois"                   , "n":  18, "pct":  2 },
+          "02": { "order": 1, "label": "Quelques fois (2 à 5 fois)" , "n":  33, "pct":  4 },
+          "03": { "order": 1, "label": "Souvent (6 fois ou plus)"   , "n":  10, "pct":  1 },
+          "04": { "order": 1, "label": "Presque toutes les semaines", "n":   2, "pct":  0 },
+          "88": { "missing": true, "label": "NVPD"                        },
+          "99": { "missing": true, "label": "NSP"                         }
+        }
+      },
+
+
+
+
+// In some rare cases, "pct" field is not available, but AI should use counts instead
+    "Q19E_GRAGE": {
+        "var_label": "Groupe d'âge quinquennal",
+        "role"     : "factor_ordinal",
+        "new_name" : "Q19E_GRAGE",
+        "levels": {
+          "01": { "order": 4, "label": "20-24", "n": 1589 },
+          "02": { "order": 4, "label": "25-29", "n": 1793 },
+          "03": { "order": 3, "label": "30-34", "n": 2184 },
+          "04": { "order": 3, "label": "35-39", "n": 2337 },
+          "05": { "order": 3, "label": "40-44", "n": 2966 },
+          "06": { "order": 2, "label": "45-49", "n": 3011 },
+          "07": { "order": 2, "label": "50-54", "n": 3074 },
+          "08": { "order": 2, "label": "55-59", "n": 3016 },
+          "09": { "order": 1, "label": "60-64", "n": 3348 },
+          "10": { "order": 1, "label": "65-69", "n": 3950 }
+        }
+      },
+
+
+
+
+
+
+// ############## 2. NOMINAL VARIABLES ###################################
+
+// Here we put everything below min_pct = 5% in an "Autre" other category.
+"REL1C": {
+    "var_label": "Quelle est la religion de votre [précédent-e/dernier-e] conjoint-e ?",
+    "role"     : "factor_nominal",
+    "new_name" : "REL1C",
+    "levels": {
+      "00": { "order": 1, "label": "Sans religion"                                                             , "n":  6070, "pct": 34 },
+      "01": { "order": 2, "label": "Catholique (y compris syriaque, chaldéenne, maronite)"                     , "n": 10498, "pct": 58 },
+      "02": { "order": 3, "label": "Musulmane"                                                                 , "n":   837, "pct":  5 },
+      "03": { "order": 4, "label": "Protestante (y compris évangéliste, pentecôtiste ...)"                     , "n":   366, "pct":  2 },
+      "04": { "order": 4, "label": "Juive"                                                                     , "n":    60, "pct":  0 },
+      "05": { "order": 4, "label": "Autre (bouddhiste, hindouiste, témoins de Jéhovah...)"                     , "n":   192, "pct":  1 },
+      "06": { "order": 4, "label": "Orthodoxe (y compris apostolique arménienne, copte, syriaque orthodoxe...)", "n":    71, "pct":  0 },
+      "88": { "missing": true, "label": "NVPD"                                                                       },
+      "99": { "missing": true, "label": "NSP"                                                                        }
+    }
+  },
+
+  // Here a semantic grouping is needed, that makes sense for sociological analysis : stable, précaire, autres
+  "EMP4": {
+    "var_label": "Quel type de contrat av(i)ez-vous ?",
+    "role"     : "factor_nominal",
+    "new_name" : "EMP4",
+    "levels": {
+      "01": { "order": 2, "label": "Contrat d'apprentissage ou de professionnalisation"                                                                                      , "n":   159, "pct":  1 },
+      "02": { "order": 2, "label": "Contrat de mise à disposition par une agence d' intérim"                                                                                 , "n":   330, "pct":  1 },
+      "03": { "order": 2, "label": "Stage rémunéré en entreprise"                                                                                                            , "n":    70, "pct":  0 },
+      "04": { "order": 2, "label": "Emploi aidé (contrat d'accompagnement dans l'emploi, contrat d'avenir, contrat solidarité, de soutien à l'emploi des jeunes entreprise )", "n":   189, "pct":  1 },
+      "05": { "order": 2, "label": "CDD, contrat court, saisonnier, vacataire, autre emploi à durée limitée"                                                                 , "n":  2448, "pct": 10 },
+      "06": { "order": 1, "label": "CDI, emploi sans limite de durée"                                                                                                        , "n": 15437, "pct": 65 },
+      "07": { "order": 1, "label": "Fonctionnaire"                                                                                                                           , "n":  4599, "pct": 19 },
+      "08": { "order": 3, "label": "Autres"                                                                                                                                  , "n":   231, "pct":  1 },
+      "09": { "order": 3, "label": "Pas de contrat"                                                                                                                          , "n":   343, "pct":  1 },
+      "88": { "missing": true, "label": "NVPD"                                                                                                                                     },
+      "99": { "missing": true, "label": "NSP"                                                                                                                                      }
+    }
+  },
+
+  // Better not mess with classical categories, unless there are very rare categories that can be easily merged semantically. Here the numbers are so classic (5 = Employés) that we want to keep them at maximum.
+  "CS_E_NIV1": {
+    "var_label": "CSP ego INSEE niveau 1",
+    "role"     : "factor_nominal",
+    "new_name" : "CS_E_NIV1",
+    "levels": {
+      "1": { "order": 1, "label": "Agriculteurs exploitants"                         , "n":  212 },
+      "2": { "order": 1, "label": "Artisans, commerçants et chefs d'entreprise"      , "n":  732 },
+      "3": { "order": 3, "label": "Cadres et professions intellectuelles supérieures", "n": 3727 },
+      "4": { "order": 4, "label": "Professions Intermédiaires"                       , "n": 5089 },
+      "5": { "order": 5, "label": "Employés"                                         , "n": 5356 },
+      "6": { "order": 6, "label": "Ouvriers"                                         , "n": 2821 },
+      "7": { "order": 7, "label": "Retraités"                                        , "n": 6285 },
+      "8": { "order": 8, "label": "Autres personnes sans activité professionnelle"   , "n": 2713 },
+      "9": { "order": 9, "label": "Indéterminé"                                      , "n":  333 }
+    }
+  },
+
+
+
+
+
+
+
+// ############## 3. ORDINAL VARIABLES TO RECODE TO ORDINAL ###################################
+      "EMP9": {
+        "var_label": "Sur votre lieu de travail, diriez-vous qu'il y a / avait …",
+        "role"     : "factor_nominal", // recoded
+        "new_name" : "EMP9",
+        "levels": {
+          "01": { "order": 6, "label": "Presque uniquement des hommes"                        , "n": 1714, "pct": 10 },
+          "02": { "order": 5, "label": "Presque uniquement des femmes"                        , "n": 1790, "pct": 10 },
+          "03": { "order": 4, "label": "A peu près autant d'hommes que de femmes"             , "n": 5896, "pct": 34 },
+          "04": { "order": 3, "label": "Plus d'hommes que de femmes"                          , "n": 3133, "pct": 18 },
+          "05": { "order": 2, "label": "Plus de femmes"                                       , "n": 3701, "pct": 21 },
+          "06": { "order": 1, "label": "C'est variable"                                       , "n":  615, "pct":  4 },
+          "07": { "order": 1, "label": "Vous n'avez pas de collègue ou vous travaillez seul-e", "n":  528, "pct":  3 },
+          "88": { "missing": true, "label": "NVPD"                                                  },
+          "99": { "missing": true, "label": "NSP"                                                   }
+        }
+      },
+      "VM3": {
+        "var_label": "Lors de votre [premier] mariage, diriez-vous qu'à l'époque ...",
+        "role"     : "factor_nominal", // recoded
+        "new_name" : "VM3",
+        "levels": {
+          "01": { "order": 1, "label": "Vous vouliez vraiment vous marier avec cette personne"                                   , "n": 15493, "pct": 91 },
+          "02": { "order": 2, "label": "Vous vouliez vous marier avec cette personne mais vous auriez préféré plus tard"         , "n":   601, "pct":  4 },
+          "03": { "order": 3, "label": "Vous ne vouliez pas vraiment vous marier mais votre conjoint-e y tenait"                 , "n":   481, "pct":  3 },
+          "04": { "order": 4, "label": "Vous ne vouliez pas vous marier et vous y avez été obligé-e par des pressions familiales", "n":   224, "pct":  1 },
+          "05": { "order": 5, "label": "Autre"                                                                                   , "n":   222, "pct":  1 },
+          "88": { "missing": true, "label": "NVPD"                                                                                     },
+          "99": { "missing": true, "label": "Ne sais pas"                                                                              }
+        }
+      },
+
+
+// ############## 4. NOMINAL VARIABLES TO RECODE TO ORDINAL ###################################
+    
+    // For ordinal merging rule, here in that decreasing order, we have a / shaped, increasing frequencies distribution
+    "Q3": {
+      "var_label": "Vous habitez ...",
+      "role"     : "factor_ordinal", // recoded
+      "new_name" : "Q3",
+      "levels": {
+        "01": { "order": 1, "label": "Paris ou la petite couronne (Hauts-de-Seine (92), Seine-Saint-Denis (93), Val-de-Marne (94))", "n": 2501, "pct": 10 },
+        "02": { "order": 2, "label": "Une agglomération de plus d'un million d' habitants"                                         , "n":  836, "pct":  3 },
+        "03": { "order": 2, "label": "Une agglomération de plus de 200 000 habitants"                                              , "n": 2016, "pct":  8 },
+        "04": { "order": 3, "label": "Une agglomération de 100 000 à 200 000 habitants"                                            , "n": 1734, "pct":  7 },
+        "05": { "order": 3, "label": "Une agglomération de 20 000 à 100 000 habitants"                                             , "n": 3916, "pct": 15 },
+        "06": { "order": 4, "label": "Une agglomération de moins de 20 000 habitants"                                              , "n": 7916, "pct": 31 },
+        "07": { "order": 5, "label": "Un village (moins de 2 000 habitants)"                                                       , "n": 6597, "pct": 26 },
+        "88": { "missing": true, "label": "NVPD"                                                                                         },
+        "99": { "missing": true, "label": "NSP"                                                                                          }
+      }
+    },
+
+
+}

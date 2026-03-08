@@ -1,0 +1,333 @@
+// ########## json ai results and manual edits for labels ###################
+
+
+
+// 1. Meaningless labels
+"CF1A": {
+  "var_label": "CF1a. Dites-moi si vous êtes tout-à-fait d'accord, plutôt d'accord, pas du tout d'accord avec cette proposition : < Dans un couple, il faut tout faire ensemble >.",
+  "role"     : "factor_ordinal",
+  "desc"     : true,
+  "new_name" : "CF1A",
+  "levels": {
+    "01": { "label": "Tout à fait d'accord", "new_label": "Accord: Tout à fait", "new_label_manual": "Couple tout faire ensemble: Tout à fait"},
+    "02": { "label": "Plutôt d'accord"     , "new_label": "Plutôt d'accord"    },
+    "03": { "label": "Plutôt pas d'accord" , "new_label": "Plutôt pas d'accord"},
+    "04": { "label": "Pas du tout d'accord", "new_label": "Pas d'accord"       },
+    "88": { "label": "NVPD"                , "null_coded": true },
+    "99": { "label": "NSP"                 , "null_coded": true }
+  },
+
+
+// 2. Context not clear enough to be understood
+  "CF2": {
+    "var_label": "CF2. Considérez-vous [qu'au cours des 12 derniers mois] que pour les tâches ménagères dans votre [précédent/dernier] couple …",
+    "role"     : "factor_ordinal",
+    "desc"     : false,
+    "new_name" : "CF2",
+    "levels": {
+      "01": { "label": "Vous avez pris en charge l'essentiel des tâches"                                , "new_label": "Tâches: Vous"      , "new_label_manual": "Tâches ménagères: Vous" },
+      "02": { "label": "Les tâches ont été partagées avec votre conjoint-e"                             , "new_label": "Partagées"         },
+      "03": { "label": "Votre conjoint-e a pris en charge l'essentiel des tâches"                       , "new_label": "Conjoint·e"        },
+      "04": { "label": "Une autre personne vivant au foyer s'occupe de l'essentiel des tâches ménagères", "new_label": "Autre membre foyer"},
+      "05": { "label": "Une autre personne rémunérée ou non s'occupe de l'essentiel des tâches"         , "new_label": "Personne rémunérée"},
+      "88": { "label": "NVPD"                                                                           , "null_coded": true },
+      "99": { "label": "NSP"                                                                            , "null_coded": true }
+    }
+  },
+  "CF3": {
+    "var_label": "CF3. Considérez-vous [qu'au cours des 12 derniers mois] que pour s'occuper des enfants dans votre [précédent-e/dernier-e] conjoint-e...",
+    "role"     : "factor_ordinal",
+    "desc"     : false,
+    "new_name" : "CF3",
+    "levels": {
+      "01": { "label": "Vous avez pris en charge l'essentiel des tâches"         , "new_label": "Enfants: Vous"      ,"new_label_manual": "S’occuper des enfants: Vous"},
+      "02": { "label": "Les tâches ont été partagées avec votre conjoint-e"      , "new_label": "Partagé"            },
+      "03": { "label": "Votre conjoint-e a pris en charge l'essentiel des tâches", "new_label": "Conjoint·e"         },
+      "04": { "label": "Une autre personne vivant au foyer s'en occupe"          , "new_label": "Autre membre foyer" },
+      "05": { "label": "Une personne hors du foyer s'en occupe"                  , "new_label": "Personne hors foyer"},
+      "88": { "label": "NVPD"                                                    , "null_coded": true },
+      "99": { "label": "NSP"                                                     , "null_coded": true }
+    }
+  },
+  "CF5B": {
+    "var_label": "CF5b. Au cours des 12 derniers mois, [lorsque vous étiez ensemble] avec votre [précédent-e/dernier-e] conjoint-e, vous êtes-vous disputé-e ou avez-vous eu des conflits au sujet...a) Des enfants",
+    "role"     : "factor_ordinal",
+    "desc"     : true,
+    "new_name" : "CF5B",
+    "levels": {
+      "00": { "label": "Non"                     , "new_label": "Conflits: Non" ,"new_label_manual": "Conflits au sujet enfants: Non"},
+      "01": { "label": "Parfois"                 , "new_label": "Parfois"       },
+      "02": { "label": "Souvent"                 , "new_label": "Souvent"       },
+      "03": { "label": "tout le temps ou presque", "new_label": "Tout le temps" },
+      "88": { "label": "NVPD"                    , "null_coded": true },
+      "99": { "label": "NSP"                     , "null_coded": true }
+    }
+  },
+  "EMP1BISB": {
+    "var_label": "EMP1bisb. Avez-vous exercé cet emploi au moins quatre mois durant les 12 derniers mois ?",
+    "role"     : "factor_binary",
+    "desc"     : false,
+    "new_name" : "EMP1BISB",
+    "levels": {
+      "00": { "label": "Non" , "new_label": "Pas ⩾4 mois"},
+      "01": { "label": "Oui" , "new_label": "⩾4 mois"    ,"new_label_manual": "Emploi ⩾4 mois"},
+      "88": { "label": "NVPD", "null_coded": true },
+      "99": { "label": "NSP" , "null_coded": true }
+    }
+  },
+  "REV4BIS": {
+    "var_label": "REV4bis. Diriez-vous que votre revenu est/était …",
+    "role"     : "factor_ordinal",
+    "desc"     : false,
+    "new_name" : "REV4BIS",
+    "levels": {
+      "01": { "label": "Très supérieur à celui de votre conjoint-e", "new_label": "Très supérieur","new_label_manual": "Revenu très supérieur au conjoint·e"},
+      "02": { "label": "Supérieur à celui de votre conjoint-e"     , "new_label": "Supérieur"     },
+      "03": { "label": "Equivalent à celui de votre conjoint-e"    , "new_label": "Équivalent"    },
+      "04": { "label": "Inférieur à celui de votre conjoint-e"     , "new_label": "Inférieur"     },
+      "05": { "label": "Très inférieur à celui de votre conjoint-e", "new_label": "Très inférieur"},
+      "06": { "label": "Votre conjoint-e n' pas de revenu"         , "new_label": "Pas de revenu" },
+      "88": { "label": "NVPD"                                      , "null_coded": true },
+      "99": { "label": "NSP"                                       , "null_coded": true }
+    }
+  },
+  "EA9B": {
+    "var_label": "EA9b. Vous-même au cours de votre enfance et adolescence, avez-vous ...b) eu un conflit très grave avec votre père ou l'homme qui vous a élevé-e (si aucun homme présent, cocher non)",
+    "role"     : "factor_ordinal",
+    "desc"     : false,
+    "new_name" : "EA9B",
+    "levels": {
+      "00": { "label": "Non"           , "new_label": "Conflit père: Non","new_label_manual": "Enfance conflit père: Non"},
+      "01": { "label": "Oui"           , "new_label": "Conflit grave"    },
+      "77": { "label": "Non concerné-e", "new_label": "Non concerné"     },
+      "88": { "label": "NVPD"          , "null_coded": true },
+      "99": { "label": "NSP"           , "null_coded": true }
+    }
+  },
+  "EA10E2A_03": {
+    "var_label": "EA10e2a_03. Qui était l'auteur des sévices ou des coups sur vous-même ? 3. Votre père",
+    "role"     : "factor_binary",
+    "desc"     : false,
+    "new_name" : "EA10E2A_03",
+    "levels": {
+      "00": { "label": "Non" , "new_label": "Pas auteur"  ,"new_label_manual": "Pas père"},
+      "01": { "label": "Oui" , "new_label": "Auteur: père","new_label_manual": "Sévices: père"},
+      "88": { "label": "NVPD", "null_coded": true },
+      "99": { "label": "NSP" , "null_coded": true }
+    }
+  },
+  "EA11A": {
+    "var_label": "EA11a. Au cours de votre vie, avez-vous déjà vécu, même quelques jours...a) Dans un foyer de jeunes travailleurs",
+    "role"     : "factor_binary",
+    "desc"     : false,
+    "new_name" : "EA11A",
+    "levels": {
+      "00": { "label": "Non" , "new_label": "Pas foyer"                ,"new_label_manual": "Jamais foyer"},
+      "01": { "label": "Oui" , "new_label": "Foyer jeunes travailleurs","new_label_manual": "Déjà foyer jeunes travailleurs"},
+      "88": { "label": "NVPD", "null_coded": true },
+      "99": { "label": "NSP" , "null_coded": true }
+    }
+  },
+  "LGBT1B": {
+    "var_label": "LGBT1b. Les personnes suivantes connaissent-elles (connaissaient-elles) votre homosexualité/bisexualité ? : b) votre mère",
+    "role"     : "factor_ordinal",
+    "desc"     : false,
+    "new_name" : "LGBT1B",
+    "levels": {
+      "01": { "label": "Oui"           , "new_label": "Mère sait: Oui", "new_label_manual": "Mère connait homosexualité: Oui"},
+      "03": { "label": "Oui tous"      , "new_label": "Oui tous"      },
+      "02": { "label": "Oui certains"  , "new_label": "Oui certains"  },
+      "00": { "label": "Non"           , "new_label": "Non"           },
+      "77": { "label": "Non concerné-e", "new_label": "Non concerné·e"},
+      "88": { "label": "NVPD"          , "null_coded": true },
+      "99": { "label": "NSP"           , "null_coded": true }
+    }
+  },
+  "S5B_02": {
+    "var_label": "S5b_02. Qui sont les personnes de votre entourage qui vous aident ? 2) Fils",
+    "role"     : "factor_binary",
+    "desc"     : false,
+    "new_name" : "S5B_02",
+    "levels": {
+      "00": { "label": "Non" , "new_label": "Pas fils"},
+      "01": { "label": "Oui" , "new_label": "Fils"    ,"new_label_manual": "Aide Fils"},
+      "88": { "label": "NVPD", "null_coded": true },
+      "99": { "label": "NSP" , "null_coded": true }
+    }
+  },
+
+
+// 3. Labels should always help users to distinguish between two variables with the same levels
+  "EA10A_00": {
+    "var_label": "EA10a_00. Au cours de votre enfance et adolescence, vous-même ou un de vos proches avez-vous connu les situations suivantes ? a) Alcoolisme 0. Non",
+    "role"     : "factor_binary",
+    "desc"     : false,
+    "new_name" : "EA10A_00",
+    "levels": {
+      "00": { "label": "Non" , "new_label": "Pas situation"  ,"new_label_manual": "Pas proche alcoolique"},
+      "01": { "label": "Oui" , "new_label": "Situation vécue","new_label_manual": "Enfance: pas proche alcoolique"},
+      "88": { "label": "NVPD", "null_coded": true },
+      "99": { "label": "NSP" , "null_coded": true }
+    }
+  },
+    "EA10B_02": {
+    "var_label": "EA10b_02. Au cours de votre enfance et adolescence, vous-même ou un de vos proches avez-vous connu les situations suivantes ? b) Problèmes de drogue 2. Vos frères et sœurs",
+    "role"     : "factor_binary",
+    "desc"     : false,
+    "new_name" : "EA10B_02",
+    "levels": {
+    "00": { "label": "Non" , "new_label": "Pas situation"  ,"new_label_manual": "Pas drogue"},
+    "01": { "label": "Oui" , "new_label": "Situation vécue","new_label_manual": "Enfance: frères/sœurs drogue"},
+    "88": { "label": "NVPD", "null_coded": true },
+    "99": { "label": "NSP" , "null_coded": true }
+    }
+},
+
+
+
+  "SOC2A": {
+    "var_label": "SOC2a. Au cours des 12 derniers mois, est-ce que...a) Vous avez eu des contacts avec de la famille ?",
+    "role"     : "factor_ordinal",
+    "desc"     : true,
+    "new_name" : "SOC2A",
+    "levels": {
+      "00": { "label": "Non"              , "new_label": "Famille: Non"  ,"new_label_manual": "Contact famille: Non"},
+      "01": { "label": "De temps en temps", "new_label": "Temps en temps"},
+      "02": { "label": "Souvent"          , "new_label": "Souvent"       },
+      "03": { "label": "Très souvent"     , "new_label": "Très souvent"  },
+      "88": { "label": "NVPD"             , "null_coded": true },
+      "99": { "label": "NSP"              , "null_coded": true }
+    }
+  },
+  "SOC2B": {
+    "var_label": "SOC2b. Au cours des 12 derniers mois, est-ce que...b) Vous avez eu des contacts avec des ami-e-s ?",
+    "role"     : "factor_ordinal",
+    "desc"     : true,
+    "new_name" : "SOC2B",
+    "levels": {
+      "00": { "label": "Non"              , "new_label": "Ami·es: Non"   ,"new_label_manual": "Contact ami·es: Non"},
+      "01": { "label": "De temps en temps", "new_label": "Temps en temps"},
+      "02": { "label": "Souvent"          , "new_label": "Souvent"       },
+      "03": { "label": "Très souvent"     , "new_label": "Très souvent"  },
+      "88": { "label": "NVPD"             , "null_coded": true },
+      "99": { "label": "NSP"              , "null_coded": true }
+    }
+  },
+
+
+
+  "CF5A": {
+    "var_label": "CF5. Au cours des 12 derniers mois, vous êtes-vous disputé-e ou avez-vous eu des conflits avec votre au sujet...a) De la répartition des tâches dans la vie quotidienne",
+    "role"     : "factor_ordinal",
+    "desc"     : true,
+    "new_name" : "CF5A",
+    "levels": {
+      "00": { "label": "Non"                     , "new_label": "Conflits: Non","new_label_manual": "Conflits répartition tâches: Non"},
+      "01": { "label": "Parfois"                 , "new_label": "Parfois"      },
+      "02": { "label": "Souvent"                 , "new_label": "Souvent"      },
+      "03": { "label": "tout le temps ou presque", "new_label": "Tout le temps"},
+      "88": { "label": "NVPD"                    , "null_coded": true },
+      "99": { "label": "NSP"                     , "null_coded": true }
+    }
+  },
+  "CF5B": {
+    "var_label": "CF5b. Au cours des 12 derniers mois, [lorsque vous étiez ensemble] avec votre [précédent-e/dernier-e] conjoint-e, vous êtes-vous disputé-e ou avez-vous eu des conflits au sujet...a) Des enfants",
+    "role"     : "factor_ordinal",
+    "desc"     : true,
+    "new_name" : "CF5B",
+    "levels": {
+      "00": { "label": "Non"                     , "new_label": "Conflits: Non","new_label_manual": "Conflits au sujet enfants: Non"},
+      "01": { "label": "Parfois"                 , "new_label": "Parfois"      },
+      "02": { "label": "Souvent"                 , "new_label": "Souvent"      },
+      "03": { "label": "tout le temps ou presque", "new_label": "Tout le temps"},
+      "88": { "label": "NVPD"                    , "null_coded": true },
+      "99": { "label": "NSP"                     , "null_coded": true }
+    }
+  },
+  "CF5C1": {
+    "var_label": "CF5. Au cours des 12 derniers mois, vous êtes-vous disputé-e ou avez-vous eu des conflits avec votre au sujet...c1) De l'idée d'avoir des enfants",
+    "role"     : "factor_ordinal",
+    "desc"     : true,
+    "new_name" : "CF5C1",
+    "levels": {
+      "00": { "label": "Non"                     , "new_label": "Conflits: Non","new_label_manual": "Conflits avoir un enfant: Non"},
+      "01": { "label": "Parfois"                 , "new_label": "Parfois"      },
+      "02": { "label": "Souvent"                 , "new_label": "Souvent"      },
+      "03": { "label": "tout le temps ou presque", "new_label": "Tout le temps"},
+      "88": { "label": "NVPD"                    , "null_coded": true },
+      "99": { "label": "NSP"                     , "null_coded": true }
+    }
+  },
+
+
+
+
+  "EMP12C_01": {
+    "var_label": "EMP12c_01. Cet arrêt de votre contrat était-il également dû à des comportements hostiles contre…1. Votre orientation sexuelle, réelle ou supposée",
+    "role"     : "factor_binary",
+    "desc"     : false,
+    "new_name" : "EMP12C_01",
+    "levels": {
+      "00": { "label": "Non" , "new_label": "Pas orientation sexuelle"},
+      "01": { "label": "Oui" , "new_label": "Orientation sexuelle"     ,"new_label_manual": "Licencié: Orientation sexuelle"},
+      "88": { "label": "NVPD", "null_coded": true },
+      "99": { "label": "NSP" , "null_coded": true }
+    }
+  },
+  "EMP12C_02": {
+    "var_label": "EMP12c_02. Cet arrêt de votre contrat était-il également dû à des comportements hostiles contre…2. Votre religion, réelle ou supposée",
+    "role"     : "factor_binary",
+    "desc"     : false,
+    "new_name" : "EMP12C_02",
+    "levels": {
+      "00": { "label": "Non" , "new_label": "Pas religion"},
+      "01": { "label": "Oui" , "new_label": "Religion"     ,"new_label_manual": "Licencié: Religion" },
+      "88": { "label": "NVPD", "null_coded": true },
+      "99": { "label": "NSP" , "null_coded": true }
+    }
+  },
+  "EMP12C_03": {
+    "var_label": "EMP12c_03. Cet arrêt de votre contrat était-il également dû à des comportements hostiles contre…3. Votre origine ou couleur de peau",
+    "role"     : "factor_binary",
+    "desc"     : false,
+    "new_name" : "EMP12C_03",
+    "levels": {
+      "00": { "label": "Non" , "new_label": "Pas origine"      },
+      "01": { "label": "Oui" , "new_label": "Origine / couleur" ,"new_label_manual": "Licencié: Origine, couleur"},
+      "88": { "label": "NVPD", "null_coded": true },
+      "99": { "label": "NSP" , "null_coded": true }
+    }
+  },
+
+
+
+
+
+ // 4. Parfois il faut l’information de la variable précédente pour contextualiser la suivante 
+  "EA12_AGE": {
+    "var_label": "EA12_age. A quel âge avez-vous quitté le domicile de vos parents pour la première fois pendant plus de 6 mois ? (Hors service militaire) (Synthèse des variables EA12 & EA12bis)",
+    "role"     : "integer_count",
+    "desc"     : null,
+    "new_name" : "EA12_AGE",
+    "levels": {
+      "-8" : { "label": "incohérence"                           , "null_coded": true },
+      "777": { "label": "N'a pas quitté le domicile des parents" },
+      "999": { "label": "NSP ou préfère dire en quelle année"   , "null_coded": true },
+      "888": { "label": "NVPD"                                  , "null_coded": true }
+    }
+  },
+  "EA12A": {
+    "var_label": "EA12a. Était-ce à cause d'un conflit familial ?",
+    "role"     : "factor_binary",
+    "desc"     : false,
+    "new_name" : "EA12A",
+    "levels": {
+      "00": { "label": "Non" , "new_label": "Pas conflit"     },
+      "01": { "label": "Oui" , "new_label": "Conflit familial", "new_label_manual": "Quitté domicile: Conflit familial"},
+      "88": { "label": "NVPD", "null_coded": true },
+      "99": { "label": "NSP" , "null_coded": true }
+    }
+  },
+
+
+  
