@@ -3399,6 +3399,7 @@ ai_suggest_labels <- function(
     meta_json     = NULL,
     max_levels               = 150L,
     max_levels_in_single_var = 30L,
+    replace_existing_new_labels = FALSE,
     chunk_size    = NULL,
     use_batch     = FALSE,
     dry_run       = FALSE,
@@ -3523,6 +3524,30 @@ ai_suggest_labels <- function(
     return(invisible(meta_json))
   }
 
+  # ---------- skip fully-labeled variables (unless replace_existing_new_labels) --
+  if (!replace_existing_new_labels && !is.null(meta_json) && file.exists(meta_json)) {
+    existing_vars <- .read_meta_json(meta_json)$variables
+    fully_labeled <- names(Filter(function(v) {
+      levs <- v$levels
+      if (is.null(levs) || length(levs) == 0L) return(FALSE)
+      non_miss <- Filter(function(l) !isTRUE(l$missing), levs)
+      length(non_miss) > 0L &&
+        all(purrr::map_lgl(non_miss, ~ !is.null(.x$new_label)))
+    }, existing_vars))
+    if (length(fully_labeled) > 0L) {
+      n_skip <- sum(target$var_name %in% fully_labeled)
+      if (n_skip > 0L)
+        message("ai_suggest_labels: ", n_skip,
+                " variable(s) already fully labeled — skipped. ",
+                "Use replace_existing_new_labels = TRUE to reprocess.")
+      target <- dplyr::filter(target, !var_name %in% fully_labeled)
+    }
+    if (nrow(target) == 0L) {
+      message("ai_suggest_labels: All factor variables already labeled.")
+      return(invisible(meta_json))
+    }
+  }
+
   # ---------- JSON builder for one variable ---------------------------------
   .build_var_json <- function(var_name, var_label, detected_role,
                                values, labels, new_labels, send_order,
@@ -3589,7 +3614,8 @@ ai_suggest_labels <- function(
       levels_json <- paste0("{", paste(kv_pairs, collapse = ", "), "}")
 
       obj <- paste0('{"var":"', esc(var_name), '","type":"', type_str,
-                    '","desc":"', esc(substr(var_label_clean, 1, 120)), '",',
+                    # '","desc":"', esc(substr(var_label_clean, 1, 120)), '",', # Trim at 120 chars
+                    '","desc":"', esc(var_label_clean), '",',
                     '"levels":', levels_json)
 
       return(paste0(obj, "}"))
@@ -3600,7 +3626,8 @@ ai_suggest_labels <- function(
     levels_json <- paste0("{", paste(kv_pairs, collapse = ", "), "}")
 
     obj <- paste0('{"var":"', esc(var_name), '","type":"', type_str,
-                  '","desc":"', esc(substr(var_label_clean, 1, 120)), '",',
+                  # '","desc":"', esc(substr(var_label_clean, 1, 120)), '",', # Trim at 120 chars
+                  '","desc":"', esc(var_label_clean), '",',
                   '"levels":', levels_json)
 
     paste0(obj, "}")
@@ -3899,6 +3926,13 @@ ai_suggest_labels <- function(
   }
 
   if (length(raw_map) == 0) return(list())
+
+  # Warn about variables that were sent but absent from AI response
+  missing_from_resp <- setdiff(unique(target$var_name), names(raw_map))
+  if (length(missing_from_resp) > 0)
+    message("ai_suggest_labels: ", length(missing_from_resp),
+            " variable(s) absent from AI response (no label written): ",
+            paste(missing_from_resp, collapse = ", "))
 
   # Step 2: join AI labels onto original new_labels, expanding merge groups
   # for ordinal variables back to individual level labels, then un-permute.
@@ -5316,10 +5350,10 @@ generate_format_script <- function(metadata,
     "library(haven)",
     "library(dplyr)",
     "library(forcats)",
-    "",
-    "## Import data",
-    paste0(df_name, ' <- haven::read_dta("', dataset_name, '")'),
-    ""
+    "" #,
+    # "## Import data",
+    # paste0(df_name, ' <- haven::read_dta("', dataset_name, '")'),
+    # ""
   )
 
   # Part 1: Codebook

@@ -446,3 +446,133 @@ test_that("L7: multi-variable — order preserved independently for each variabl
   expect_equal(sexe[["1"]]$new_label, "Femme")
   expect_equal(sexe[["2"]]$new_label, "Homme")
 })
+
+# ---------------------------------------------------------------------------
+# L8: AI omits one variable from response — other still labeled, missing unlabeled
+# ---------------------------------------------------------------------------
+
+test_that("L8: AI omits one variable — labeled variable written, omitted has no new_label", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+
+  vars <- list(
+    VAR_A = make_labels_vars(
+      "VAR_A",
+      keys      = c("1", "2"),
+      labels    = c("Oui", "Non"),
+      order_vec = c(1L, 2L),
+      role = "factor_binary"
+    ),
+    VAR_B = make_labels_vars(
+      "VAR_B",
+      keys      = c("1", "2"),
+      labels    = c("Oui", "Non"),
+      order_vec = c(1L, 2L),
+      role = "factor_binary"
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- dplyr::bind_rows(
+    make_labels_meta(
+      "VAR_A", "A voté ?", "factor_binary",
+      values_vec    = c("1", "2"),
+      labels_vec    = c("Oui", "Non"),
+      missing_vec   = character(0),
+      new_labels_vec = c("Oui", "Non"),
+      order_vec     = c(1L, 2L)
+    ),
+    make_labels_meta(
+      "VAR_B", "A travaillé ?", "factor_binary",
+      values_vec    = c("1", "2"),
+      labels_vec    = c("Oui", "Non"),
+      missing_vec   = character(0),
+      new_labels_vec = c("Oui", "Non"),
+      order_vec     = c(1L, 2L)
+    )
+  )
+
+  # AI returns only VAR_A, omits VAR_B
+  fake_resp <- '{"VAR_A": {"1": "A voté", "2": "Pas voté"}}'
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude", mock_ai(fake_resp), envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  expect_message(
+    ai_suggest_labels(meta, meta_json = path,
+                      replace_existing_new_labels = TRUE),
+    "VAR_B"
+  )
+
+  res <- .read_meta_json(path)$variables
+  # VAR_A: labeled
+  expect_equal(res$VAR_A$levels[["1"]]$new_label, "A voté")
+  expect_equal(res$VAR_A$levels[["2"]]$new_label, "Pas voté")
+  # VAR_B: absent from AI response → no new_label
+  expect_null(res$VAR_B$levels[["1"]]$new_label)
+  expect_null(res$VAR_B$levels[["2"]]$new_label)
+})
+
+# ---------------------------------------------------------------------------
+# L9: replace_existing_new_labels = FALSE (default) — fully-labeled vars skipped
+# ---------------------------------------------------------------------------
+
+test_that("L9: replace_existing_new_labels=FALSE skips fully-labeled, processes partial", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+
+  # VAR_FULL: already has new_label on all non-missing levels in JSON
+  # VAR_PART: has no new_label → must be sent to AI
+  vars <- list(
+    VAR_FULL = list(
+      var_label = "test", role = "factor_binary", new_name = "VAR_FULL",
+      levels = list(
+        "1" = list(label = "Oui", new_label = "Déjà fait", order = 1L),
+        "2" = list(label = "Non", new_label = "Pas fait",  order = 2L)
+      )
+    ),
+    VAR_PART = make_labels_vars(
+      "VAR_PART",
+      keys      = c("1", "2"),
+      labels    = c("Oui", "Non"),
+      order_vec = c(1L, 2L),
+      role = "factor_binary"
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  meta <- dplyr::bind_rows(
+    make_labels_meta(
+      "VAR_FULL", "Déjà fait ?", "factor_binary",
+      values_vec    = c("1", "2"),
+      labels_vec    = c("Oui", "Non"),
+      missing_vec   = character(0),
+      new_labels_vec = c("Déjà fait", "Pas fait"),
+      order_vec     = c(1L, 2L)
+    ),
+    make_labels_meta(
+      "VAR_PART", "A travaillé ?", "factor_binary",
+      values_vec    = c("1", "2"),
+      labels_vec    = c("Oui", "Non"),
+      missing_vec   = character(0),
+      new_labels_vec = c("Oui", "Non"),
+      order_vec     = c(1L, 2L)
+    )
+  )
+
+  fake_resp <- '{"VAR_PART": {"1": "A travaillé", "2": "Pas travaillé"}}'
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude", mock_ai(fake_resp), envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  # Default: replace_existing_new_labels = FALSE → VAR_FULL skipped
+  suppressMessages(ai_suggest_labels(meta, meta_json = path))
+
+  res <- .read_meta_json(path)$variables
+  # VAR_FULL: existing labels must be untouched (we never re-sent it)
+  expect_equal(res$VAR_FULL$levels[["1"]]$new_label, "Déjà fait")
+  expect_equal(res$VAR_FULL$levels[["2"]]$new_label, "Pas fait")
+  # VAR_PART: newly labeled
+  expect_equal(res$VAR_PART$levels[["1"]]$new_label, "A travaillé")
+  expect_equal(res$VAR_PART$levels[["2"]]$new_label, "Pas travaillé")
+})

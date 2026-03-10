@@ -10,7 +10,7 @@ factor_binary   : exactly 2 levels — may be positive/negative (Oui/Non, Choisi
 integer_scale   : numeric integer used as a scale
   (political left/right 1–7, satisfaction 0–10, agreement 1–5)
 integer_count   : integer counting real-world items
-  (number of years, months, children, rooms, jobs…)
+  (height, age, number of years, months, children, rooms, jobs…)
 other           : genuinely unclassifiable (mixed types, free text, answer orders…)
 unclear         : cannot choose between roles, user will decide
 
@@ -444,6 +444,54 @@ Reasoning: Neither level is positive/negative.
 Input:  {"id":"STATUT","label":"statut d occupation du logement","cur":"factor_binary","nd":2,"levels":["Locataire","Proprietaire"]}
 Output: {"id":"STATUT","role":"factor_binary","desc":"low_first"}
 Reasoning: Proprietaire is the norm, Locataire is out of the norm; there is an implicit hierarchy between the two; in this regard, here negative level (Locataire) is shown first. 
+
+```json
+{
+    "A21R_0": {
+      "var_label": "Frère(s) ainé(s)",
+      "role"     : "factor_binary",
+      "desc": "low_first",
+      "levels": {
+        "0"  : { "order": 1, "label": "Pas de frère ainé"                },
+        "1"  : { "order": 2, "label": "Un ou plusieurs frère(s) ainé(s)" },
+        "999": { "missing": true, "label": "Ne sait pas"                      }
+      }
+    }
+}
+```
+Reasoning: Positive level ("Un ou plusieurs…") is the second label shown.
+
+```json
+{
+    "A21R_1": {
+      "var_label": "Soeur(s) ainée(s)",
+      "role"     : "factor_binary",
+      "desc": "low_first",
+      "levels": {
+        "0"  : { "order": 1, "label": "Pas de soeur ainée"                 },
+        "1"  : { "order": 2, "label": "Une ou plusieurs soeur(s) ainée(s)" },
+        "999": { "missing": true, "label": "Ne sait pas"                        }
+      }
+    }
+}
+```
+Reasoning: Negative level ("Pas de…" ) is the first label shown.
+
+```json
+{
+    "A21R_2": {
+      "var_label": "Ainé ou jumeau",
+      "role"     : "factor_binary",
+      "desc": "low_first",
+      "levels": {
+        "0"  : { "order": 1, "label": "N'est pas l'ainé de la famille" },
+        "1"  : { "order": 2, "label": "Ainé de la famille (ou jumeau)" },
+        "999": { "missing": true, "label": "Ne sait pas"                    }
+      }
+    }
+}
+```
+Reasoning: Negative level ("N’est pas…" ) is the first label shown.
 
 
 ### integer_scale
