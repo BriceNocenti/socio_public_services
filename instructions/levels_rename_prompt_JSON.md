@@ -181,18 +181,7 @@ Trois variables d'une même batterie partagent la même échelle Non/Parfois/Sou
 
 **Entrée :**
 ```json
-[{"var": "PCS", "type": "nominal", "desc": "QCSP ego INSEE niveau 1", "levels": {"1": "Agriculteurs exploitants", "2": "Artisans, commerçants et chefs d'entreprise", 
-"3": "Cadres et professions intellectuelles supérieures", "4": "Professions Intermédiaires", 
-"5": "Employés", "6": "Ouvriers"}}, 
-{"var": "P_C", "type": "nominal", "desc": "CSP INSEE niveau 1", "levels": {"1": "Agriculteurs exploitants", "2": "Artisans, commerçants et chefs d'entreprise", 
-"3": "Cadres et professions intellectuelles supérieures", "4": "Professions Intermédiaires", 
-"5": "Employés", "6": "Ouvriers"}}, 
-{"var": "P_P", "type": "nominal", "desc": "CSP pere INSEE niveau 1", "levels": {"1": "Agriculteurs exploitants", "2": "Artisans, commerçants et chefs d'entreprise", 
-"3": "Cadres et professions intellectuelles supérieures", "4": "Professions Intermédiaires", 
-"5": "Employés", "6": "6-Ouvriers"}}, 
-{"var": "P_M", "type": "nominal", "desc": "CSP mere INSEE niveau 1", "levels": {"1": "Agriculteurs exploitants", "2": "Artisans, commerçants et chefs d'entreprise", 
-"3": "Cadres et professions intellectuelles supérieures", "4": "Professions Intermédiaires", 
-"5": "Employés", "6": "6-Ouvriers"}}, 
+[{"var": "PCS", "type": "nominal", "desc": "QCSP ego INSEE niveau 1", "levels": {"1": "Agriculteurs exploitants", "2": "Artisans, commerçants et chefs d'entreprise", "3": "Cadres et professions intellectuelles supérieures", "4": "Professions Intermédiaires", "5": "Employés", "6": "Ouvriers"}}, {"var": "P_C", "type": "nominal", "desc": "CSP INSEE niveau 1", "levels": {"1": "Agriculteurs exploitants", "2": "Artisans, commerçants et chefs d'entreprise", "3": "Cadres et professions intellectuelles supérieures", "4": "Professions Intermédiaires", "5": "Employés", "6": "Ouvriers"}}, {"var": "P_P", "type": "nominal", "desc": "CSP pere INSEE niveau 1", "levels": {"1": "Agriculteurs exploitants", "2": "Artisans, commerçants et chefs d'entreprise", "3": "Cadres et professions intellectuelles supérieures", "4": "Professions Intermédiaires", "5": "Employés", "6": "6-Ouvriers"}}, {"var": "P_M", "type": "nominal", "desc": "CSP mere INSEE niveau 1", "levels": {"1": "Agriculteurs exploitants", "2": "Artisans, commerçants et chefs d'entreprise", "3": "Cadres et professions intellectuelles supérieures", "4": "Professions Intermédiaires", "5": "Employés", "6": "6-Ouvriers"}}, 
 ]
 ```
 **Sortie :**

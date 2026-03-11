@@ -870,3 +870,62 @@ test_that("J9: level_counts and level_freqs populated on skeleton via n/pct", {
   expect_equal(result$level_counts[[1]], c(60L, 40L))
   expect_equal(result$level_freqs[[1]],  c(60, 40))
 })
+
+
+# ===========================================================================
+# K1: metadata_apply_meta_json preserves new_labels when JSON has only order
+# ===========================================================================
+# Regression test for bind_rows() padding bug:
+#   VAR_A: JSON has new_label -> update_rows row has new_labels column
+#   VAR_B: JSON has only order -> update_rows row has NO new_labels column
+#   bind_rows() padded VAR_B's new_labels with list(NULL), clearing it.
+
+test_that("K1: metadata_apply_meta_json preserves new_labels when JSON has only order (no new_label)", {
+  json_vars <- list(
+    VAR_A = list(
+      var_label = "Variable A",
+      role      = "factor_binary",
+      new_name  = "VAR_A",
+      levels    = list(
+        "1" = list(label = "Oui", new_label = "A vot\u00e9",  order = 1L, n = 80L),
+        "2" = list(label = "Non", new_label = "Pas vot\u00e9", order = 2L, n = 20L)
+      )
+    ),
+    VAR_B = list(
+      var_label = "Variable B",
+      role      = "factor_binary",
+      new_name  = "VAR_B",
+      levels    = list(
+        "1" = list(label = "Oui", order = 1L, n = 449L),
+        "2" = list(label = "Non", order = 2L, n = 8196L)
+      )
+    )
+  )
+
+  metadata <- tibble::tibble(
+    var_name      = c("VAR_A", "VAR_B"),
+    var_label     = c("Variable A", "Variable B"),
+    r_class       = c("integer", "double"),
+    n_distinct    = c(2L, 2L),
+    n_distinct_data = c(2L, 2L),
+    detected_role = c("factor_binary", "factor_binary"),
+    values        = list(c("1", "2"), c("1", "2")),
+    labels        = list(c("Oui", "Non"), c("Oui", "Non")),
+    missing_vals  = list(character(0), character(0)),
+    new_labels    = list(c("Oui", "Non"), c("Oui", "Non")),
+    new_name      = c("VAR_A", "VAR_B")
+  )
+
+  result <- suppressMessages(metadata_apply_meta_json(metadata, json_vars))
+
+  # VAR_A: new_labels updated from JSON
+  res_a <- result[result$var_name == "VAR_A", ]$new_labels[[1]]
+  expect_equal(res_a, c("A vot\u00e9", "Pas vot\u00e9"))
+
+  # VAR_B: new_labels must NOT be cleared — must still be original labels
+  res_b <- result[result$var_name == "VAR_B", ]$new_labels[[1]]
+  expect_true(length(res_b) > 0,
+              info = "VAR_B new_labels must not be cleared by bind_rows() padding")
+  expect_equal(res_b, c("Oui", "Non"),
+               info = "VAR_B new_labels must stay as original labels when JSON has no new_label")
+})

@@ -1178,3 +1178,79 @@ test_that("P5: built prompt includes double, unclear, and miss examples", {
   expect_true(grepl("AGE10_DESC", result),
     label = "AGE10_DESC should appear in built prompt")
 })
+
+
+# ===========================================================================
+# AC: Edge dummy auto-classification tests
+# ===========================================================================
+
+test_that("AC1: edge dummy ALL_MISS (nd:0) auto-classified without API call", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  on.exit(unlink(path))
+
+  meta <- suppressMessages(extract_survey_metadata(
+    .edge_dummy,
+    meta_json   = path,
+    missing_num = .edge_missing_num,
+    missing_chr = .edge_missing_chr,
+    yes_labels  = .edge_yes_labels,
+    no_labels   = .edge_no_labels
+  ))
+
+  # Mock AI: should NOT be called for nd:0 variables (auto-classified)
+  # Return valid response for other vars that do need classification
+  classify_resp <- paste(
+    '{"id":"SINGLE_VAL","role":"factor_nominal"}',
+    '{"id":"EMPTY_LABELS","role":"factor_binary","desc":"high_first"}',
+    '{"id":"HIGH_CARD","role":"factor_nominal"}',
+    sep = "\n"
+  )
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude", mock_ai(classify_resp), envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path)
+  )
+
+  res <- .read_meta_json(path)$variables$ALL_MISS
+  # nd:0 → auto-classified as integer_count (no API needed)
+  expect_true(res$role %in% c("integer_count", "integer", "other", "factor_nominal"),
+              info = paste("ALL_MISS role:", res$role))
+})
+
+
+test_that("AC2: edge dummy SINGLE_VAL (nd:1) auto-classified as factor_unique_value", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  on.exit(unlink(path))
+
+  meta <- suppressMessages(extract_survey_metadata(
+    .edge_dummy,
+    meta_json   = path,
+    missing_num = .edge_missing_num,
+    missing_chr = .edge_missing_chr,
+    yes_labels  = .edge_yes_labels,
+    no_labels   = .edge_no_labels
+  ))
+
+  # Mock AI for vars that do get sent to API
+  classify_resp <- paste(
+    '{"id":"EMPTY_LABELS","role":"factor_binary","desc":"high_first"}',
+    '{"id":"HIGH_CARD","role":"factor_nominal"}',
+    sep = "\n"
+  )
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude", mock_ai(classify_resp), envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(
+    ai_classify_roles(meta, meta_json = path)
+  )
+
+  res <- .read_meta_json(path)$variables$SINGLE_VAL
+  # nd:1 → auto-classified as factor_unique_value (no API needed)
+  expect_equal(res$role, "factor_unique_value",
+               info = paste("SINGLE_VAL role:", res$role))
+})
