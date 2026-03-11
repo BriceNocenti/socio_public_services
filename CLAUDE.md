@@ -18,22 +18,27 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
 ```
 1. extract_survey_metadata(df, meta_json, ...)
    → Detects column roles, writes initial JSON with levels/labels/role
+   → Returns invisible(survey_meta) — enables |> piping
 
-2. ai_classify_roles(meta, meta_json, ...)
+2. ai_classify_roles(meta_json, ...)
    → AI disambiguates ordinal vs nominal, writes role + desc + order to JSON
 
-3. metadata_add_level_stats(meta, df, meta_json)
+3. metadata_add_level_stats(meta_json, df)
    → Adds n/pct counts per level to JSON (required before ai_suggest_labels)
 
-4. ai_suggest_labels(meta, meta_json, ...)
+4. ai_suggest_labels(meta_json, ...)
    → AI suggests short display labels, writes new_label to JSON levels
 
-5. ai_suggest_varnames(meta, meta_json, ...)
+5. ai_suggest_varnames(meta_json, ...)
    → AI suggests short variable names, writes new_name to JSON
 
-6. generate_format_script(meta, json_path, df, output_path)
+6. generate_format_script(meta_json, output_path = NULL)
    → Generates executable R script that applies all formatting
+   → Reads numeric stats from JSON (run metadata_add_level_stats() first)
 ```
+
+All functions take `meta_json` (path string or `survey_meta` object) as their first argument.
+The metadata tibble is an internal implementation detail; users never construct it directly.
 
 ### JSON as Source of Truth
 
@@ -44,7 +49,7 @@ Users can (and do) manually edit the JSON between AI steps. Key fields per varia
 - `desc`: boolean — TRUE = descending order for ordinal factors
 - `new_name`: short variable name suggested by AI
 - `levels.{code}.new_label`: short display label suggested by AI
-- `levels.{code}.null_coded`: TRUE for missing-value levels
+- `levels.{code}.missing`: TRUE for missing-value levels (old `null_coded` field renamed)
 - `levels.{code}.order`: integer for ordinal level ordering
 
 ### SAS Format File Support
@@ -86,8 +91,7 @@ Each dummy has matching configs:
 
 **Helpers:**
 - `tmp_json()` — creates a temp JSON path
-- `make_meta_list()` — builds a metadata list for unit tests
-- `make_classify_meta()` — builds classify-roles input
+- `make_meta_list(vars)` — builds a `list(config=..., variables=vars)` suitable for `.write_meta_json()`
 - `mock_ai(text)` — returns a function that mimics `ai_call_claude()` returning `text`
 - `extract_dummy_meta(dummy, ...)` — wrapper around `extract_survey_metadata()` for tests
 
@@ -110,7 +114,7 @@ Each dummy has matching configs:
 | `test-ai-suggest-labels.R` | L/B | `ai_suggest_labels()` prompt building + JSON writing |
 | `test-ai-merge-levels.R` | M | `ai_merge_levels()` logic |
 | `test-generate-format-script.R` | G | `generate_format_script()` code generation |
-| `test-json-roundtrip.R` | J/K | JSON read/write roundtrip + `metadata_apply_meta_json()` |
+| `test-json-roundtrip.R` | J/K | JSON read/write roundtrip, backup, migration helpers |
 | `test-nomenclatures-insee.R` | O | INSEE nomenclature helpers |
 
 ### Mocking AI Calls
@@ -127,8 +131,10 @@ assign("ai_call_claude", mock_ai(response_text), envir = globalenv())
 
 - `\uXXXX` unicode escapes do NOT work inside backtick-quoted R names — use double-quoted names
 - `metadata_add_level_stats()` must run before `ai_suggest_labels()` (needs n/pct)
-- When reloading metadata from JSON, always pass `df` to get full level info
+- `metadata_add_level_stats()` must run before `generate_format_script()` for numeric stats
+- Do NOT construct metadata tibbles in tests — use JSON write + `.load_meta()` roundtrip pattern
 - SAS inline format string `.sas_emploi_inline` is shared — don't redefine in test files
+- Pre-existing P5 test failure: prompt file `instructions/classify_roles_prompt.md` is missing
 
 ---
 

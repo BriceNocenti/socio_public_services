@@ -235,64 +235,69 @@ test_that("add_nomenclature_to_json errors on invalid df_codes", {
 # Tests: detect_nomenclature_vars
 # ===========================================================================
 
-# Build a minimal metadata tibble from the dummy data
-.make_min_metadata <- function() {
-  vars <- c("FAP_PROFA", "NAFG038N", "NAFG129N", "NAFN", "PCS3", "PCS4")
-  tibble::tibble(
-    var_name     = vars,
-    var_label    = vars,
-    r_class      = "character",
-    n_distinct   = 10L,
-    detected_role = "factor_nominal",
-    values = list(
-      unique(na.omit(.ee_dummy$FAP_PROFA)),
-      unique(na.omit(.ee_dummy$NAFG038N)),
-      unique(na.omit(.ee_dummy$NAFG129N)),
-      unique(na.omit(.ee_dummy$NAFN)),
-      unique(na.omit(.ee_dummy$PCS3)),
-      unique(na.omit(.ee_dummy$PCS4))
-    ),
-    missing_vals = replicate(6, character(0), simplify = FALSE),
-    labels       = replicate(6, character(0), simplify = FALSE),
-    new_labels   = replicate(6, character(0), simplify = FALSE),
-    new_name     = vars,
-    order        = replicate(6, integer(0), simplify = FALSE)
+# Write a minimal survey_meta JSON using actual .ee_dummy values as level codes.
+# detect_nomenclature_vars() identifies nomenclature type by matching level codes.
+.make_nom_detect_json <- function() {
+  vars_list <- c("FAP_PROFA", "NAFG038N", "NAFG129N", "NAFN", "PCS3", "PCS4")
+  variables <- purrr::set_names(
+    lapply(vars_list, function(vn) {
+      codes <- unique(na.omit(.ee_dummy[[vn]]))
+      list(
+        var_label = vn,
+        role      = "factor_nominal",
+        new_name  = vn,
+        levels    = purrr::set_names(
+          lapply(codes, function(code) list(label = code)),
+          codes
+        )
+      )
+    }),
+    vars_list
   )
+  path <- tmp_json()
+  .write_meta_json(list(config = list(), variables = variables), path)
+  path
 }
 
 test_that("detect_nomenclature_vars detects FAP_PROFA as FAP2021_341", {
-  meta <- .make_min_metadata()
-  mapping <- detect_nomenclature_vars(meta)
+  path <- .make_nom_detect_json()
+  on.exit(unlink(path))
+  mapping <- suppressMessages(detect_nomenclature_vars(path))
   expect_equal(mapping[["FAP_PROFA"]], "FAP2021_341")
 })
 
 test_that("detect_nomenclature_vars detects NAFN as NAF_rev2", {
-  meta <- .make_min_metadata()
-  mapping <- detect_nomenclature_vars(meta)
+  path <- .make_nom_detect_json()
+  on.exit(unlink(path))
+  mapping <- suppressMessages(detect_nomenclature_vars(path))
   expect_equal(mapping[["NAFN"]], "NAF_rev2")
 })
 
 test_that("detect_nomenclature_vars detects PCS3 as PCS2020_N3", {
-  meta <- .make_min_metadata()
-  mapping <- detect_nomenclature_vars(meta)
+  path <- .make_nom_detect_json()
+  on.exit(unlink(path))
+  mapping <- suppressMessages(detect_nomenclature_vars(path))
   expect_equal(mapping[["PCS3"]], "PCS2020_N3")
 })
 
 test_that("detect_nomenclature_vars detects PCS4 as PCS2020_N4", {
-  meta <- .make_min_metadata()
-  mapping <- detect_nomenclature_vars(meta)
+  path <- .make_nom_detect_json()
+  on.exit(unlink(path))
+  mapping <- suppressMessages(detect_nomenclature_vars(path))
   expect_equal(mapping[["PCS4"]], "PCS2020_N4")
 })
 
 test_that("detect_nomenclature_vars detects NAFG038N as NAF_38N", {
-  meta <- .make_min_metadata()
-  mapping <- detect_nomenclature_vars(meta)
+  path <- .make_nom_detect_json()
+  on.exit(unlink(path))
+  mapping <- suppressMessages(detect_nomenclature_vars(path))
   expect_equal(mapping[["NAFG038N"]], "NAF_38N")
 })
 
 test_that("detect_nomenclature_vars detects NAFG129N as NAF_129N", {
-  meta <- .make_min_metadata()
-  mapping <- detect_nomenclature_vars(meta)
+  path <- .make_nom_detect_json()
+  on.exit(unlink(path))
+  mapping <- suppressMessages(detect_nomenclature_vars(path))
   expect_equal(mapping[["NAFG129N"]], "NAF_129N")
 })
 
@@ -300,130 +305,119 @@ test_that("detect_nomenclature_vars detects NAFG129N as NAF_129N", {
 # Tests: apply_nomenclatures
 # ===========================================================================
 
-test_that("apply_nomenclatures enriches labels from nomenclature JSON", {
-  tmp_nom <- tempfile(fileext = ".json")
-  on.exit(unlink(tmp_nom))
+# Helper: write a minimal survey_meta.json with given variables/levels
+.make_nom_meta_json <- function(vars_levels, path) {
+  variables <- purrr::imap(vars_levels, function(lvls, vname) {
+    list(
+      var_label = vname,
+      role      = "factor_nominal",
+      new_name  = vname,
+      levels    = purrr::set_names(
+        lapply(lvls, function(lbl) list(label = lbl)),
+        lvls
+      )
+    )
+  })
+  .write_meta_json(list(config = list(), variables = variables), path)
+}
+
+test_that("apply_nomenclatures enriches new_label from nomenclature JSON", {
+  tmp_nom  <- tempfile(fileext = ".json")
+  tmp_meta <- tempfile(fileext = ".json")
+  on.exit(unlink(c(tmp_nom, tmp_meta)))
   .write_nomenclatures_json(.make_min_nom_list(), tmp_nom)
 
-  meta <- .make_min_metadata()
-  mapping <- list(NAFN = "NAF_rev2", PCS3 = "PCS2020_N3", FAP_PROFA = "FAP2021_341")
+  # NAFN has codes "3900Z", "6910Z"; PCS3 has code "38A"
+  .make_nom_meta_json(
+    list(NAFN = c("3900Z", "6910Z", "XXXXZ"), PCS3 = c("38A", "65B")),
+    tmp_meta
+  )
 
-  result <- apply_nomenclatures(meta, mapping, nom_json = tmp_nom)
+  mapping <- list(NAFN = "NAF_rev2", PCS3 = "PCS2020_N3")
+  suppressWarnings(apply_nomenclatures(tmp_meta, mapping, nom_json = tmp_nom))
 
-  # NAFN: code "3900Z" should get label
-  nafn_idx <- which(result$var_name == "NAFN")
-  nafn_vals   <- result$values[[nafn_idx]]
-  nafn_labels <- result$labels[[nafn_idx]]
-  idx_3900 <- which(nafn_vals == "3900Z")
-  expect_equal(nafn_labels[[idx_3900]],
-               "Depollution et autres services de gestion des dechets")
-
-  # PCS3: code "38A" should get label
-  pcs3_idx <- which(result$var_name == "PCS3")
-  pcs3_vals   <- result$values[[pcs3_idx]]
-  pcs3_labels <- result$labels[[pcs3_idx]]
-  idx_38a <- which(pcs3_vals == "38A")
-  expect_equal(pcs3_labels[[idx_38a]],
-               "Ingenieurs et cadres d'etude, R et D en informatique")
+  written <- .read_meta_json(tmp_meta)
+  expect_equal(
+    written$variables$NAFN$levels[["3900Z"]]$new_label,
+    "Depollution et autres services de gestion des dechets"
+  )
+  expect_equal(
+    written$variables$PCS3$levels[["38A"]]$new_label,
+    "Ingenieurs et cadres d'etude, R et D en informatique"
+  )
 })
 
 test_that("apply_nomenclatures warns but does not error on missing code", {
-  tmp_nom <- tempfile(fileext = ".json")
-  on.exit(unlink(tmp_nom))
+  tmp_nom  <- tempfile(fileext = ".json")
+  tmp_meta <- tempfile(fileext = ".json")
+  on.exit(unlink(c(tmp_nom, tmp_meta)))
   .write_nomenclatures_json(.make_min_nom_list(), tmp_nom)
 
-  meta <- .make_min_metadata()
-  # Map NAFN to a nomenclature with only 3 codes -> many unmatched
+  # Map NAFN to NAF_rev2 which only has 3 codes → many unmatched
+  .make_nom_meta_json(list(NAFN = c("3900Z", "XXXXZ", "9999Z")), tmp_meta)
+
   expect_warning(
-    apply_nomenclatures(meta, list(NAFN = "NAF_rev2"), nom_json = tmp_nom),
+    apply_nomenclatures(tmp_meta, list(NAFN = "NAF_rev2"), nom_json = tmp_nom),
     "absents de 'NAF_rev2'"
   )
 })
 
 test_that("apply_nomenclatures warns on unknown variable name", {
-  tmp_nom <- tempfile(fileext = ".json")
-  on.exit(unlink(tmp_nom))
+  tmp_nom  <- tempfile(fileext = ".json")
+  tmp_meta <- tempfile(fileext = ".json")
+  on.exit(unlink(c(tmp_nom, tmp_meta)))
   .write_nomenclatures_json(.make_min_nom_list(), tmp_nom)
 
-  meta <- .make_min_metadata()
-  expect_warning(
-    apply_nomenclatures(meta, list(UNKNOWN_VAR = "NAF_rev2"), nom_json = tmp_nom),
-    "absente de metadata"
-  )
-})
+  .make_nom_meta_json(list(NAFN = c("3900Z")), tmp_meta)
 
-test_that("apply_nomenclatures warns on unknown nomenclature key", {
-  tmp_nom <- tempfile(fileext = ".json")
-  on.exit(unlink(tmp_nom))
-  .write_nomenclatures_json(.make_min_nom_list(), tmp_nom)
-
-  meta <- .make_min_metadata()
   expect_warning(
-    apply_nomenclatures(meta, list(NAFN = "UNKNOWN_NOM"), nom_json = tmp_nom),
+    apply_nomenclatures(tmp_meta, list(UNKNOWN_VAR = "NAF_rev2"), nom_json = tmp_nom),
     "absente du JSON"
   )
 })
 
-test_that("apply_nomenclatures with dry_run does not modify metadata", {
-  tmp_nom <- tempfile(fileext = ".json")
-  on.exit(unlink(tmp_nom))
-  .write_nomenclatures_json(.make_min_nom_list(), tmp_nom)
-
-  meta    <- .make_min_metadata()
-  mapping <- list(NAFN = "NAF_rev2")
-
-  result_dry  <- apply_nomenclatures(meta, mapping, nom_json = tmp_nom, dry_run = TRUE)
-  result_real <- apply_nomenclatures(meta, mapping, nom_json = tmp_nom, dry_run = FALSE)
-
-  # dry_run: labels should be unchanged (empty)
-  nafn_idx <- which(meta$var_name == "NAFN")
-  expect_equal(result_dry$labels[[nafn_idx]], meta$labels[[nafn_idx]])
-  # real: labels should be enriched
-  expect_true(length(result_real$labels[[nafn_idx]]) > 0)
-})
-
-test_that("apply_nomenclatures writes new_labels to meta_json when provided", {
+test_that("apply_nomenclatures warns on unknown nomenclature key", {
   tmp_nom  <- tempfile(fileext = ".json")
   tmp_meta <- tempfile(fileext = ".json")
   on.exit(unlink(c(tmp_nom, tmp_meta)))
-
   .write_nomenclatures_json(.make_min_nom_list(), tmp_nom)
 
-  # Minimal survey_meta.json with NAFN variable
-  meta_init <- list(
-    config    = list(),
-    variables = list(
-      NAFN = list(
-        var_label = "NAF",
-        role      = "factor_nominal",
-        new_name  = "NAFN",
-        levels    = list(
-          `3900Z` = list(order = 1L, label = "Code brut 3900Z"),
-          `3600Z` = list(order = 2L, label = "Code brut 3600Z")
-        )
-      )
-    )
-  )
-  .write_meta_json(meta_init, tmp_meta)
+  .make_nom_meta_json(list(NAFN = c("3900Z")), tmp_meta)
 
-  # Build metadata with matching values
-  meta <- tibble::tibble(
-    var_name      = "NAFN",
-    var_label     = "NAF",
-    r_class       = "character",
-    n_distinct    = 2L,
-    detected_role = "factor_nominal",
-    values        = list(c("3900Z", "3600Z")),
-    missing_vals  = list(character(0)),
-    labels        = list(c("Code brut 3900Z", "Code brut 3600Z")),
-    new_labels    = list(character(0)),
-    new_name      = "NAFN",
-    order         = list(c(1L, 2L))
+  expect_warning(
+    apply_nomenclatures(tmp_meta, list(NAFN = "UNKNOWN_NOM"), nom_json = tmp_nom),
+    "absente du JSON"
   )
+})
+
+test_that("apply_nomenclatures with dry_run does not write to JSON", {
+  tmp_nom  <- tempfile(fileext = ".json")
+  tmp_meta <- tempfile(fileext = ".json")
+  on.exit(unlink(c(tmp_nom, tmp_meta)))
+  .write_nomenclatures_json(.make_min_nom_list(), tmp_nom)
+
+  .make_nom_meta_json(list(NAFN = c("3900Z", "6910Z")), tmp_meta)
 
   suppressWarnings(
-    apply_nomenclatures(meta, list(NAFN = "NAF_rev2"),
-                        nom_json = tmp_nom, meta_json = tmp_meta)
+    apply_nomenclatures(tmp_meta, list(NAFN = "NAF_rev2"),
+                        nom_json = tmp_nom, dry_run = TRUE)
+  )
+
+  # dry_run: JSON must not have new_label written
+  written <- .read_meta_json(tmp_meta)
+  expect_null(written$variables$NAFN$levels[["3900Z"]]$new_label)
+})
+
+test_that("apply_nomenclatures writes new_label to JSON", {
+  tmp_nom  <- tempfile(fileext = ".json")
+  tmp_meta <- tempfile(fileext = ".json")
+  on.exit(unlink(c(tmp_nom, tmp_meta)))
+  .write_nomenclatures_json(.make_min_nom_list(), tmp_nom)
+
+  .make_nom_meta_json(list(NAFN = c("3900Z", "3600Z")), tmp_meta)
+
+  suppressWarnings(
+    apply_nomenclatures(tmp_meta, list(NAFN = "NAF_rev2"), nom_json = tmp_nom)
   )
 
   written <- .read_meta_json(tmp_meta)
@@ -433,51 +427,30 @@ test_that("apply_nomenclatures writes new_labels to meta_json when provided", {
   )
 })
 
-test_that("apply_nomenclatures replaces existing new_label in meta_json", {
+test_that("apply_nomenclatures replaces existing new_label in JSON", {
   tmp_nom  <- tempfile(fileext = ".json")
   tmp_meta <- tempfile(fileext = ".json")
   on.exit(unlink(c(tmp_nom, tmp_meta)))
-
   .write_nomenclatures_json(.make_min_nom_list(), tmp_nom)
 
-  # Start with a pre-existing new_label
-  meta_init <- list(
+  # Pre-existing new_label
+  .write_meta_json(list(
     config    = list(),
     variables = list(
       NAFN = list(
-        var_label = "NAF",
-        role      = "factor_nominal",
-        new_name  = "NAFN",
-        levels    = list(
-          `3900Z` = list(order = 1L, label = "Code brut 3900Z",
-                         new_label = "Ancien libelle")
+        var_label = "NAF", role = "factor_nominal", new_name = "NAFN",
+        levels = list(
+          `3900Z` = list(label = "Code brut 3900Z", new_label = "Ancien libelle")
         )
       )
     )
-  )
-  .write_meta_json(meta_init, tmp_meta)
-
-  meta <- tibble::tibble(
-    var_name      = "NAFN",
-    var_label     = "NAF",
-    r_class       = "character",
-    n_distinct    = 1L,
-    detected_role = "factor_nominal",
-    values        = list("3900Z"),
-    missing_vals  = list(character(0)),
-    labels        = list("Code brut 3900Z"),
-    new_labels    = list(character(0)),
-    new_name      = "NAFN",
-    order         = list(1L)
-  )
+  ), tmp_meta)
 
   suppressWarnings(
-    apply_nomenclatures(meta, list(NAFN = "NAF_rev2"),
-                        nom_json = tmp_nom, meta_json = tmp_meta)
+    apply_nomenclatures(tmp_meta, list(NAFN = "NAF_rev2"), nom_json = tmp_nom)
   )
 
   written <- .read_meta_json(tmp_meta)
-  # Should replace the old new_label, not keep it
   expect_equal(
     written$variables$NAFN$levels[["3900Z"]]$new_label,
     "Depollution et autres services de gestion des dechets"

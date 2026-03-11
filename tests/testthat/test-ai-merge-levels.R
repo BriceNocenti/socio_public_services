@@ -1,6 +1,6 @@
 # Tests for ai_merge_levels()
 # Functions under test: ai_merge_levels()
-# No real API calls are made; ai_call_claude() is replaced via withr::local_bindings.
+# No real API calls are made; ai_call_claude() is replaced via assign()/on.exit().
 #
 # Test coverage:
 #   M1  – basic ordinal merge: correct order integers written to JSON
@@ -18,23 +18,6 @@
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-# Build a minimal metadata tibble row suitable for ai_merge_levels().
-# level_counts and level_freqs are per-level counts/freqs in sorted order.
-make_merge_meta <- function(var_name, var_label,
-                            detected_role = "factor_ordinal",
-                            n_levels = 3L) {
-  tibble::tibble(
-    var_name      = var_name,
-    var_label     = var_label,
-    r_class       = "integer",
-    n_distinct     = n_levels,
-    detected_role  = detected_role,
-    values         = list(seq_len(n_levels)),
-    level_counts   = list(rep(100L, n_levels)),
-    level_freqs    = list(rep(1 / n_levels, n_levels))
-  )
-}
 
 # Build a JSON vars list with non-missing levels and order/n/pct fields.
 make_merge_vars <- function(var_name, keys, labels, n_vec, pct_vec,
@@ -69,8 +52,6 @@ test_that("M1: ordinal merge response assigns correct order integers", {
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_merge_meta("SATISF", "Satisfaction", n_levels = 4L)
-
   # AI merges [1,2] → group 1, [3,4] → group 2
   fake_resp <- '{"SATISF":[{"order":1,"keys":["1","2"]},{"order":2,"keys":["3","4"]}]}'
 
@@ -79,7 +60,7 @@ test_that("M1: ordinal merge response assigns correct order integers", {
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
   suppressMessages(
-    ai_merge_levels(meta, meta_json = path)
+    ai_merge_levels(path)
   )
 
   res <- .read_meta_json(path)$variables$SATISF$levels
@@ -109,8 +90,6 @@ test_that("M2: no-merge response keeps each key in its own group", {
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_merge_meta("DIPLOME", "Diplôme", n_levels = 3L)
-
   fake_resp <- '{"DIPLOME":[{"order":1,"keys":["1"]},{"order":2,"keys":["2"]},{"order":3,"keys":["3"]}]}'
 
   .orig <- get("ai_call_claude", envir = globalenv())
@@ -118,7 +97,7 @@ test_that("M2: no-merge response keeps each key in its own group", {
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
   suppressMessages(
-    ai_merge_levels(meta, meta_json = path)
+    ai_merge_levels(path)
   )
 
   res <- .read_meta_json(path)$variables$DIPLOME$levels
@@ -147,8 +126,6 @@ test_that("M3: key mismatch in AI response triggers warning and skips variable",
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_merge_meta("FREQ", "Fréquence", n_levels = 3L)
-
   # Response references key "9" which doesn't exist in input
   fake_resp <- '{"FREQ":[{"order":1,"keys":["1"]},{"order":2,"keys":["2","9"]}]}'
 
@@ -158,7 +135,7 @@ test_that("M3: key mismatch in AI response triggers warning and skips variable",
 
   expect_warning(
     suppressMessages(
-      ai_merge_levels(meta, meta_json = path)
+      ai_merge_levels(path)
     ),
     regexp = "FREQ"
   )
@@ -190,8 +167,6 @@ test_that("M4: 2-group merge sets role to factor_binary", {
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_merge_meta("CONF", "Conflit", n_levels = 3L)
-
   fake_resp <- '{"CONF":[{"order":1,"keys":["00"]},{"order":2,"keys":["01","02"]}]}'
 
   .orig <- get("ai_call_claude", envir = globalenv())
@@ -199,7 +174,7 @@ test_that("M4: 2-group merge sets role to factor_binary", {
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
   suppressMessages(
-    ai_merge_levels(meta, meta_json = path)
+    ai_merge_levels(path)
   )
 
   res_var <- .read_meta_json(path)$variables$CONF
@@ -215,11 +190,10 @@ test_that("M4: 2-group merge sets role to factor_binary", {
 # M5 – missing meta_json → stop()
 # ---------------------------------------------------------------------------
 
-test_that("M5: missing meta_json argument triggers stop()", {
-  meta <- make_merge_meta("X", "x", n_levels = 3L)
+test_that("M5: non-existent JSON path triggers stop()", {
   expect_error(
-    suppressMessages(ai_merge_levels(meta)),
-    regexp = "meta_json"
+    suppressMessages(ai_merge_levels("/nonexistent/path.json")),
+    regexp = "not found"
   )
 })
 
@@ -228,7 +202,7 @@ test_that("M5: missing meta_json argument triggers stop()", {
 # M6 – metadata lacks level_counts column → stop()
 # ---------------------------------------------------------------------------
 
-test_that("M6: metadata without level_counts column triggers stop()", {
+test_that("M6: JSON without level counts triggers stop()", {
   withr::local_dir(.test_proj_root)
   path <- tmp_json()
 
@@ -236,19 +210,9 @@ test_that("M6: metadata without level_counts column triggers stop()", {
                         levels = list("1" = list(label = "A", order = 1L))))
   .write_meta_json(make_meta_list(vars), path)
 
-  # Metadata tibble without level_counts
-  meta <- tibble::tibble(
-    var_name      = "X",
-    var_label     = "x",
-    r_class       = "integer",
-    n_distinct     = 1L,
-    detected_role  = "factor_ordinal",
-    values         = list(1L)
-  )
-
   expect_error(
-    suppressMessages(ai_merge_levels(meta, meta_json = path)),
-    regexp = "level_counts"
+    suppressMessages(ai_merge_levels(path)),
+    regexp = "level counts"
   )
 })
 
@@ -271,11 +235,6 @@ test_that("M7: two variables in one chunk both get order integers updated", {
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- dplyr::bind_rows(
-    make_merge_meta("VAR_A", "Variable A", n_levels = 3L),
-    make_merge_meta("VAR_B", "Variable B", n_levels = 2L)
-  )
-
   fake_resp <- paste0(
     '{"VAR_A":[{"order":1,"keys":["1","2"]},{"order":2,"keys":["3"]}],',
     '"VAR_B":[{"order":1,"keys":["0"]},{"order":2,"keys":["1"]}]}'
@@ -286,7 +245,7 @@ test_that("M7: two variables in one chunk both get order integers updated", {
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
   suppressMessages(
-    ai_merge_levels(meta, meta_json = path)
+    ai_merge_levels(path)
   )
 
   res <- .read_meta_json(path)$variables
@@ -313,10 +272,8 @@ test_that("M8: dry_run prompt contains parameter line and array brackets", {
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_merge_meta("FREQ", "Fréquence", n_levels = 3L)
-
   prompts <- suppressMessages(
-    ai_merge_levels(meta, meta_json = path, dry_run = TRUE)
+    ai_merge_levels(path, dry_run = TRUE)
   )
 
   expect_type(prompts, "list")
@@ -352,9 +309,6 @@ test_that("M9: nominal variable processed when nominal = TRUE", {
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_merge_meta("REGION", "Région",
-                          detected_role = "factor_nominal", n_levels = 3L)
-
   fake_resp <- '{"REGION":[{"order":1,"keys":["1","2"]},{"order":2,"keys":["3"]}]}'
 
   .orig <- get("ai_call_claude", envir = globalenv())
@@ -362,7 +316,7 @@ test_that("M9: nominal variable processed when nominal = TRUE", {
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
   suppressMessages(
-    ai_merge_levels(meta, meta_json = path, nominal = TRUE)
+    ai_merge_levels(path, nominal = TRUE)
   )
 
   res <- .read_meta_json(path)$variables$REGION$levels
@@ -388,9 +342,6 @@ test_that("M10: nominal variable skipped when nominal = FALSE (default)", {
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_merge_meta("REGION", "Région",
-                          detected_role = "factor_nominal", n_levels = 3L)
-
   # API should not be called — if it is, the test fails
   .orig <- get("ai_call_claude", envir = globalenv())
   assign("ai_call_claude",
@@ -399,7 +350,7 @@ test_that("M10: nominal variable skipped when nominal = FALSE (default)", {
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
   suppressMessages(
-    ai_merge_levels(meta, meta_json = path, nominal = FALSE)
+    ai_merge_levels(path, nominal = FALSE)
   )
 
   # Orders must be unchanged (initial values written by make_merge_vars: 1,2,3)
@@ -428,11 +379,10 @@ test_that("M11: dry_run system prompt excludes nominal rules when nominal = FALS
     )
   )
   .write_meta_json(make_meta_list(vars), path)
-  meta <- make_merge_meta("SATISF", "Satisfaction", n_levels = 3L)
 
   output_lines <- capture.output(
     suppressMessages(
-      ai_merge_levels(meta, meta_json = path, dry_run = TRUE, nominal = FALSE)
+      ai_merge_levels(path, dry_run = TRUE, nominal = FALSE)
     )
   )
   captured <- paste(output_lines, collapse = "\n")
@@ -470,12 +420,10 @@ test_that("M12: dry_run system prompt includes nominal rules when nominal = TRUE
     )
   )
   .write_meta_json(make_meta_list(vars), path)
-  meta <- make_merge_meta("REGION", "R\u00e9gion",
-                          detected_role = "factor_nominal", n_levels = 3L)
 
   output_lines <- capture.output(
     suppressMessages(
-      ai_merge_levels(meta, meta_json = path, dry_run = TRUE, nominal = TRUE)
+      ai_merge_levels(path, dry_run = TRUE, nominal = TRUE)
     )
   )
   captured <- paste(output_lines, collapse = "\n")

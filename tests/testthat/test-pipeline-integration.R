@@ -3,11 +3,12 @@
 # Walks through the full pipeline sequence on real-data dummies:
 #   1. extract_survey_metadata()  -- role detection + initial JSON
 #   2. ai_classify_roles()        -- AI disambiguates ordinal/nominal (mocked)
-#   3. reload metadata from JSON  -- skeleton reconstruction (df=NULL)
+#   3. metadata_add_level_stats() -- adds n/pct to JSON levels
 #   4. ai_suggest_labels()        -- AI suggests short labels (mocked)
 #   5. ai_suggest_varnames()      -- AI suggests variable names (mocked)
 #   6. generate_format_script()   -- generate formatting R script
 #
+# All pipeline functions take json_path as first argument.
 # All AI calls are mocked via assign()/on.exit() pattern.
 
 
@@ -25,9 +26,9 @@ test_that("INT1: Virage dummy full pipeline (extract -> classify -> labels -> va
   on.exit(assign("ai_call_claude", .orig_ai, envir = globalenv()), add = TRUE)
 
   # --- Step 1: extract_survey_metadata ---
-  meta <- suppressMessages(extract_survey_metadata(
+  suppressMessages(extract_survey_metadata(
     .virage_dummy,
-    meta_json   = json_path,
+    json_path,
     missing_num = .virage_missing_num,
     missing_chr = .virage_missing_chr,
     yes_labels  = .virage_yes_labels,
@@ -35,13 +36,13 @@ test_that("INT1: Virage dummy full pipeline (extract -> classify -> labels -> va
   ))
 
   expect_true(file.exists(json_path))
-  expect_s3_class(meta, "tbl_df")
-  expect_equal(nrow(meta), ncol(.virage_dummy))
 
-  # Verify initial roles
-  expect_equal(meta[meta$var_name == "Q25E1", ]$detected_role, "factor_binary")
-  expect_equal(meta[meta$var_name == "Q19E_GRAGEBIS", ]$detected_role, "factor_nominal")
-  expect_equal(meta[meta$var_name == "POIDS_CAL", ]$detected_role, "double")
+  # Verify initial roles in JSON
+  json_data <- .read_meta_json(json_path)
+  expect_equal(length(json_data$variables), ncol(.virage_dummy))
+  expect_equal(json_data$variables$Q25E1$role, "factor_binary")
+  expect_equal(json_data$variables$Q19E_GRAGEBIS$role, "factor_nominal")
+  expect_equal(json_data$variables$POIDS_CAL$role, "double")
 
   # --- Step 2: ai_classify_roles (mock) ---
   classify_response <- paste(
@@ -53,9 +54,7 @@ test_that("INT1: Virage dummy full pipeline (extract -> classify -> labels -> va
   )
   assign("ai_call_claude", mock_ai(classify_response), envir = globalenv())
 
-  suppressMessages(
-    ai_classify_roles(meta, meta_json = json_path, ordinal_desc = TRUE)
-  )
+  suppressMessages(ai_classify_roles(json_path, ordinal_desc = TRUE))
 
   # Verify JSON updated with ordinal role
   json_data <- .read_meta_json(json_path)
@@ -67,19 +66,9 @@ test_that("INT1: Virage dummy full pipeline (extract -> classify -> labels -> va
   non_miss_orders <- orders[!is.na(orders)]
   expect_true(length(non_miss_orders) > 0, info = "ordinal should have order integers")
 
-  # --- Step 3: reload metadata from JSON (with df for full level info) ---
-  meta2 <- suppressMessages(extract_survey_metadata(
-    .virage_dummy, meta_json = json_path,
-    missing_num = .virage_missing_num, missing_chr = .virage_missing_chr,
-    yes_labels = .virage_yes_labels, no_labels = .virage_no_labels
-  ))
-  expect_s3_class(meta2, "tbl_df")
-  expect_equal(nrow(meta2), ncol(.virage_dummy))
-  expect_equal(meta2[meta2$var_name == "Q19E_GRAGEBIS", ]$detected_role, "factor_ordinal")
-
-  # --- Step 3b: add level stats (required before ai_suggest_labels) ---
-  meta2 <- suppressMessages(
-    metadata_add_level_stats(meta2, .virage_dummy, meta_json = json_path)
+  # --- Step 3: add level stats (required before ai_suggest_labels) ---
+  suppressMessages(
+    metadata_add_level_stats(json_path, .virage_dummy)
   )
 
   # --- Step 4: ai_suggest_labels (mock) ---
@@ -91,8 +80,7 @@ test_that("INT1: Virage dummy full pipeline (extract -> classify -> labels -> va
   assign("ai_call_claude", mock_ai(labels_response), envir = globalenv())
 
   suppressMessages(
-    ai_suggest_labels(meta2, meta_json = json_path,
-                      replace_existing_new_labels = TRUE)
+    ai_suggest_labels(json_path, replace_existing_new_labels = TRUE)
   )
 
   # Verify new_label written to JSON
@@ -117,9 +105,7 @@ test_that("INT1: Virage dummy full pipeline (extract -> classify -> labels -> va
   )
   assign("ai_call_claude", mock_ai(varnames_response), envir = globalenv())
 
-  suppressMessages(
-    ai_suggest_varnames(meta2, meta_json = json_path)
-  )
+  suppressMessages(ai_suggest_varnames(json_path))
 
   # Verify new_name in JSON
   json_data <- .read_meta_json(json_path)
@@ -127,15 +113,8 @@ test_that("INT1: Virage dummy full pipeline (extract -> classify -> labels -> va
   expect_equal(json_data$variables$POIDS_CAL$new_name, "POIDS")
 
   # --- Step 6: generate_format_script ---
-  meta3 <- suppressMessages(extract_survey_metadata(
-    .virage_dummy, meta_json = json_path,
-    missing_num = .virage_missing_num, missing_chr = .virage_missing_chr,
-    yes_labels = .virage_yes_labels, no_labels = .virage_no_labels
-  ))
-
   suppressMessages(
-    generate_format_script(meta3, json_path, df = .virage_dummy,
-                           output_path = script_path)
+    generate_format_script(json_path, output_path = script_path)
   )
 
   expect_true(file.exists(script_path))
@@ -167,10 +146,10 @@ test_that("INT2: Emploi dummy full pipeline with SAS format file", {
   on.exit(assign("ai_call_claude", .orig_ai, envir = globalenv()), add = TRUE)
 
   # --- Step 1: extract_survey_metadata with SAS format file ---
-  meta <- suppressMessages(extract_survey_metadata(
+  suppressMessages(extract_survey_metadata(
     .emploi_dummy,
+    json_path,
     sas_format_file = sas_file,
-    meta_json       = json_path,
     missing_num     = .emploi_missing_num,
     missing_chr     = .emploi_missing_chr,
     yes_labels      = .emploi_yes_labels,
@@ -178,11 +157,13 @@ test_that("INT2: Emploi dummy full pipeline with SAS format file", {
   ))
 
   expect_true(file.exists(json_path))
-  expect_equal(meta[meta$var_name == "METRODOM", ]$detected_role, "factor_binary")
-  expect_equal(meta[meta$var_name == "AGED", ]$detected_role, "factor_nominal")
-  expect_equal(meta[meta$var_name == "PCS1", ]$detected_role, "factor_nominal")
-  expect_equal(meta[meta$var_name == "HCONT", ]$detected_role, "double")
-  expect_equal(meta[meta$var_name == "NAIA", ]$detected_role, "integer")
+
+  json_data <- .read_meta_json(json_path)
+  expect_equal(json_data$variables$METRODOM$role, "factor_binary")
+  expect_equal(json_data$variables$AGED$role, "factor_nominal")
+  expect_equal(json_data$variables$PCS1$role, "factor_nominal")
+  expect_equal(json_data$variables$HCONT$role, "double")
+  expect_equal(json_data$variables$NAIA$role, "integer")
 
   # --- Step 2: ai_classify_roles (mock) ---
   classify_response <- paste(
@@ -194,24 +175,14 @@ test_that("INT2: Emploi dummy full pipeline with SAS format file", {
   )
   assign("ai_call_claude", mock_ai(classify_response), envir = globalenv())
 
-  suppressMessages(
-    ai_classify_roles(meta, meta_json = json_path, ordinal_desc = TRUE)
-  )
+  suppressMessages(ai_classify_roles(json_path, ordinal_desc = TRUE))
 
   json_data <- .read_meta_json(json_path)
   expect_equal(json_data$variables$AGED$role, "factor_ordinal")
 
-  # --- Step 3: reload from JSON (with df for full level info) ---
-  meta2 <- suppressMessages(extract_survey_metadata(
-    .emploi_dummy, sas_format_file = sas_file, meta_json = json_path,
-    missing_num = .emploi_missing_num, missing_chr = .emploi_missing_chr,
-    yes_labels = .emploi_yes_labels, no_labels = .emploi_no_labels
-  ))
-  expect_equal(meta2[meta2$var_name == "AGED", ]$detected_role, "factor_ordinal")
-
-  # --- Step 3b: add level stats ---
-  meta2 <- suppressMessages(
-    metadata_add_level_stats(meta2, .emploi_dummy, meta_json = json_path)
+  # --- Step 3: add level stats ---
+  suppressMessages(
+    metadata_add_level_stats(json_path, .emploi_dummy)
   )
 
   # --- Step 4: ai_suggest_labels (mock) ---
@@ -226,8 +197,7 @@ test_that("INT2: Emploi dummy full pipeline with SAS format file", {
   assign("ai_call_claude", mock_ai(labels_response), envir = globalenv())
 
   suppressMessages(
-    ai_suggest_labels(meta2, meta_json = json_path,
-                      replace_existing_new_labels = TRUE)
+    ai_suggest_labels(json_path, replace_existing_new_labels = TRUE)
   )
 
   json_data <- .read_meta_json(json_path)
@@ -243,24 +213,15 @@ test_that("INT2: Emploi dummy full pipeline with SAS format file", {
   )
   assign("ai_call_claude", mock_ai(varnames_response), envir = globalenv())
 
-  suppressMessages(
-    ai_suggest_varnames(meta2, meta_json = json_path)
-  )
+  suppressMessages(ai_suggest_varnames(json_path))
 
   json_data <- .read_meta_json(json_path)
   expect_equal(json_data$variables$METRODOM$new_name, "METRO_DOM")
   expect_equal(json_data$variables$HCONT$new_name, "H_CONTRAT")
 
   # --- Step 6: generate_format_script ---
-  meta3 <- suppressMessages(extract_survey_metadata(
-    .emploi_dummy, sas_format_file = sas_file, meta_json = json_path,
-    missing_num = .emploi_missing_num, missing_chr = .emploi_missing_chr,
-    yes_labels = .emploi_yes_labels, no_labels = .emploi_no_labels
-  ))
-
   suppressMessages(
-    generate_format_script(meta3, json_path, df = .emploi_dummy,
-                           output_path = script_path)
+    generate_format_script(json_path, output_path = script_path)
   )
 
   expect_true(file.exists(script_path))

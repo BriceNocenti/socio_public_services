@@ -108,10 +108,10 @@ test_that("E4: Emploi dummy JSON roundtrip preserves SAS labels", {
   json_path <- tmp_json()
   on.exit(unlink(c(f, json_path)))
 
-  meta <- suppressMessages(extract_survey_metadata(
+  suppressMessages(extract_survey_metadata(
     .emploi_dummy,
+    json_path,
     sas_format_file = f,
-    meta_json       = json_path,
     missing_num     = .emploi_missing_num,
     missing_chr     = .emploi_missing_chr,
     yes_labels      = .emploi_yes_labels,
@@ -159,17 +159,18 @@ test_that("E5: haven_labelled<double> binary (codes 0/1) detected as factor_bina
   )
   df_test <- tibble::tibble(STERILE = sterile_col)
 
-  meta <- suppressMessages(extract_survey_metadata(
-    df_test, meta_json = path, missing_num = c(-1L, 96L, 99L)
+  suppressMessages(extract_survey_metadata(
+    df_test, path, missing_num = c(-1L, 96L, 99L)
   ))
+  meta <- .load_meta(path)$meta
 
   row <- meta[meta$var_name == "STERILE", ]
   expect_equal(nrow(row), 1L)
   expect_true(row$detected_role %in% c("factor_binary", "factor_nominal"))
-  expect_true(length(row$values[[1]]) > 0, info = "values should not be empty")
-  expect_true(length(row$new_labels[[1]]) > 0, info = "new_labels should not be empty")
-  expect_false(all(row$new_labels[[1]] == "NULL"),
-               info = "new_labels should not be all NULL for non-missing levels")
+  lvls <- row$levels[[1]]
+  expect_true(length(lvls) > 0, info = "levels should not be empty")
+  non_miss_lvls <- Filter(function(l) !isTRUE(l$missing), lvls)
+  expect_true(length(non_miss_lvls) > 0, info = "non-missing levels should exist")
 })
 
 
@@ -192,16 +193,17 @@ test_that("E6: haven_labelled<double> nominal (codes 1/2/3) detected correctly",
   )
   df_test <- tibble::tibble(ANNEAUVIE = anneauvie_col)
 
-  meta <- suppressMessages(extract_survey_metadata(
-    df_test, meta_json = path, missing_num = c(-1L, 96L, 99L)
+  suppressMessages(extract_survey_metadata(
+    df_test, path, missing_num = c(-1L, 96L, 99L)
   ))
+  meta <- .load_meta(path)$meta
 
   row <- meta[meta$var_name == "ANNEAUVIE", ]
   expect_equal(nrow(row), 1L)
   expect_true(row$detected_role %in% c("factor_nominal", "factor_ordinal", "factor_binary"))
-  expect_true(length(row$new_labels[[1]]) > 0, info = "new_labels should not be empty")
-  expect_false(all(row$new_labels[[1]] == "NULL"),
-               info = "new_labels should not be all NULL for non-missing levels")
+  lvls <- row$levels[[1]]
+  non_miss_lvls <- Filter(function(l) !isTRUE(l$missing), lvls)
+  expect_true(length(non_miss_lvls) > 0, info = "non-missing levels should exist")
 })
 
 
@@ -223,15 +225,17 @@ test_that("E7: haven_labelled<double> binary (codes 1/2) detected correctly", {
   )
   df_test <- tibble::tibble(CONTRA_R = contra_col)
 
-  meta <- suppressMessages(extract_survey_metadata(
-    df_test, meta_json = path, missing_num = c(-1L, 96L, 99L)
+  suppressMessages(extract_survey_metadata(
+    df_test, path, missing_num = c(-1L, 96L, 99L)
   ))
+  meta <- .load_meta(path)$meta
 
   row <- meta[meta$var_name == "CONTRA_R", ]
   expect_equal(nrow(row), 1L)
   expect_true(row$detected_role %in% c("factor_binary", "factor_nominal"))
-  expect_true(length(row$new_labels[[1]]) > 0)
-  expect_false(all(row$new_labels[[1]] == "NULL"))
+  lvls <- row$levels[[1]]
+  non_miss_lvls <- Filter(function(l) !isTRUE(l$missing), lvls)
+  expect_true(length(non_miss_lvls) > 0)
 })
 
 
@@ -277,9 +281,9 @@ test_that("E10: haven_labelled<double> binary appears in ai_suggest_labels promp
   path <- tmp_json()
   on.exit(unlink(path))
 
-  meta <- suppressMessages(extract_survey_metadata(
+  suppressMessages(extract_survey_metadata(
     .edge_dummy,
-    meta_json   = path,
+    path,
     missing_num = .edge_missing_num,
     missing_chr = .edge_missing_chr,
     yes_labels  = .edge_yes_labels,
@@ -292,7 +296,7 @@ test_that("E10: haven_labelled<double> binary appears in ai_suggest_labels promp
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
   prompts <- suppressMessages(
-    ai_suggest_labels(meta, meta_json = path, dry_run = TRUE,
+    ai_suggest_labels(path, dry_run = TRUE,
                       replace_existing_new_labels = TRUE)
   )
 

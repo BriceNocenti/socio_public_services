@@ -11,30 +11,6 @@
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Build a minimal metadata tibble row suitable for ai_suggest_labels().
-make_labels_meta <- function(var_name, var_label, detected_role,
-                              values_vec, labels_vec, missing_vec,
-                              new_labels_vec, order_vec,
-                              level_counts_vec = NULL, level_freqs_vec = NULL) {
-  n <- length(values_vec)
-  tibble::tibble(
-    var_name        = var_name,
-    var_label       = var_label,
-    r_class         = "integer",
-    n_distinct      = sum(new_labels_vec != "NULL"),
-    n_distinct_data = sum(new_labels_vec != "NULL"),
-    detected_role   = detected_role,
-    values          = list(values_vec),
-    labels          = list(labels_vec),
-    missing_vals    = list(missing_vec),
-    new_labels      = list(new_labels_vec),
-    new_name        = var_name,
-    order           = list(order_vec),
-    level_counts    = list(if (is.null(level_counts_vec)) rep(100L, n) else level_counts_vec),
-    level_freqs     = list(if (is.null(level_freqs_vec))  rep(1/n, n) else level_freqs_vec)
-  )
-}
-
 # Build a JSON vars list with non-missing levels already having order integers.
 make_labels_vars <- function(var_name, keys, labels, order_vec,
                               missing_keys = character(0),
@@ -51,7 +27,6 @@ make_labels_vars <- function(var_name, keys, labels, order_vec,
   )
   list(var_label = "test", role = role, new_name = var_name, levels = levs)
 }
-
 
 # ---------------------------------------------------------------------------
 # L. ai_suggest_labels() — order preservation
@@ -77,22 +52,13 @@ test_that("L1: ordinal variable — order integers in JSON unchanged after ai_su
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_labels_meta(
-    "FREQ", "Fréquence", "factor_ordinal",
-    values_vec    = c("1", "2", "3", "9"),
-    labels_vec    = c("Toujours", "Souvent", "Rarement", "NSP"),
-    missing_vec   = "9",
-    new_labels_vec = c("Toujours", "Souvent", "Rarement", "NULL"),
-    order_vec     = c(1L, 2L, 3L, NA_integer_)
-  )
-
   # AI suggests new labels keyed by value code
   fake_resp <- '{"FREQ": {"1": "Très souvent", "2": "Souvent", "3": "Rarement"}}'
   .orig <- get("ai_call_claude", envir = globalenv())
   assign("ai_call_claude", mock_ai(fake_resp), envir = globalenv())
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
-  suppressMessages(ai_suggest_labels(meta, meta_json = path))
+  suppressMessages(ai_suggest_labels(path))
 
   res <- .read_meta_json(path)$variables$FREQ$levels
   # Order integers must be unchanged
@@ -129,21 +95,12 @@ test_that("L2: binary reversed order (positive=2nd key) preserved after ai_sugge
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_labels_meta(
-    "VOTE", "A voté ?", "factor_binary",
-    values_vec    = c("1", "2", "9"),
-    labels_vec    = c("Non", "Oui", "NSP"),
-    missing_vec   = "9",
-    new_labels_vec = c("Non", "Oui", "NULL"),
-    order_vec     = c(2L, 1L, NA_integer_)
-  )
-
   fake_resp <- '{"VOTE": {"1": "Non", "2": "Oui"}}'
   .orig <- get("ai_call_claude", envir = globalenv())
   assign("ai_call_claude", mock_ai(fake_resp), envir = globalenv())
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
-  suppressMessages(ai_suggest_labels(meta, meta_json = path))
+  suppressMessages(ai_suggest_labels(path))
 
   res <- .read_meta_json(path)$variables$VOTE$levels
   # Reversed order must be preserved: key "2" = order 1 (positive)
@@ -176,15 +133,6 @@ test_that("L3: merged ordinal (shared order integer) — group label expanded to
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_labels_meta(
-    "SATIS", "Satisfaction", "factor_ordinal",
-    values_vec    = c("1", "2", "3", "4", "9"),
-    labels_vec    = c("Pas du tout", "Peu", "Moyen", "Beaucoup", "NSP"),
-    missing_vec   = "9",
-    new_labels_vec = c("Pas du tout", "Peu", "Moyen", "Beaucoup", "NULL"),
-    order_vec     = c(1L, 1L, 2L, 3L, NA_integer_)
-  )
-
   # AI returns one label per group: group key = first code in group = "1"
   # Groups are: {1,2}→"Faible", {3}→"Moyen", {4}→"Élevé"
   fake_resp <- '{"SATIS": {"1": "Faible", "3": "Moyen", "4": "Élevé"}}'
@@ -192,7 +140,7 @@ test_that("L3: merged ordinal (shared order integer) — group label expanded to
   assign("ai_call_claude", mock_ai(fake_resp), envir = globalenv())
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
-  suppressMessages(ai_suggest_labels(meta, meta_json = path))
+  suppressMessages(ai_suggest_labels(path))
 
   res <- .read_meta_json(path)$variables$SATIS$levels
   # Both merged members get the same label
@@ -230,21 +178,12 @@ test_that("L4: nominal variable — ai_suggest_labels does not modify existing o
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_labels_meta(
-    "PAYS", "Pays de naissance", "factor_nominal",
-    values_vec    = c("1", "2", "9"),
-    labels_vec    = c("France", "Allemagne", "NSP"),
-    missing_vec   = "9",
-    new_labels_vec = c("France", "Allemagne", "NULL"),
-    order_vec     = c(1L, 2L, NA_integer_)
-  )
-
   fake_resp <- '{"PAYS": {"1": "France", "2": "Allemagne"}}'
   .orig <- get("ai_call_claude", envir = globalenv())
   assign("ai_call_claude", mock_ai(fake_resp), envir = globalenv())
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
-  suppressMessages(ai_suggest_labels(meta, meta_json = path))
+  suppressMessages(ai_suggest_labels(path))
 
   res <- .read_meta_json(path)$variables$PAYS$levels
   # Order integers must be unchanged by ai_suggest_labels
@@ -281,22 +220,13 @@ test_that("L5: un-permutation correct — reversed ordinal sends in order 3,2,1 
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_labels_meta(
-    "AGREE", "Accord", "factor_ordinal",
-    values_vec    = c("1", "2", "3", "9"),
-    labels_vec    = c("Pas du tout", "Un peu", "Tout à fait", "NSP"),
-    missing_vec   = "9",
-    new_labels_vec = c("Pas du tout", "Un peu", "Tout à fait", "NULL"),
-    order_vec     = c(3L, 2L, 1L, NA_integer_)
-  )
-
   # AI response keyed by value code (AI sees them in order 3,2,1 but responds by code)
   fake_resp <- '{"AGREE": {"3": "Très fort", "2": "Moyen", "1": "Faible"}}'
   .orig <- get("ai_call_claude", envir = globalenv())
   assign("ai_call_claude", mock_ai(fake_resp), envir = globalenv())
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
-  suppressMessages(ai_suggest_labels(meta, meta_json = path))
+  suppressMessages(ai_suggest_labels(path))
 
   res <- .read_meta_json(path)$variables$AGREE$levels
   # Labels matched by key, order unchanged
@@ -330,22 +260,13 @@ test_that("L6: NULL-coded (missing) levels never get new_label written to JSON",
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_labels_meta(
-    "SAT", "Satisfaction", "factor_binary",
-    values_vec    = c("1", "2", "88", "99"),
-    labels_vec    = c("Satisfait", "Insatisfait", "NVPD", "NSP"),
-    missing_vec   = c("88", "99"),
-    new_labels_vec = c("Satisfait", "Insatisfait", "NULL", "NULL"),
-    order_vec     = c(1L, 2L, NA_integer_, NA_integer_)
-  )
-
   # AI attempts to label missing codes (should be ignored)
   fake_resp <- '{"SAT": {"1": "Satisfait", "2": "Insatisfait", "88": "NVPD", "99": "NSP"}}'
   .orig <- get("ai_call_claude", envir = globalenv())
   assign("ai_call_claude", mock_ai(fake_resp), envir = globalenv())
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
-  suppressMessages(ai_suggest_labels(meta, meta_json = path))
+  suppressMessages(ai_suggest_labels(path))
 
   res <- .read_meta_json(path)$variables$SAT$levels
   # Non-missing: labels written, order intact
@@ -399,25 +320,6 @@ test_that("L7: multi-variable — order preserved independently for each variabl
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- dplyr::bind_rows(
-    make_labels_meta(
-      "FREQ", "Fréquence", "factor_ordinal",
-      values_vec    = c("1", "2", "3", "9"),
-      labels_vec    = c("Jamais", "Parfois", "Toujours", "NSP"),
-      missing_vec   = "9",
-      new_labels_vec = c("Jamais", "Parfois", "Toujours", "NULL"),
-      order_vec     = c(3L, 2L, 1L, NA_integer_)
-    ),
-    make_labels_meta(
-      "SEXE", "Sexe", "factor_binary",
-      values_vec    = c("1", "2"),
-      labels_vec    = c("Femme", "Homme"),
-      missing_vec   = character(0),
-      new_labels_vec = c("Femme", "Homme"),
-      order_vec     = c(2L, 1L)
-    )
-  )
-
   fake_resp <- paste0(
     '{"FREQ": {"3": "Toujours", "2": "Parfois", "1": "Jamais"},',
     ' "SEXE": {"1": "Femme", "2": "Homme"}}'
@@ -426,7 +328,7 @@ test_that("L7: multi-variable — order preserved independently for each variabl
   assign("ai_call_claude", mock_ai(fake_resp), envir = globalenv())
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
-  suppressMessages(ai_suggest_labels(meta, meta_json = path))
+  suppressMessages(ai_suggest_labels(path))
 
   raw <- .read_meta_json(path)
 
@@ -473,25 +375,6 @@ test_that("L8: AI omits one variable — labeled variable written, omitted has n
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- dplyr::bind_rows(
-    make_labels_meta(
-      "VAR_A", "A voté ?", "factor_binary",
-      values_vec    = c("1", "2"),
-      labels_vec    = c("Oui", "Non"),
-      missing_vec   = character(0),
-      new_labels_vec = c("Oui", "Non"),
-      order_vec     = c(1L, 2L)
-    ),
-    make_labels_meta(
-      "VAR_B", "A travaillé ?", "factor_binary",
-      values_vec    = c("1", "2"),
-      labels_vec    = c("Oui", "Non"),
-      missing_vec   = character(0),
-      new_labels_vec = c("Oui", "Non"),
-      order_vec     = c(1L, 2L)
-    )
-  )
-
   # AI returns only VAR_A, omits VAR_B
   fake_resp <- '{"VAR_A": {"1": "A voté", "2": "Pas voté"}}'
   .orig <- get("ai_call_claude", envir = globalenv())
@@ -499,7 +382,7 @@ test_that("L8: AI omits one variable — labeled variable written, omitted has n
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
   expect_message(
-    ai_suggest_labels(meta, meta_json = path,
+    ai_suggest_labels(path,
                       replace_existing_new_labels = TRUE),
     "VAR_B"
   )
@@ -541,32 +424,13 @@ test_that("L9: replace_existing_new_labels=FALSE skips fully-labeled, processes 
   )
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- dplyr::bind_rows(
-    make_labels_meta(
-      "VAR_FULL", "Déjà fait ?", "factor_binary",
-      values_vec    = c("1", "2"),
-      labels_vec    = c("Oui", "Non"),
-      missing_vec   = character(0),
-      new_labels_vec = c("Déjà fait", "Pas fait"),
-      order_vec     = c(1L, 2L)
-    ),
-    make_labels_meta(
-      "VAR_PART", "A travaillé ?", "factor_binary",
-      values_vec    = c("1", "2"),
-      labels_vec    = c("Oui", "Non"),
-      missing_vec   = character(0),
-      new_labels_vec = c("Oui", "Non"),
-      order_vec     = c(1L, 2L)
-    )
-  )
-
   fake_resp <- '{"VAR_PART": {"1": "A travaillé", "2": "Pas travaillé"}}'
   .orig <- get("ai_call_claude", envir = globalenv())
   assign("ai_call_claude", mock_ai(fake_resp), envir = globalenv())
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
   # Default: replace_existing_new_labels = FALSE → VAR_FULL skipped
-  suppressMessages(ai_suggest_labels(meta, meta_json = path))
+  suppressMessages(ai_suggest_labels(path))
 
   res <- .read_meta_json(path)$variables
   # VAR_FULL: existing labels must be untouched (we never re-sent it)

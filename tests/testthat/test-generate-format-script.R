@@ -3,40 +3,6 @@
 #   .gfs_build_entries, .gfs_codebook_lines, .gfs_format_blocks,
 #   generate_format_script
 
-# ---------------------------------------------------------------------------
-# Helper: build a minimal metadata tibble row
-# ---------------------------------------------------------------------------
-make_gfs_meta <- function(var_name, var_label = "", r_class = "character",
-                          detected_role = "factor_nominal",
-                          new_name = var_name) {
-  tibble::tibble(
-    var_name      = var_name,
-    var_label     = var_label,
-    r_class       = r_class,
-    n_distinct    = 3L,
-    detected_role = detected_role,
-    values        = list(integer(0)),
-    labels        = list(character(0)),
-    missing_vals  = list(integer(0)),
-    new_labels    = list(character(0)),
-    new_name      = new_name,
-    order         = list(integer(0))
-  )
-}
-
-# Helper: build a multi-row metadata tibble
-make_gfs_meta_multi <- function(rows) {
-  dplyr::bind_rows(lapply(rows, function(r) {
-    make_gfs_meta(
-      var_name      = r$var_name,
-      var_label     = r$var_label %||% "",
-      r_class       = r$r_class %||% "character",
-      detected_role = r$detected_role %||% "factor_nominal",
-      new_name      = r$new_name %||% r$var_name
-    )
-  }))
-}
-
 
 # ---------------------------------------------------------------------------
 # A. .gfs_numeric_prefix
@@ -110,8 +76,7 @@ test_that("build_entries: ordinal with missing, sorted by order", {
       )
     )
   )
-  meta <- make_gfs_meta("Q1", "Question one", new_name = "Q1_NEW")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
 
   expect_length(entries, 1)
   e <- entries[[1]]
@@ -148,8 +113,7 @@ test_that("codebook: ordinal/nominal uses 2 lines", {
       )
     )
   )
-  meta <- make_gfs_meta("Q1", "Group age", new_name = "AGE_GRP")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   cb <- .gfs_codebook_lines(entries)
 
   # Should have: var_list <- c( + 2 content lines + )
@@ -177,8 +141,7 @@ test_that("codebook: binary uses 1 line", {
       )
     )
   )
-  meta <- make_gfs_meta("Q_BIN", "Married?", new_name = "MARRIED")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   cb <- .gfs_codebook_lines(entries)
 
   content_lines <- cb[!grepl("^(var_list|\\))", cb)]
@@ -195,9 +158,7 @@ test_that("codebook: numeric variable uses 1 line", {
       levels = list()
     )
   )
-  meta <- make_gfs_meta("AGE", "Age in years", r_class = "double",
-                         detected_role = "integer_count", new_name = "AGE_P1")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   cb <- .gfs_codebook_lines(entries)
 
   content_lines <- cb[!grepl("^(var_list|\\))", cb)]
@@ -213,8 +174,7 @@ test_that("codebook: identifier uses 1 line with role keyword", {
       levels = list()
     )
   )
-  meta <- make_gfs_meta("ID", "Identifier", detected_role = "identifier")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   cb <- .gfs_codebook_lines(entries)
 
   content_lines <- cb[!grepl("^(var_list|\\))", cb)]
@@ -228,11 +188,7 @@ test_that("codebook: no trailing comma on last entry", {
     Q1 = list(var_label = "Q1", role = "identifier", new_name = "V1", levels = list()),
     Q2 = list(var_label = "Q2", role = "identifier", new_name = "V2", levels = list())
   )
-  meta <- make_gfs_meta_multi(list(
-    list(var_name = "Q1", var_label = "Q1", detected_role = "identifier", new_name = "V1"),
-    list(var_name = "Q2", var_label = "Q2", detected_role = "identifier", new_name = "V2")
-  ))
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   cb <- .gfs_codebook_lines(entries)
 
   # Last content line (before closing paren) should not have comma after the quoted name
@@ -248,8 +204,7 @@ test_that("codebook: orig name hidden when same as new_name", {
     SAME = list(var_label = "Same name var", role = "identifier", new_name = "SAME",
                 levels = list())
   )
-  meta <- make_gfs_meta("SAME", "Same name var", detected_role = "identifier")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   cb <- .gfs_codebook_lines(entries)
 
   content <- paste(cb, collapse = "\n")
@@ -267,13 +222,7 @@ test_that("codebook: padding alignment — all # at same column", {
     Q_LONG_NAME = list(var_label = "Long", role = "identifier",
                         new_name = "VERY_LONG_VARIABLE_NAME", levels = list())
   )
-  meta <- make_gfs_meta_multi(list(
-    list(var_name = "Q_SHORT", var_label = "Short", detected_role = "identifier",
-         new_name = "A"),
-    list(var_name = "Q_LONG_NAME", var_label = "Long", detected_role = "identifier",
-         new_name = "VERY_LONG_VARIABLE_NAME")
-  ))
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   cb <- .gfs_codebook_lines(entries)
 
   content_lines <- cb[!grepl("^(var_list|\\))", cb)]
@@ -300,8 +249,7 @@ test_that("format: ordinal gets fct_recode + as.ordered()", {
       )
     )
   )
-  meta <- make_gfs_meta("Q1", "Satisfaction", new_name = "SATIS")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
   combined <- paste(fmt, collapse = "\n")
 
@@ -323,8 +271,7 @@ test_that("format: nominal does NOT get as.ordered()", {
       )
     )
   )
-  meta <- make_gfs_meta("Q1", "Region", new_name = "REGION")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
   combined <- paste(fmt, collapse = "\n")
 
@@ -345,8 +292,7 @@ test_that("format: missing levels recoded to NULL, placed last", {
       )
     )
   )
-  meta <- make_gfs_meta("Q1", "Q")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
 
   # Find recode lines (indented lines with "label" = "code" or NULL = "code")
@@ -365,11 +311,7 @@ test_that("format: rename block only includes renamed vars", {
     Q1 = list(var_label = "Q1", role = "identifier", new_name = "RENAMED", levels = list()),
     Q2 = list(var_label = "Q2", role = "identifier", new_name = "Q2",      levels = list())
   )
-  meta <- make_gfs_meta_multi(list(
-    list(var_name = "Q1", var_label = "Q1", detected_role = "identifier", new_name = "RENAMED"),
-    list(var_name = "Q2", var_label = "Q2", detected_role = "identifier", new_name = "Q2")
-  ))
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
   combined <- paste(fmt, collapse = "\n")
 
@@ -387,9 +329,7 @@ test_that("format: integer_count gets as.integer + NA assignment", {
       )
     )
   )
-  meta <- make_gfs_meta("AGE", "Age", r_class = "double",
-                         detected_role = "integer_count", new_name = "AGE_P1")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
   combined <- paste(fmt, collapse = "\n")
 
@@ -408,9 +348,7 @@ test_that("format: double gets as.double + NA_real_", {
       )
     )
   )
-  meta <- make_gfs_meta("WT", "Weight", r_class = "double",
-                         detected_role = "double", new_name = "POIDS")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
   combined <- paste(fmt, collapse = "\n")
 
@@ -423,8 +361,7 @@ test_that("format: identifier produces comment-only, no assignment", {
     ID = list(var_label = "Identifier", role = "identifier", new_name = "ID",
               levels = list())
   )
-  meta <- make_gfs_meta("ID", "Identifier", detected_role = "identifier")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
 
   # No assignment (no <-)
@@ -448,8 +385,7 @@ test_that("format: level order matches order field (ascending)", {
       )
     )
   )
-  meta <- make_gfs_meta("Q1", "Age group", new_name = "AGE_GRP")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
 
   # Find recode lines (indented lines with = "code", pattern)
@@ -478,8 +414,7 @@ test_that("format: merged levels — multiple codes map to same prefixed label",
       )
     )
   )
-  meta <- make_gfs_meta("Q1", "Grouped", new_name = "GROUPED")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
 
   # Two lines should map to "1-Group1"
@@ -495,44 +430,38 @@ test_that("format: merged levels — multiple codes map to same prefixed label",
 test_that("generate_format_script: produces valid parseable R script", {
   vars <- list(
     Q1 = list(
-      var_label = "Sexe", role = "factor_binary", new_name = "SEXE",
+      var_label = "Sexe", role = "factor_binary", r_class = "double",
+      new_name = "SEXE",
       levels = list(
         "1" = list(order = 1L, label = "Homme", n = 500L, pct = 50L),
         "2" = list(order = 2L, label = "Femme", n = 500L, pct = 50L)
       )
     ),
     Q2 = list(
-      var_label = "Age", role = "integer_count", new_name = "AGE",
+      var_label = "Age", role = "integer_count", r_class = "double",
+      new_name = "AGE",
       levels = list(
         "99" = list(missing = TRUE, label = "NSP")
       )
     ),
     ID = list(
-      var_label = "Identifiant", role = "identifier", new_name = "ID",
+      var_label = "Identifiant", role = "identifier", r_class = "integer",
+      new_name = "ID",
       levels = list()
     )
   )
 
-  # Write JSON
   path <- tmp_json()
+  on.exit(unlink(path))
   .write_meta_json(make_meta_list(vars), path)
 
-  # Build metadata
-  meta <- make_gfs_meta_multi(list(
-    list(var_name = "Q1", var_label = "Sexe", new_name = "SEXE"),
-    list(var_name = "Q2", var_label = "Age", r_class = "double",
-         detected_role = "integer_count", new_name = "AGE"),
-    list(var_name = "ID", var_label = "Identifiant",
-         detected_role = "identifier")
-  ))
-
   out_path <- tempfile(fileext = ".R")
-  result <- generate_format_script(meta, path, output_path = out_path)
+  on.exit(unlink(out_path), add = TRUE)
+  result <- generate_format_script(path, output_path = out_path)
 
   expect_equal(result, out_path)
   expect_true(file.exists(out_path))
 
-  # Read and parse — should not error
   script_text <- readLines(out_path, encoding = "UTF-8")
   expect_no_error(parse(text = script_text))
 })
@@ -540,7 +469,8 @@ test_that("generate_format_script: produces valid parseable R script", {
 test_that("generate_format_script: contains expected sections", {
   vars <- list(
     Q1 = list(
-      var_label = "Group", role = "factor_ordinal", new_name = "GROUP",
+      var_label = "Group", role = "factor_ordinal", r_class = "character",
+      new_name = "GROUP",
       levels = list(
         "1" = list(order = 1L, label = "A", new_label = "Alpha", n = 100L, pct = 50L),
         "2" = list(order = 2L, label = "B", new_label = "Beta",  n = 100L, pct = 50L),
@@ -550,11 +480,12 @@ test_that("generate_format_script: contains expected sections", {
   )
 
   path <- tmp_json()
+  on.exit(unlink(path))
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_gfs_meta("Q1", "Group", new_name = "GROUP")
   out_path <- tempfile(fileext = ".R")
-  generate_format_script(meta, path, output_path = out_path)
+  on.exit(unlink(out_path), add = TRUE)
+  generate_format_script(path, output_path = out_path)
 
   script <- paste(readLines(out_path, encoding = "UTF-8"), collapse = "\n")
 
@@ -562,7 +493,6 @@ test_that("generate_format_script: contains expected sections", {
   expect_match(script, "library(haven)",   fixed = TRUE)
   expect_match(script, "library(dplyr)",   fixed = TRUE)
   expect_match(script, "library(forcats)", fixed = TRUE)
-  expect_match(script, "haven::read_dta",  fixed = TRUE)
 
   # Codebook
   expect_match(script, "var_list <- c(", fixed = TRUE)
@@ -581,21 +511,22 @@ test_that("generate_format_script: contains expected sections", {
   expect_match(script, "GROUP = Q1", fixed = TRUE)
 })
 
-test_that("generate_format_script: df=NULL omits stats gracefully", {
+test_that("generate_format_script: no num_stats in JSON omits stats", {
   vars <- list(
     AGE = list(
-      var_label = "Age", role = "integer_count", new_name = "AGE",
+      var_label = "Age", role = "integer_count", r_class = "double",
+      new_name = "AGE",
       levels = list()
     )
   )
 
   path <- tmp_json()
+  on.exit(unlink(path))
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_gfs_meta("AGE", "Age", r_class = "double",
-                         detected_role = "integer_count")
   out_path <- tempfile(fileext = ".R")
-  generate_format_script(meta, path, output_path = out_path)
+  on.exit(unlink(out_path), add = TRUE)
+  generate_format_script(path, output_path = out_path)
 
   script <- paste(readLines(out_path, encoding = "UTF-8"), collapse = "\n")
 
@@ -605,38 +536,8 @@ test_that("generate_format_script: df=NULL omits stats gracefully", {
   expect_match(script, "AGE")
 })
 
-test_that("generate_format_script: df provided includes stats", {
-  vars <- list(
-    AGE = list(
-      var_label = "Age", role = "integer_count", new_name = "AGE",
-      levels = list(
-        "99" = list(missing = TRUE, label = "NSP")
-      )
-    )
-  )
-
-  path <- tmp_json()
-  .write_meta_json(make_meta_list(vars), path)
-
-  meta <- make_gfs_meta("AGE", "Age", r_class = "double",
-                         detected_role = "integer_count")
-
-  # Fake data frame
-  fake_df <- data.frame(AGE = c(20, 30, 40, 50, 60, 99))
-
-  out_path <- tempfile(fileext = ".R")
-  generate_format_script(meta, path, df = fake_df, output_path = out_path)
-
-  script <- paste(readLines(out_path, encoding = "UTF-8"), collapse = "\n")
-
-  # Should contain stats
-  expect_match(script, "range:")
-  expect_match(script, "mean")
-  expect_match(script, "median")
-})
 
 test_that("generate_format_script: numeric prefix with 10+ levels uses leading zeros", {
-  # Build 12 levels
   levels_list <- list()
   for (i in 1:12) {
     code <- formatC(i, width = 2, flag = "0")
@@ -649,19 +550,19 @@ test_that("generate_format_script: numeric prefix with 10+ levels uses leading z
 
   vars <- list(
     Q1 = list(var_label = "Many levels", role = "factor_nominal",
-              new_name = "MANY", levels = levels_list)
+              r_class = "character", new_name = "MANY", levels = levels_list)
   )
 
   path <- tmp_json()
+  on.exit(unlink(path))
   .write_meta_json(make_meta_list(vars), path)
 
-  meta <- make_gfs_meta("Q1", "Many levels", new_name = "MANY")
   out_path <- tempfile(fileext = ".R")
-  generate_format_script(meta, path, output_path = out_path)
+  on.exit(unlink(out_path), add = TRUE)
+  generate_format_script(path, output_path = out_path)
 
   script <- paste(readLines(out_path, encoding = "UTF-8"), collapse = "\n")
 
-  # Should use "01-" prefix (not "1-")
   expect_match(script, '"01-Niv 1"')
   expect_match(script, '"12-Niv 12"')
 })
@@ -684,8 +585,7 @@ test_that("CV1: factor conversion always uses factor(as.character())", {
       )
     )
   )
-  meta <- make_gfs_meta("Q1", "Q", r_class = "character")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
   combined <- paste(fmt, collapse = "\n")
 
@@ -699,9 +599,7 @@ test_that("CV3: integer_count conversion uses as.integer(as.character())", {
       levels = list("99" = list(missing = TRUE, label = "NSP"))
     )
   )
-  meta <- make_gfs_meta("AGE", "Age", r_class = "double",
-                         detected_role = "integer_count")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
   combined <- paste(fmt, collapse = "\n")
 
@@ -715,9 +613,7 @@ test_that("CV6: double conversion uses as.double(as.character())", {
       levels = list()
     )
   )
-  meta <- make_gfs_meta("WT", "Weight", r_class = "double",
-                         detected_role = "double")
-  entries <- .gfs_build_entries(vars, meta)
+  entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
   combined <- paste(fmt, collapse = "\n")
 
