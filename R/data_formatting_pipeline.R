@@ -108,15 +108,15 @@ import_survey <- function(
   ext <- if (!is.null(format)) format else tolower(tools::file_ext(path))
 
   df <- switch(
-    ext,
+    ext[1],
     "sas7bdat" = ,
     "sas"      = haven::read_sas(path, catalog_file = catalog_file,
                                  encoding = encoding),
     "dta"      = haven::read_dta(path, encoding = encoding),
     "sav"      = haven::read_sav(path, encoding = encoding),
-    "parquet"  = arrow::read_parquet(path),
+    "parquet"  = arrow::open_dataset(path, unify_schemas = TRUE) |> collect() |> tibble::as_tibble(), # arrow::read_parquet(path),
     "rds"      = readRDS(path),
-    stop("Unrecognised format: '", ext, "'. Use sas/dta/sav/parquet/rds.")
+    stop("Unrecognised format: '", ext[1], "'. Use sas/dta/sav/parquet/rds.")
   )
 
   # Replace "" with NA in all character/factor columns (incl. haven_labelled on
@@ -153,6 +153,230 @@ import_survey <- function(
     pfx_upper <- toupper(remove_prefixes)
     for (pfx in pfx_upper) {
       names(df) <- sub(paste0("^", pfx), "", names(df))
+    }
+  }
+
+  df
+}
+
+
+# ============================================================
+# 1a-bis. parse_sas_formats() — parse SAS PROC FORMAT text file
+# ============================================================
+
+#' Parse a SAS PROC FORMAT text file to extract value labels and variable labels.
+#'
+#' Reads a SAS format definition file (typically produced by PROC FORMAT or
+#' distributed with survey microdata) and returns value-label mappings keyed
+#' by variable name.
+#'
+#' The file may contain two sections:
+#' \itemize{
+#'   \item \strong{Format definitions}: \code{;value $ FORMATf} blocks with
+#'         \code{"code"="label"} pairs.
+#'   \item \strong{Variable-to-format mapping}: a \code{data; set; format ...}
+#'         block listing \code{VARNAME $FORMATf} associations.
+#'   \item \strong{Variable labels} (optional): \code{label VARNAME="text";}
+#'         statements.
+#' }
+#'
+#' @param path   Path to the SAS format text file.
+#' @param encoding  Character encoding (default \code{"UTF-8"}).
+#'
+#' @return A list with two elements:
+#'   \describe{
+#'     \item{\code{value_labels}}{Named list: variable name → named character
+#'       vector \code{c("Label" = "code", ...)} (same layout as
+#'       \code{labelled::val_labels()}).}
+#'     \item{\code{var_labels}}{Named character vector: variable name →
+#'       variable description (from SAS \code{label} statements, if any).}
+#'   }
+parse_sas_formats <- function(path, encoding = "UTF-8") {
+  lines <- readLines(path, encoding = encoding, warn = FALSE)
+
+  # ------------------------------------------------------------------
+  # 1. Parse format definitions:  ;value [$ ]FORMATNAMEf
+  #    followed by "code"="label" lines until next ;value or end-of-section
+
+  # ------------------------------------------------------------------
+  formats <- list()            # FORMATNAMEf -> c("Label" = "code", ...)
+  current_fmt  <- NULL
+  current_labs <- character(0) # named: names=labels, values=codes
+
+  for (line in lines) {
+    trimmed <- trimws(line)
+
+    # Detect format header:  ;value $ MOISf   or   ;value MOISf
+    if (grepl("^;value\\s", trimmed, ignore.case = TRUE)) {
+      # Save previous format block (if any)
+      if (!is.null(current_fmt) && length(current_labs) > 0) {
+        formats[[current_fmt]] <- current_labs
+      }
+      # Extract format name (after optional $)
+      m <- regmatches(trimmed,
+        regexec("^;value\\s+(?:\\$\\s*)?(\\S+)", trimmed, perl = TRUE))[[1]]
+      if (length(m) >= 2) {
+        current_fmt  <- m[2]
+        current_labs <- character(0)
+      } else {
+        current_fmt <- NULL
+      }
+      next
+    }
+
+    # Collect "code"="label" pairs inside a format block
+    if (!is.null(current_fmt)) {
+      # Match:  "code" = "label"  (tolerant of spaces around =)
+      m <- regmatches(trimmed,
+        regexec('^"([^"]*)"\\s*=\\s*"([^"]*)"', trimmed, perl = TRUE))[[1]]
+      if (length(m) == 3) {
+        code  <- m[2]
+        label <- m[3]
+        current_labs[label] <- code
+      }
+      # A line starting with ; (but not ;value) or empty block boundary
+      # terminates the current block — handled by the ;value detection above.
+    }
+  }
+  # Flush the last format block
+  if (!is.null(current_fmt) && length(current_labs) > 0) {
+    formats[[current_fmt]] <- current_labs
+  }
+
+  # ------------------------------------------------------------------
+  # 2. Parse variable-to-format mapping section:
+  #    data; set; format  VARNAME $FORMATf  ...  ;  run;
+  # ------------------------------------------------------------------
+  mapping <- character(0)  # named: names=VARNAME, values=FORMATNAMEf
+
+  # Find the "data;" line that starts the mapping section
+  data_idx <- grep("^\\s*data;\\s*$", lines, ignore.case = TRUE)
+  if (length(data_idx) > 0) {
+    map_start <- data_idx[length(data_idx)]  # use last occurrence
+    map_lines <- lines[seq(map_start, length(lines))]
+    for (ml in map_lines) {
+      mt <- trimws(ml)
+      # Match:  VARNAME $FORMATNAMEf  (one or more per line)
+      # Pattern: word chars, then $ (possibly with space), then word chars
+      matches <- gregexpr(
+        "([A-Za-z_][A-Za-z0-9_]*)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)",
+        mt, perl = TRUE)
+      if (matches[[1]][1] > 0) {
+        starts  <- matches[[1]]
+        lengths <- attr(matches[[1]], "match.length")
+        for (i in seq_along(starts)) {
+          piece <- substr(mt, starts[i], starts[i] + lengths[i] - 1L)
+          parts <- regmatches(piece,
+            regexec("^([A-Za-z_][A-Za-z0-9_]*)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)",
+                    piece, perl = TRUE))[[1]]
+          if (length(parts) == 3) {
+            mapping[parts[2]] <- parts[3]  # VARNAME -> FORMATNAMEf
+          }
+        }
+      }
+    }
+  }
+
+  # ------------------------------------------------------------------
+  # 3. Build value_labels: VARNAME -> c("Label" = "code", ...)
+  # ------------------------------------------------------------------
+  value_labels <- list()
+
+  if (length(mapping) > 0) {
+    # Use mapping to link variables to formats
+    for (varname in names(mapping)) {
+      fmt_name <- mapping[[varname]]
+      if (fmt_name %in% names(formats)) {
+        value_labels[[varname]] <- formats[[fmt_name]]
+      }
+    }
+  } else {
+    # Fallback: derive variable name by stripping trailing "f" from format name
+    for (fmt_name in names(formats)) {
+      varname <- sub("f$", "", fmt_name)
+      if (nzchar(varname)) {
+        value_labels[[toupper(varname)]] <- formats[[fmt_name]]
+      }
+    }
+  }
+
+  # ------------------------------------------------------------------
+  # 4. Parse variable labels (optional):  label VARNAME="text";
+  # ------------------------------------------------------------------
+  var_labels <- character(0)
+  label_lines <- grep("^\\s*label\\b", lines, ignore.case = TRUE, value = TRUE)
+  for (ll in label_lines) {
+    # Match patterns like:  VARNAME = "description"  or  VARNAME="description"
+    lm <- gregexpr(
+      '([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*"([^"]*)"',
+      ll, perl = TRUE)
+    if (lm[[1]][1] > 0) {
+      for (i in seq_along(lm[[1]])) {
+        start <- lm[[1]][i]
+        len   <- attr(lm[[1]], "match.length")[i]
+        piece <- substr(ll, start, start + len - 1L)
+        parts <- regmatches(piece,
+          regexec('^([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*"([^"]*)"',
+                  piece, perl = TRUE))[[1]]
+        if (length(parts) == 3) {
+          var_labels[toupper(parts[2])] <- parts[3]
+        }
+      }
+    }
+  }
+
+  list(value_labels = value_labels, var_labels = var_labels)
+}
+
+
+# ============================================================
+# 1a-ter. apply_sas_labels() — apply parsed SAS labels to a tibble
+# ============================================================
+
+#' Apply SAS value labels and variable labels to a plain tibble.
+#'
+#' For each column that has a matching entry in \code{sas_parsed$value_labels},
+#' wraps it in \code{haven_labelled} via \code{labelled::labelled()}.
+#' Columns that already carry \code{haven_labelled} class are left untouched.
+#'
+#' Variable labels from \code{sas_parsed$var_labels} are applied only when the
+#' column does not already have a \code{label} attribute.
+#'
+#' @param df          A tibble (plain or partially labelled).
+#' @param sas_parsed  Output of \code{parse_sas_formats()}.
+#'
+#' @return The tibble with \code{haven_labelled} value labels and variable
+#'   labels applied where applicable.
+apply_sas_labels <- function(df, sas_parsed) {
+  val_labs  <- sas_parsed$value_labels
+  var_labs  <- sas_parsed$var_labels
+
+  for (vname in names(df)) {
+    col <- df[[vname]]
+
+    # --- Value labels ---
+    if (vname %in% names(val_labs) && !inherits(col, "haven_labelled")) {
+      labs <- val_labs[[vname]]  # c("Label" = "code", ...)
+
+      if (is.numeric(col)) {
+        # Coerce string codes to numeric to match column type
+        labs_num <- suppressWarnings(as.numeric(labs))
+        if (!anyNA(labs_num)) {
+          names(labs_num) <- names(labs)
+          df[[vname]] <- labelled::labelled(col, labels = labs_num)
+        }
+      } else {
+        # Character column: labels are already character strings
+        df[[vname]] <- labelled::labelled(col, labels = labs)
+      }
+    }
+
+    # --- Variable label ---
+    if (vname %in% names(var_labs)) {
+      existing_lbl <- attr(df[[vname]], "label", exact = TRUE)
+      if (is.null(existing_lbl) || is.na(existing_lbl) || !nzchar(existing_lbl)) {
+        labelled::var_label(df[[vname]]) <- var_labs[[vname]]
+      }
     }
   }
 
@@ -917,6 +1141,460 @@ import_survey <- function(
 
 
 # ============================================================
+# 1d. Nomenclatures INSEE helpers
+# ============================================================
+
+# ---------------------------------------------------------------------------
+# Read nomenclatures_INSEE.json.
+# Returns list(nomenclatures = list()) if absent or malformed.
+.read_nomenclatures_json <- function(path) {
+  empty <- list(nomenclatures = list())
+  if (is.null(path) || !nzchar(path) || !file.exists(path)) return(empty)
+  tryCatch(
+    jsonlite::read_json(path, simplifyVector = FALSE),
+    error = function(e) {
+      warning(".read_nomenclatures_json: could not parse '", path, "': ",
+              conditionMessage(e))
+      empty
+    }
+  )
+}
+
+# ---------------------------------------------------------------------------
+# Write nomenclatures_INSEE.json with padded alignment.
+# nom_list: list with keys "_schema" and "nomenclatures"
+# Each nomenclature entry: list(var_label, source, version, levels = list(CODE = list(label)))
+.write_nomenclatures_json <- function(nom_list, path) {
+  esc <- function(s) {
+    s <- as.character(s)
+    s <- gsub("\\", "\\\\", s, fixed = TRUE)
+    gsub('"', '\\"', s, fixed = TRUE)
+  }
+  rpad <- function(s, w) {
+    n <- nchar(s, type = "chars")
+    if (n < w) paste0(s, strrep(" ", w - n)) else s
+  }
+
+  lines <- character(0)
+  lines <- c(lines, "{")
+
+  # _schema block
+  schema <- nom_list[["_schema"]]
+  if (!is.null(schema)) {
+    lines  <- c(lines, '  "_schema": {')
+    desc   <- schema[["description"]]
+    fields <- schema[["fields"]]
+    has_fields <- !is.null(fields) && length(fields) > 0
+    if (!is.null(desc)) {
+      comma_desc <- if (has_fields) "," else ""
+      lines <- c(lines, paste0('    "description": "', esc(desc), '"', comma_desc))
+    }
+    if (has_fields) {
+      field_keys  <- names(fields)
+      fw <- max(nchar(field_keys)) + 4L  # +4 for quotes + colon
+      field_lines <- vapply(seq_along(fields), function(i) {
+        k <- field_keys[[i]]
+        v <- fields[[k]]
+        comma <- if (i < length(fields)) "," else ""
+        paste0('    ', rpad(paste0('"', k, '"'), fw), ': "', esc(v), '"', comma)
+      }, character(1))
+      lines <- c(lines, '    "fields": {')
+      lines <- c(lines, field_lines)
+      lines <- c(lines, '    }')
+    }
+    lines <- c(lines, '  },')
+  }
+
+  # nomenclatures block
+  nom_entries <- nom_list[["nomenclatures"]]
+  if (is.null(nom_entries)) nom_entries <- list()
+  nom_names <- names(nom_entries)
+
+  lines <- c(lines, '  "nomenclatures": {')
+
+  for (ni in seq_along(nom_names)) {
+    nom_id  <- nom_names[[ni]]
+    nom     <- nom_entries[[nom_id]]
+    is_last_nom <- (ni == length(nom_names))
+
+    meta_fields <- c("var_label", "source", "version")
+    mw <- max(nchar(meta_fields)) + 4L
+    meta_lines <- vapply(meta_fields, function(f) {
+      v <- nom[[f]]
+      if (is.null(v)) return(NULL)
+      paste0('      ', rpad(paste0('"', f, '"'), mw), ': "', esc(v), '",')
+    }, character(1))
+    meta_lines <- meta_lines[!vapply(meta_lines, is.null, logical(1))]
+
+    # levels block
+    lvls <- nom[["levels"]]
+    if (is.null(lvls)) lvls <- list()
+    lvl_codes <- names(lvls)
+
+    # compute padding for level labels
+    lbl_width <- if (length(lvl_codes) > 0)
+      max(nchar(lvl_codes)) + 4L
+    else 10L
+
+    lvl_lines <- character(0)
+    for (li in seq_along(lvl_codes)) {
+      code     <- lvl_codes[[li]]
+      lbl      <- lvls[[code]][["label"]]
+      is_last  <- (li == length(lvl_codes))
+      comma    <- if (is_last) "" else ","
+      lvl_lines <- c(lvl_lines,
+        paste0('        ', rpad(paste0('"', esc(code), '"'), lbl_width),
+               ': { "label": "', esc(lbl %||% ""), '" }', comma))
+    }
+
+    comma_nom <- if (is_last_nom) "" else ","
+    lines <- c(lines, paste0('    "', esc(nom_id), '": {'))
+    lines <- c(lines, meta_lines)
+    lines <- c(lines, '      "levels": {')
+    lines <- c(lines, lvl_lines)
+    lines <- c(lines, '      }')
+    lines <- c(lines, paste0('    }', comma_nom))
+  }
+
+  lines <- c(lines, '  }')
+  lines <- c(lines, '}')
+
+  json_str <- paste(lines, collapse = "\n")
+  json_str <- paste0(json_str, "\n")
+
+  dir_p <- dirname(path)
+  if (!dir.exists(dir_p))
+    dir.create(dir_p, recursive = TRUE, showWarnings = FALSE)
+  writeLines(enc2utf8(json_str), con = path, useBytes = TRUE)
+  invisible(path)
+}
+
+# ---------------------------------------------------------------------------
+# Parse NAF Rev.2 XLS file and return a named list(CODE = list(label = "...")).
+# Only retains sous-classes (pattern "01.11Z") — 732 postes.
+# Codes are normalized to EE format: "01.11Z" -> "0111Z".
+.parse_naf_rev2 <- function(naf_path) {
+  naf <- readxl::read_xls(naf_path, col_names = TRUE)
+  # Column 4 = 65-char labels
+  col_label <- names(naf)[[4]]
+  pattern   <- "^[0-9]{2}[.][0-9]{2}[A-Z]$"
+  rows      <- !is.na(naf$Code) & grepl(pattern, naf$Code)
+  sub_naf   <- naf[rows, ]
+  codes     <- gsub("[.]", "", sub_naf$Code)
+  labels    <- .normalize_text(as.character(sub_naf[[col_label]]), sanitize = TRUE)
+  stats::setNames(lapply(labels, function(l) list(label = l)), codes)
+}
+
+# ---------------------------------------------------------------------------
+# Parse PCS 2020 Excel and return a named list for a given level (3 or 4).
+# Code transformation: strip last character (trailing "0") to match EE format.
+# For level=3: "38A0" -> "38A", "3800" -> "380"
+# For level=4: "10A1" -> kept as-is (EE codes are identical to N4 minus nothing)
+# Actually N4 codes are already the final digit: "10A1" matches EE "10A1".
+# N3 codes end in "0" and are stripped.
+.parse_pcs2020 <- function(pcs_path, level) {
+  pcs <- readxl::read_xlsx(pcs_path, col_names = TRUE)
+  col_niveau <- names(pcs)[[1]]   # "Niveau"
+  col_code   <- names(pcs)[[2]]   # "code PCS2020"
+  col_label  <- names(pcs)[[3]]   # "Libellé long de la nomenclature"
+  rows  <- !is.na(pcs[[col_niveau]]) & pcs[[col_niveau]] == level
+  sub   <- pcs[rows, ]
+  codes <- as.character(sub[[col_code]])
+  if (level == 3) {
+    # Strip trailing character (always "0") to get EE code format
+    codes <- substr(codes, 1L, nchar(codes) - 1L)
+  }
+  labels <- .normalize_text(as.character(sub[[col_label]]), sanitize = TRUE)
+  stats::setNames(lapply(labels, function(l) list(label = l)), codes)
+}
+
+# ---------------------------------------------------------------------------
+# Parse FAP 2021 DARES Excel and return levels for a given FAP level (22/86/228/341).
+.parse_fap2021 <- function(fap_path, fap_level = 341) {
+  fap   <- readxl::read_xlsx(fap_path, sheet = "niveaux_emboités", col_names = TRUE)
+  col_code  <- paste0("Code_FAP", fap_level)
+  col_label <- paste0("Intitul\u00e9_FAP", fap_level)
+  if (!col_code %in% names(fap))
+    stop("Column '", col_code, "' not found in FAP file.")
+  # Deduplicate (for levels 22/86/228 which repeat across rows)
+  codes  <- as.character(fap[[col_code]])
+  labels <- .normalize_text(as.character(fap[[col_label]]), sanitize = TRUE)
+  df     <- unique(data.frame(code = codes, label = labels, stringsAsFactors = FALSE))
+  df     <- df[!is.na(df$code), ]
+  stats::setNames(lapply(df$label, function(l) list(label = l)), df$code)
+}
+
+# ---------------------------------------------------------------------------
+# Create the nomenclatures_INSEE.json from the three Excel source files.
+# If the file already exists, it is NEVER overwritten — a message is shown instead.
+# naf_path: path to int_courts_naf_rev_2.xls
+# fap_path: path to Dares_Arborescence_FAP2021.xlsx
+# pcs_path: path to Nomenclature_4Nemboites_PCS2020.xlsx
+# path:     output JSON path (default "instructions/nomenclatures_INSEE.json")
+create_nomenclatures_json <- function(
+    naf_path,
+    fap_path,
+    pcs_path,
+    path = "instructions/nomenclatures_INSEE.json"
+) {
+  if (file.exists(path)) {
+    message("Fichier d\u00e9j\u00e0 existant, non \u00e9cras\u00e9 : ", path,
+            "\nUtiliser add_nomenclature_to_json() pour ajouter ou mettre \u00e0 jour une nomenclature.")
+    return(invisible(path))
+  }
+
+  message("Lecture des fichiers source...")
+
+  nom_list <- list(
+    `_schema` = list(
+      description = paste0(
+        "Nomenclatures de r\u00e9f\u00e9rence INSEE / DARES pour les enqu\u00eates fran\u00e7aises. ",
+        "Utilis\u00e9 par apply_nomenclatures() pour enrichir les labels des variables cod\u00e9es. ",
+        "Ce fichier peut \u00eatre compl\u00e9t\u00e9 manuellement avec add_nomenclature_to_json()."
+      ),
+      fields = list(
+        `nomenclatures.ID.var_label` = "Intitul\u00e9 complet de la nomenclature",
+        `nomenclatures.ID.source`    = "Organisme producteur (INSEE, DARES...)",
+        `nomenclatures.ID.version`   = "Version ou mill\u00e9sime de la nomenclature",
+        `nomenclatures.ID.levels.CODE.label` = "Libell\u00e9 officiel du code"
+      )
+    ),
+    nomenclatures = list()
+  )
+
+  # NAF Rev.2 (732 sous-classes)
+  message("  NAF Rev.2 (732 postes)...")
+  nom_list$nomenclatures[["NAF_rev2"]] <- list(
+    var_label = "Nomenclature d'Activit\u00e9s Fran\u00e7aises R\u00e9v.2 (sous-classes, 732 postes)",
+    source    = "INSEE",
+    version   = "R\u00e9v.2 (2008)",
+    levels    = .parse_naf_rev2(naf_path)
+  )
+  message("    -> ", length(nom_list$nomenclatures[["NAF_rev2"]]$levels), " codes")
+
+  # PCS 2020 N3
+  message("  PCS 2020 niveau 3...")
+  nom_list$nomenclatures[["PCS2020_N3"]] <- list(
+    var_label = "Professions et Cat\u00e9gories Socioprofessionnelles 2020 \u2013 niveau 3",
+    source    = "INSEE",
+    version   = "PCS 2020",
+    levels    = .parse_pcs2020(pcs_path, level = 3)
+  )
+  message("    -> ", length(nom_list$nomenclatures[["PCS2020_N3"]]$levels), " codes")
+
+  # PCS 2020 N4
+  message("  PCS 2020 niveau 4...")
+  nom_list$nomenclatures[["PCS2020_N4"]] <- list(
+    var_label = "Professions et Cat\u00e9gories Socioprofessionnelles 2020 \u2013 niveau 4",
+    source    = "INSEE",
+    version   = "PCS 2020",
+    levels    = .parse_pcs2020(pcs_path, level = 4)
+  )
+  message("    -> ", length(nom_list$nomenclatures[["PCS2020_N4"]]$levels), " codes")
+
+  # FAP 2021 (all 4 levels)
+  for (fap_lv in c(341L, 228L, 86L, 22L)) {
+    key <- paste0("FAP2021_", fap_lv)
+    message("  FAP 2021 niveau ", fap_lv, "...")
+    nom_list$nomenclatures[[key]] <- list(
+      var_label = paste0("Familles professionnelles FAP-2021 (", fap_lv, " postes)"),
+      source    = "DARES",
+      version   = "FAP 2021",
+      levels    = .parse_fap2021(fap_path, fap_level = fap_lv)
+    )
+    message("    -> ", length(nom_list$nomenclatures[[key]]$levels), " codes")
+  }
+
+  message("  \u00c9criture de ", path, "...")
+  .write_nomenclatures_json(nom_list, path)
+  message("Fichier cr\u00e9\u00e9 : ", path)
+  invisible(path)
+}
+
+# ---------------------------------------------------------------------------
+# Add (or replace) a nomenclature entry in the JSON file from a data.frame.
+# df_codes: data.frame with columns $code and $label.
+# If nomenclature_id already exists, a warning is shown and it is replaced.
+add_nomenclature_to_json <- function(
+    nomenclature_id,
+    df_codes,
+    path      = "instructions/nomenclatures_INSEE.json",
+    var_label = nomenclature_id,
+    source    = "INSEE",
+    version   = ""
+) {
+  if (!is.data.frame(df_codes) || !all(c("code", "label") %in% names(df_codes)))
+    stop("df_codes must be a data.frame with columns 'code' and 'label'.")
+
+  nom_list <- .read_nomenclatures_json(path)
+  if (is.null(nom_list$nomenclatures)) nom_list$nomenclatures <- list()
+
+  if (nomenclature_id %in% names(nom_list$nomenclatures))
+    warning("add_nomenclature_to_json: nomenclature '", nomenclature_id,
+            "' d\u00e9j\u00e0 pr\u00e9sente, remplac\u00e9e.")
+
+  # Build levels list
+  df_codes <- df_codes[!is.na(df_codes$code) & nzchar(df_codes$code), ]
+  lvls <- stats::setNames(
+    lapply(as.character(df_codes$label), function(l) list(label = l)),
+    as.character(df_codes$code)
+  )
+
+  nom_list$nomenclatures[[nomenclature_id]] <- list(
+    var_label = var_label,
+    source    = source,
+    version   = version,
+    levels    = lvls
+  )
+
+  .backup_meta_json(path, step = "add_nomenclature")
+  .write_nomenclatures_json(nom_list, path)
+  message("Nomenclature '", nomenclature_id, "' ajout\u00e9e dans ", path,
+          " (", nrow(df_codes), " codes).")
+  invisible(path)
+}
+
+# ---------------------------------------------------------------------------
+# Detect which variables in metadata are likely encoded with a standard INSEE
+# nomenclature, based on regex patterns applied to the values list-column.
+# Returns a named list suitable for the `mapping` argument of apply_nomenclatures().
+# metadata: tibble returned by extract_survey_metadata()
+detect_nomenclature_vars <- function(metadata) {
+  # Regex patterns per nomenclature key
+  # Tested against the majority of non-NA, non-missing values of each variable
+  patterns <- list(
+    FAP2021_341 = "^[A-Z][0-9][A-Z][0-9]{2}[a-z]?$",
+    NAF_rev2    = "^[0-9]{4}[A-Z]$",
+    NAF_129N    = "^[A-Z][0-9]{2}[A-Z]$",
+    NAF_38N     = "^[A-Z]{2}$",
+    PCS2020_N4  = "^[0-9]{2}[A-Z][0-9]$",
+    PCS2020_N3  = "^([0-9]{2}[A-Z]|[0-9]{3})$"
+  )
+
+  mapping <- list()
+
+  for (i in seq_len(nrow(metadata))) {
+    vname  <- metadata$var_name[[i]]
+    vals   <- metadata$values[[i]]
+    m_vals <- metadata$missing_vals[[i]]
+    if (is.null(vals) || length(vals) == 0) next
+
+    # Exclude missing-coded values
+    non_missing <- setdiff(vals, m_vals)
+    non_missing <- non_missing[!is.na(non_missing) & nzchar(non_missing)]
+    if (length(non_missing) == 0) next
+
+    # Test each pattern: count how many values match
+    # Use a sample for speed (max 200 values)
+    sample_vals <- if (length(non_missing) > 200)
+      non_missing[seq(1, length(non_missing), length.out = 200)]
+    else non_missing
+
+    for (nom_key in names(patterns)) {
+      frac <- mean(grepl(patterns[[nom_key]], sample_vals))
+      if (frac >= 0.8) {
+        mapping[[vname]] <- nom_key
+        break  # first matching pattern wins (ordered from most to least specific)
+      }
+    }
+  }
+
+  if (length(mapping) == 0)
+    message("detect_nomenclature_vars: aucune variable candidate d\u00e9tect\u00e9e.")
+  else
+    message("detect_nomenclature_vars: ", length(mapping), " variable(s) d\u00e9tect\u00e9e(s) :\n",
+            paste0("  ", names(mapping), " -> ", unlist(mapping), collapse = "\n"))
+
+  mapping
+}
+
+# ---------------------------------------------------------------------------
+# Apply reference nomenclature labels to the metadata table.
+# mapping: named list(VAR_NAME = "NOMENCLATURE_ID") — use detect_nomenclature_vars()
+#          to generate it automatically.
+# nom_json: path to nomenclatures_INSEE.json
+# meta_json: if provided, updated labels are written back to the survey_meta.json
+# dry_run: if TRUE, print changes but do not write anything
+apply_nomenclatures <- function(
+    metadata,
+    mapping,
+    nom_json  = "instructions/nomenclatures_INSEE.json",
+    meta_json = NULL,
+    dry_run   = FALSE
+) {
+  nom_list <- .read_nomenclatures_json(nom_json)
+  noms     <- nom_list[["nomenclatures"]]
+
+  for (var_name in names(mapping)) {
+    nom_key <- mapping[[var_name]]
+    row_idx <- which(metadata$var_name == var_name)
+    if (length(row_idx) == 0) {
+      warning("apply_nomenclatures: variable '", var_name,
+              "' absente de metadata, ignor\u00e9e.")
+      next
+    }
+    if (is.null(noms[[nom_key]])) {
+      warning("apply_nomenclatures: nomenclature '", nom_key,
+              "' absente du JSON ", nom_json, ", ignor\u00e9e.")
+      next
+    }
+
+    lvls   <- noms[[nom_key]][["levels"]]
+    codes  <- metadata$values[[row_idx]]
+    if (is.null(codes) || length(codes) == 0) next
+
+    old_labels <- metadata$labels[[row_idx]]
+    new_labels <- vapply(codes, function(code) {
+      if (code %in% names(lvls)) lvls[[code]][["label"]] else NA_character_
+    }, character(1))
+
+    # Merge: keep old label if new one is NA (code not in nomenclature)
+    n_found   <- sum(!is.na(new_labels))
+    n_missing <- sum(is.na(new_labels))
+    if (n_missing > 0)
+      warning("apply_nomenclatures: ", n_missing, " code(s) de '", var_name,
+              "' absents de '", nom_key, "' \u2014 libell\u00e9s originaux conserv\u00e9s.")
+
+    merged <- ifelse(!is.na(new_labels), new_labels,
+                     if (!is.null(old_labels)) old_labels else NA_character_)
+
+    if (dry_run) {
+      message("[dry_run] ", var_name, " <- ", nom_key,
+              " (", n_found, " codes match\u00e9s sur ", length(codes), ")")
+    } else {
+      metadata$labels[[row_idx]] <- merged
+    }
+  }
+
+  # Write updated new_labels back to meta_json if provided
+  if (!is.null(meta_json) && !dry_run) {
+    survey_meta <- .read_meta_json(meta_json)
+    for (var_name in names(mapping)) {
+      row_idx <- which(metadata$var_name == var_name)
+      if (length(row_idx) == 0) next
+      codes  <- metadata$values[[row_idx]]
+      labels <- metadata$labels[[row_idx]]
+      if (is.null(codes)) next
+      var_entry <- survey_meta$variables[[var_name]]
+      if (is.null(var_entry)) next
+      for (j in seq_along(codes)) {
+        code <- codes[[j]]
+        lbl  <- labels[[j]]
+        if (!is.null(var_entry$levels[[code]]) && !is.na(lbl)) {
+          survey_meta$variables[[var_name]]$levels[[code]][["new_label"]] <- lbl
+        }
+      }
+    }
+    .backup_meta_json(meta_json, step = "nomenclatures")
+    .write_meta_json(survey_meta, meta_json)
+    message("apply_nomenclatures: labels \u00e9crits dans ", meta_json)
+  }
+
+  invisible(metadata)
+}
+
+
+# ============================================================
 # 2. extract_survey_metadata()
 # ============================================================
 
@@ -970,8 +1648,18 @@ extract_survey_metadata <- function(
     yes_labels      = NULL,
     no_labels       = NULL,
     max_levels_cat  = 20,
-    meta_json       = NULL
+    meta_json       = NULL,
+    sas_format_file = NULL
 ) {
+  # ---- Apply SAS format labels if provided -----------------------------------
+  if (!is.null(sas_format_file) && nzchar(sas_format_file)) {
+    sas_parsed <- parse_sas_formats(sas_format_file)
+    df <- apply_sas_labels(df, sas_parsed)
+    n_applied <- sum(names(df) %in% names(sas_parsed$value_labels))
+    message("extract_survey_metadata: applied SAS format labels to ",
+            n_applied, " variable(s) from ", basename(sas_format_file))
+  }
+
   # ---- Read config/variables from meta_json (if exists) ---------------------
   .meta_json_existed <- !is.null(meta_json) && nzchar(meta_json) && file.exists(meta_json)
   .meta_json_data <- .read_meta_json(meta_json)
@@ -1316,13 +2004,15 @@ extract_survey_metadata <- function(
     n_clean, vals_clean, lbls_clean, yes_kw, no_kw, r_class
 ) {
   # 1. Identifier: ID name or all (total) values unique
-  id_pattern <- "^(IDENT|IDENTIF|IDENTIFIANT|ID|_ID|ID_|NUMEN|NUMIDENT)$"
+  id_pattern <- "^(IDENT|IDENTIF|IDENTIFIANT|ID|_ID|ID_|NUMEN|NUMIDENT)$|^IDENT"
   if (grepl(id_pattern, vname, ignore.case = TRUE) || n_dist_total == n_rows) {
     return(list(role = "identifier", pos_idx = NA_integer_))
   }
 
   # 2. Labelled column → factor_binary (2 clean levels) or factor_nominal (>=3)
-  if (has_val_labs) {
+  #    When all labels are missing (n_clean == 0), fall through to
+  #    numeric/character detection below instead of returning factor_nominal.
+  if (has_val_labs && n_clean > 0) {
     if (n_clean == 2) {
       pos_idx <- .find_binary_desc(lbls_clean, yes_kw, no_kw)
       return(list(role = "factor_binary", pos_idx = pos_idx))
@@ -3680,6 +4370,18 @@ ai_suggest_labels <- function(
     paste0("[\n", paste(json_objects, collapse = ",\n"), "\n]")
   }
 
+  # Warn about variables that will be silently dropped (empty/all-NULL new_labels)
+  zero_level_vars <- target[target$.n_levels == 0L, ]
+  if (nrow(zero_level_vars) > 0L) {
+    sample_vars <- head(zero_level_vars$var_name, 5L)
+    message("ai_suggest_labels: ", nrow(zero_level_vars),
+            " variable(s) have 0 sendable levels (new_labels empty or all NULL) — ",
+            "they will be absent from the prompt. ",
+            "Sample: ", paste(sample_vars, collapse = ", "),
+            if (nrow(zero_level_vars) > 5L) paste0(" ... (", nrow(zero_level_vars) - 5L, " more)") else "",
+            ". Check new_labels column in your metadata tibble for these variables.")
+  }
+
   chunks <- local({
     chunk_ids <- integer(nrow(target))
     cid   <- 1L
@@ -4684,31 +5386,53 @@ metadata_apply_meta_json <- function(metadata, json_vars) {
 
     if (ncol(out) == 1L) return(NULL)  # only var_name, nothing to update
     out
-  }) |> purrr::compact() |> dplyr::bind_rows()
+  }) |> purrr::compact()
 
-  if (nrow(update_rows) == 0) return(metadata)
+  if (length(update_rows) == 0) return(metadata)
 
-  # Ensure list columns exist before rows_update
-  for (col in c("level_counts", "level_freqs", "order")) {
-    if (col %in% names(update_rows) && !col %in% names(metadata)) {
+  # Apply updates column-by-column to avoid bind_rows() padding missing list-columns
+  # with list(NULL), which would silently overwrite existing values (e.g. new_labels).
+  # Each column is updated only for the rows that actually have that column set.
+  all_cols <- c("new_name", "new_labels", "order", "level_counts", "level_freqs",
+                "detected_role")
+  n_updated <- length(update_rows)
+
+  has_nl  <- FALSE; has_nn <- FALSE; has_st <- FALSE; has_ord <- FALSE
+
+  for (col in all_cols) {
+    rows_with_col <- purrr::keep(update_rows, ~ col %in% names(.x))
+    if (length(rows_with_col) == 0) next
+
+    # Build a two-column tibble: var_name + this column only.
+    # Use select() on each row-tibble to avoid bind_rows() padding other columns.
+    col_df <- dplyr::bind_rows(purrr::map(rows_with_col,
+                                           ~ dplyr::select(.x, dplyr::all_of(c("var_name", col)))))
+
+    # Ensure list columns exist in metadata before rows_update
+    if (col %in% c("level_counts", "level_freqs", "order", "new_labels") &&
+        !col %in% names(metadata)) {
       metadata[[col]] <- vector("list", nrow(metadata))
       metadata[[col]][] <- list(switch(col,
-        level_counts = integer(0), level_freqs = numeric(0), order = integer(0)))
+        level_counts = integer(0), level_freqs = numeric(0),
+        order = integer(0), new_labels = character(0)))
     }
+
+    metadata <- dplyr::rows_update(metadata, col_df, by = "var_name",
+                                   unmatched = "ignore")
+
+    if (col == "new_labels")    has_nl  <- TRUE
+    if (col == "new_name")      has_nn  <- TRUE
+    if (col == "level_counts")  has_st  <- TRUE
+    if (col == "order")         has_ord <- TRUE
   }
 
-  n_updated <- nrow(update_rows)
-  has_nl  <- "new_labels"   %in% names(update_rows)
-  has_nn  <- "new_name"     %in% names(update_rows)
-  has_st  <- "level_counts" %in% names(update_rows)
-  has_ord <- "order"        %in% names(update_rows)
   message("metadata_apply_meta_json: ", n_updated, " variable(s) updated",
-          if (has_nn)  paste0(" (new_name: ",  sum(!is.na(update_rows$new_name)), ")")  else "",
+          if (has_nn)  paste0(" (new_name: ",  n_updated, ")")  else "",
           if (has_nl)  paste0(" (new_labels: ", n_updated, ")")  else "",
           if (has_ord) paste0(" (order: ",      n_updated, ")")  else "",
           if (has_st)  paste0(" (stats: ",      n_updated, ")")  else "")
 
-  dplyr::rows_update(metadata, update_rows, by = "var_name", unmatched = "ignore")
+  metadata
 }
 
 
@@ -5392,3 +6116,177 @@ generate_format_script <- function(metadata,
 }
 
 
+# ============================================================
+# 10. make_dummy_tibble() — create minimal test dataframe
+# ============================================================
+
+#' Create a minimal dummy tibble from a survey dataframe
+#'
+#' Extracts unique values from each column to build a small representative
+#' tibble suitable for unit tests. Preserves all column attributes (haven
+#' labels, factor levels, Date class, etc.). Prints \code{dput()} output
+#' that can be pasted directly into test files.
+#'
+#' @param df         A data frame or tibble (typically imported via haven).
+#' @param cols       Character vector of column names to include. NULL = all.
+#' @param max_unique Maximum number of unique non-NA values per column (default 30).
+#'                   Columns exceeding this are randomly sampled.
+#' @param na_ratio   Proportion of padding positions that remain NA (default 1/3).
+#' @param seed       Optional integer seed for reproducibility.
+#' @param clipboard  If TRUE, copy the dput output to the clipboard (Windows).
+#'
+#' @return The dummy tibble (invisibly). The \code{dput()} representation is
+#'   printed to the console via \code{cat()}.
+make_dummy_tibble <- function(df,
+                              cols       = NULL,
+                              max_unique = 30L,
+                              na_ratio   = 1/3,
+                              seed       = NULL,
+                              clipboard  = FALSE) {
+
+  stopifnot(is.data.frame(df))
+  max_unique <- as.integer(max_unique)
+
+  if (!is.null(seed)) set.seed(seed)
+
+  # Column selection
+  if (is.null(cols)) {
+    cols <- names(df)
+  } else {
+    missing_cols <- setdiff(cols, names(df))
+    if (length(missing_cols) > 0) {
+      warning("Columns not found in df: ", paste(missing_cols, collapse = ", "))
+    }
+    cols <- intersect(cols, names(df))
+    if (length(cols) == 0) stop("No valid columns selected.")
+  }
+
+  df <- df[, cols, drop = FALSE]
+
+  # Edge case: 0-row input
+  if (nrow(df) == 0) {
+    dput_str <- paste(utils::capture.output(dput(df)), collapse = "\n")
+    cat(dput_str, "\n")
+    return(invisible(df))
+  }
+
+  # Per-column: extract unique non-NA values and sample if needed
+  col_info <- lapply(cols, function(nm) {
+    col <- df[[nm]]
+    saved_attrs <- attributes(col)
+    unique_vals <- unique(col[!is.na(col)])
+    # Convert factors to character now so c() doesn't coerce to integer later
+    if (is.factor(unique_vals)) unique_vals <- as.character(unique_vals)
+    k <- length(unique_vals)
+
+    if (k > max_unique) {
+      idx <- sample.int(k, max_unique)
+      unique_vals <- unique_vals[idx]
+      k <- max_unique
+    }
+
+    list(
+      unique_vals = unique_vals,
+      k           = k,
+      saved_attrs = saved_attrs,
+      original    = col
+    )
+  })
+  names(col_info) <- cols
+
+  # Row count = max unique count across columns (already capped by max_unique)
+  n_rows <- max(vapply(col_info, function(x) x$k, integer(1)), 1L)
+
+  # Per-column: pad, fill, shuffle, restore attributes
+  rebuilt <- lapply(col_info, function(info) {
+    .rebuild_dummy_col(info$original, info$unique_vals, info$k,
+                       n_rows, na_ratio, info$saved_attrs)
+  })
+
+  result <- tibble::new_tibble(setNames(rebuilt, cols), nrow = n_rows)
+
+  # Output dput
+  dput_str <- paste(utils::capture.output(dput(result)), collapse = "\n")
+  cat(dput_str, "\n")
+
+  if (isTRUE(clipboard)) {
+    tryCatch({
+      utils::writeClipboard(dput_str)
+      message("dput output copied to clipboard.")
+    }, error = function(e) {
+      message("Could not copy to clipboard: ", e$message)
+    })
+  }
+
+  invisible(result)
+}
+
+# Helper: rebuild a single column with padding, fill, shuffle, and attributes
+.rebuild_dummy_col <- function(original, unique_vals, k, n_rows,
+                               na_ratio, saved_attrs) {
+  n_pad <- n_rows - k
+
+  if (n_pad > 0 && k > 0) {
+    n_keep_na <- max(1L, floor(n_pad * na_ratio))
+    n_fill    <- n_pad - n_keep_na
+    fill_vals <- if (n_fill > 0) {
+      unique_vals[sample.int(k, n_fill, replace = TRUE)]
+    } else {
+      unique_vals[integer(0)]
+    }
+    col_vec <- c(unique_vals, fill_vals, rep(NA, n_keep_na))
+  } else if (n_pad > 0 && k == 0) {
+    # All-NA column
+    col_vec <- rep(NA, n_rows)
+  } else {
+    col_vec <- unique_vals
+  }
+
+  # Shuffle row order
+  col_vec <- col_vec[sample.int(length(col_vec))]
+
+  # Restore attributes by column type
+  if (is.factor(original)) {
+    col_vec <- factor(as.character(col_vec), levels = levels(original),
+                      ordered = is.ordered(original))
+    lbl <- saved_attrs[["label"]]
+    if (!is.null(lbl)) attr(col_vec, "label") <- lbl
+
+  } else if ("haven_labelled" %in% (saved_attrs[["class"]] %||% character(0))) {
+    # Determine base type from original class vector
+    base_classes <- setdiff(saved_attrs[["class"]],
+                            c("haven_labelled", "vctrs_vctr", "haven_labelled_spss"))
+    base_type <- base_classes[1] %||% "double"
+
+    # unclass() first: c() on haven_labelled keeps vctrs class, blocking as.double()
+    col_vec <- unclass(col_vec)
+    col_vec <- switch(base_type,
+      "double"    = as.double(col_vec),
+      "integer"   = as.integer(col_vec),
+      "character" = as.character(col_vec),
+      as.double(col_vec)
+    )
+    attrs_to_set <- saved_attrs
+    attrs_to_set$names <- NULL
+    attributes(col_vec) <- attrs_to_set
+
+  } else if (inherits(original, "POSIXct")) {
+    col_vec <- as.double(col_vec)
+    attrs_to_set <- saved_attrs
+    attrs_to_set$names <- NULL
+    attributes(col_vec) <- attrs_to_set
+
+  } else if (inherits(original, "Date")) {
+    col_vec <- as.double(col_vec)
+    attrs_to_set <- saved_attrs
+    attrs_to_set$names <- NULL
+    attributes(col_vec) <- attrs_to_set
+
+  } else {
+    # Plain numeric/character/logical — just restore label if present
+    lbl <- saved_attrs[["label"]]
+    if (!is.null(lbl)) attr(col_vec, "label") <- lbl
+  }
+
+  col_vec
+}
