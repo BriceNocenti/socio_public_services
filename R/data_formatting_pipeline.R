@@ -983,7 +983,7 @@ apply_sas_labels <- function(df, sas_parsed) {
   var_blocks <- character(n_vars)
 
   # scalar field names width (for colon alignment inside variable blocks)
-  scalar_fields <- c("var_label", "role", "new_name")
+  scalar_fields <- c("var_label", "role", "r_class", "new_name")
   w_field        <- max(nchar(scalar_fields)) + 2L  # +2 for quotes
 
   for (vi in seq_along(var_names)) {
@@ -1641,7 +1641,7 @@ apply_nomenclatures <- function(
 #'   "factor_ordinal" — ≥3 levels with natural order — AI/user only
 #'   "factor_nominal" — ≥3 levels, default for all labelled vars ≥3
 extract_survey_metadata <- function(
-    df,
+    df = NULL,
     missing_num     = c(96, 99, 996, 999, 9996, 9999), # 8, 9,
     missing_chr     = c("-1", "NSP", "NRP", "NR", "REFUS",
                         "Ne sait pas", "Refus"), # "8", "9",
@@ -1652,7 +1652,7 @@ extract_survey_metadata <- function(
     sas_format_file = NULL
 ) {
   # ---- Apply SAS format labels if provided -----------------------------------
-  if (!is.null(sas_format_file) && nzchar(sas_format_file)) {
+  if (!is.null(df) && !is.null(sas_format_file) && nzchar(sas_format_file)) {
     sas_parsed <- parse_sas_formats(sas_format_file)
     df <- apply_sas_labels(df, sas_parsed)
     n_applied <- sum(names(df) %in% names(sas_parsed$value_labels))
@@ -1665,6 +1665,24 @@ extract_survey_metadata <- function(
   .meta_json_data <- .read_meta_json(meta_json)
   .cfg            <- .meta_json_data$config
   .json_vars      <- .meta_json_data$variables
+
+  # ---- Early return: reconstruct from JSON alone when df is NULL ------------
+  if (is.null(df)) {
+    if (!.meta_json_existed)
+      stop("extract_survey_metadata: df is required when meta_json does not exist yet.")
+
+    meta <- .skeleton_meta_from_json(.json_vars)
+    meta <- metadata_apply_meta_json(meta, .json_vars)
+
+    # n_distinct: count non-missing values
+    meta$n_distinct <- purrr::map_int(seq_len(nrow(meta)), function(i) {
+      as.integer(sum(!meta$values[[i]] %in% meta$missing_vals[[i]]))
+    })
+
+    message("extract_survey_metadata: reconstructed ", nrow(meta),
+            " variables from JSON (no data frame)")
+    return(meta)
+  }
 
   # Detect which config args were explicitly supplied by the caller (not defaults)
   .formals <- formals(sys.function())
@@ -2950,6 +2968,7 @@ ai_classify_roles <- function(
         row <- auto_nd0[auto_nd0$var_name == vn, ]
         dr  <- row$detected_role
         ndd <- if ("n_distinct_data" %in% names(row)) row$n_distinct_data else 0L
+        if (is.na(ndd)) ndd <- 0L
         if (dr == "integer" || ndd >= .nd_cont_threshold) {
           existing_auto$variables[[vn]]$role <- "integer_count"
         }
@@ -2965,6 +2984,7 @@ ai_classify_roles <- function(
         row  <- auto_nd1[auto_nd1$var_name == vn, ]
         dr   <- row$detected_role
         ndd  <- if ("n_distinct_data" %in% names(row)) row$n_distinct_data else 0L
+        if (is.na(ndd)) ndd <- 0L
         lbl1 <- if (length(row$labels[[1]]) > 0) row$labels[[1]][[1]] else ""
         vlbl <- row$var_label
 
@@ -5316,12 +5336,34 @@ ai_suggest_varnames <- function(
 }
 
 # ---------------------------------------------------------------------------
+# Build an empty metadata tibble with correct column types from JSON variables.
+# Used by extract_survey_metadata() when df is NULL (reconstruction from JSON).
+.skeleton_meta_from_json <- function(json_vars) {
+  n <- length(json_vars)
+  tibble::tibble(
+    var_name        = names(json_vars),
+    var_label       = rep("", n),
+    r_class         = rep(NA_character_, n),
+    n_distinct      = rep(NA_integer_, n),
+    n_distinct_data = rep(NA_integer_, n),
+    detected_role   = rep("", n),
+    values          = replicate(n, character(0), simplify = FALSE),
+    labels          = replicate(n, character(0), simplify = FALSE),
+    missing_vals    = replicate(n, character(0), simplify = FALSE),
+    new_labels      = replicate(n, character(0), simplify = FALSE),
+    new_name        = names(json_vars),
+    order           = replicate(n, integer(0), simplify = FALSE)
+  )
+}
+
+
+# ---------------------------------------------------------------------------
 # Apply a unified survey_meta.json variables section to a metadata table.
 # Called internally by extract_survey_metadata() when meta_json is supplied.
 # json_vars: the $variables list read from .read_meta_json() (already in memory).
-# Updates: new_labels (from levels[*].new_label / missing), order (from levels[*].order),
-#          level_counts/freqs (from n/pct), new_name, detected_role
-#          — all matched by variable name + value code.
+# Updates: var_label, detected_role, r_class, new_name, values, labels, missing_vals,
+#          new_labels (from levels[*].new_label / missing), order (from levels[*].order),
+#          level_counts/freqs (from n/pct) — all matched by variable name + value code.
 metadata_apply_meta_json <- function(metadata, json_vars) {
   if (is.null(json_vars) || length(json_vars) == 0) return(metadata)
 
@@ -5336,10 +5378,43 @@ metadata_apply_meta_json <- function(metadata, json_vars) {
     if (!is.null(nn) && nzchar(nn) && nn != vname)
       out$new_name <- nn
 
+    # var_label
+    vl <- entry[["var_label"]]
+    if (!is.null(vl) && nzchar(vl))
+      out$var_label <- vl
+
+    # detected_role (from JSON "role")
+    role_val <- entry[["role"]]
+    if (!is.null(role_val) && nzchar(role_val))
+      out$detected_role <- role_val
+
+    # r_class (absent in old JSONs → no override)
+    rc <- entry[["r_class"]]
+    if (!is.null(rc) && nzchar(rc))
+      out$r_class <- rc
+
     # new_labels, order, level stats from levels block (matched by value code)
     levels_obj <- entry[["levels"]]
     if (!is.null(levels_obj) && length(levels_obj) > 0) {
       meta_vals <- as.character(row$values[[1]])
+
+      # Skeleton row: when values is empty, derive from JSON keys
+      if (length(meta_vals) == 0) {
+        meta_vals <- names(levels_obj)
+        out$values       <- list(meta_vals)
+        out$missing_vals <- list(meta_vals[purrr::map_lgl(levels_obj, ~ isTRUE(.x$missing))])
+        out$labels       <- list(unname(purrr::map_chr(levels_obj, ~ as.character(.x$label %||% ""))))
+      }
+
+      # labels: restore original human-readable labels from JSON
+      has_label <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$label)))
+      if (has_label && !"labels" %in% names(out)) {
+        labs <- purrr::map_chr(meta_vals, function(v) {
+          lev <- levels_obj[[v]]
+          if (!is.null(lev) && !is.null(lev$label)) as.character(lev$label) else ""
+        })
+        out$labels <- list(labs)
+      }
 
       # new_labels: use new_label from JSON; missing:true levels → "NULL" sentinel
       has_new  <- any(purrr::map_lgl(levels_obj, ~ !is.null(.x$new_label)))
@@ -5393,8 +5468,9 @@ metadata_apply_meta_json <- function(metadata, json_vars) {
   # Apply updates column-by-column to avoid bind_rows() padding missing list-columns
   # with list(NULL), which would silently overwrite existing values (e.g. new_labels).
   # Each column is updated only for the rows that actually have that column set.
-  all_cols <- c("new_name", "new_labels", "order", "level_counts", "level_freqs",
-                "detected_role")
+  all_cols <- c("var_label", "detected_role", "r_class",
+                "new_name", "values", "labels", "missing_vals",
+                "new_labels", "order", "level_counts", "level_freqs")
   n_updated <- length(update_rows)
 
   has_nl  <- FALSE; has_nn <- FALSE; has_st <- FALSE; has_ord <- FALSE
@@ -5409,12 +5485,15 @@ metadata_apply_meta_json <- function(metadata, json_vars) {
                                            ~ dplyr::select(.x, dplyr::all_of(c("var_name", col)))))
 
     # Ensure list columns exist in metadata before rows_update
-    if (col %in% c("level_counts", "level_freqs", "order", "new_labels") &&
+    if (col %in% c("level_counts", "level_freqs", "order",
+                    "new_labels", "values", "labels", "missing_vals") &&
         !col %in% names(metadata)) {
       metadata[[col]] <- vector("list", nrow(metadata))
       metadata[[col]][] <- list(switch(col,
         level_counts = integer(0), level_freqs = numeric(0),
-        order = integer(0), new_labels = character(0)))
+        order = integer(0), new_labels = character(0),
+        values = character(0), labels = character(0),
+        missing_vals = character(0)))
     }
 
     metadata <- dplyr::rows_update(metadata, col_df, by = "var_name",
@@ -5498,6 +5577,7 @@ metadata_apply_meta_json <- function(metadata, json_vars) {
       list(
         var_label = row$var_label,
         role      = role,
+        r_class   = row$r_class,
         new_name  = vname,
         levels    = levels_list
       )

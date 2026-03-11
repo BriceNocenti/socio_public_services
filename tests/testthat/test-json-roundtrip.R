@@ -637,3 +637,236 @@ test_that("I2: import_survey() na_if is applied via dplyr::across to all char/fa
   # Q2: unchanged (integer)
   expect_equal(df_clean$Q2, df_raw$Q2)
 })
+
+# ---------------------------------------------------------------------------
+# J. JSON ↔ tibble roundtrip completeness (labels, role, r_class, skeleton)
+# ---------------------------------------------------------------------------
+
+# Shared fixture for J-section tests
+.j_meta_tbl <- tibble::tibble(
+  var_name      = c("Q1", "Q2"),
+  var_label     = c("Satisfaction dans la vie", "Sexe"),
+  r_class       = c("double", "double"),
+  n_distinct    = c(3L, 2L),
+  n_distinct_data = c(4L, 3L),
+  detected_role = c("factor_ordinal", "factor_binary"),
+  values        = list(c("1", "2", "3", "9"), c("1", "2", "9")),
+  labels        = list(
+    c("Pas du tout", "Un peu", "Très", "NSP"),
+    c("Homme", "Femme", "NSP")
+  ),
+  missing_vals  = list(c("9"), c("9")),
+  new_labels    = list(
+    c(NA_character_, NA_character_, NA_character_, "NULL"),
+    c(NA_character_, NA_character_, "NULL")
+  ),
+  new_name      = c("Q1", "Q2"),
+  order         = list(
+    c(1L, 2L, 3L, NA_integer_),
+    c(1L, 2L, NA_integer_)
+  )
+)
+
+test_that("J1: labels survive write_initial → apply roundtrip", {
+  path <- tmp_json()
+  .write_initial_meta_json(.j_meta_tbl, path)
+  raw  <- .read_meta_json(path)
+
+  # Wipe labels in a fresh copy to simulate re-extraction without val_labs
+  meta_fresh <- .j_meta_tbl
+  meta_fresh$labels <- list(c("", "", "", ""), c("", "", ""))
+
+  result <- metadata_apply_meta_json(meta_fresh, raw$variables)
+
+  expect_equal(result$labels[[which(result$var_name == "Q1")]],
+               c("Pas du tout", "Un peu", "Très", "NSP"))
+  expect_equal(result$labels[[which(result$var_name == "Q2")]],
+               c("Homme", "Femme", "NSP"))
+})
+
+test_that("J2: detected_role restored from JSON role field", {
+  path <- tmp_json()
+  .write_initial_meta_json(.j_meta_tbl, path)
+  raw  <- .read_meta_json(path)
+
+  # Wipe detected_role
+  meta_fresh <- .j_meta_tbl
+  meta_fresh$detected_role <- c("other", "other")
+
+  result <- metadata_apply_meta_json(meta_fresh, raw$variables)
+
+  expect_equal(result$detected_role[result$var_name == "Q1"], "factor_ordinal")
+  expect_equal(result$detected_role[result$var_name == "Q2"], "factor_binary")
+})
+
+test_that("J3: r_class roundtrip + backward compat with old JSON", {
+  # r_class survives roundtrip
+  path <- tmp_json()
+  .write_initial_meta_json(.j_meta_tbl, path)
+  raw <- .read_meta_json(path)
+  expect_equal(raw$variables[["Q1"]]$r_class, "double")
+
+  # Apply restores r_class
+  meta_fresh <- .j_meta_tbl
+  meta_fresh$r_class <- c(NA_character_, NA_character_)
+  result <- metadata_apply_meta_json(meta_fresh, raw$variables)
+  expect_equal(result$r_class[result$var_name == "Q1"], "double")
+
+  # Backward compat: old JSON without r_class → NA, no crash
+  path2 <- tmp_json()
+  old_json <- '{"config": {}, "variables": {
+    "Q_OLD": {
+      "var_label": "Old var", "role": "factor_nominal", "new_name": "q_old",
+      "levels": {"1": {"order": 1, "label": "A"}, "2": {"order": 2, "label": "B"}}
+    }
+  }}'
+  writeLines(old_json, path2)
+  raw2 <- .read_meta_json(path2)
+
+  skel <- .skeleton_meta_from_json(raw2$variables)
+  result2 <- metadata_apply_meta_json(skel, raw2$variables)
+  expect_true(is.na(result2$r_class[result2$var_name == "Q_OLD"]))
+})
+
+test_that("J4: full skeleton reconstruction (df = NULL path)", {
+  path <- tmp_json()
+  .write_initial_meta_json(.j_meta_tbl, path,
+                           missing_num = c(9), missing_chr = c("NSP"),
+                           yes_labels = c("Oui"), no_labels = c("Non"))
+
+  meta <- extract_survey_metadata(df = NULL, meta_json = path)
+
+  # All expected columns present
+  expected_cols <- c("var_name", "var_label", "r_class", "n_distinct",
+                     "n_distinct_data", "detected_role", "values", "labels",
+                     "missing_vals", "new_labels", "new_name", "order")
+  for (col in expected_cols) {
+    expect_true(col %in% names(meta), info = paste("Missing column:", col))
+  }
+
+  # Values populated from JSON
+  q1_idx <- which(meta$var_name == "Q1")
+  expect_equal(meta$values[[q1_idx]], c("1", "2", "3", "9"))
+  expect_equal(meta$labels[[q1_idx]],
+               c("Pas du tout", "Un peu", "Très", "NSP"))
+  expect_equal(meta$missing_vals[[q1_idx]], "9")
+
+  # n_distinct correctly computed (3 non-missing out of 4 codes)
+  expect_equal(meta$n_distinct[q1_idx], 3L)
+
+  # n_distinct_data is NA (no df)
+  expect_true(is.na(meta$n_distinct_data[q1_idx]))
+
+  # detected_role matches JSON
+  expect_equal(meta$detected_role[q1_idx], "factor_ordinal")
+
+  # var_label matches JSON
+  expect_equal(meta$var_label[q1_idx], "Satisfaction dans la vie")
+
+  # r_class matches JSON
+  expect_equal(meta$r_class[q1_idx], "double")
+})
+
+test_that("J5: df = NULL without JSON produces clear error", {
+  expect_error(
+    extract_survey_metadata(df = NULL),
+    "df is required when meta_json does not exist"
+  )
+  expect_error(
+    extract_survey_metadata(df = NULL, meta_json = "nonexistent_file.json"),
+    "df is required when meta_json does not exist"
+  )
+})
+
+test_that("J6: JSON vars not in df are ignored", {
+  # df has only Q1, JSON has Q1 + Q_EXTRA
+  col <- make_labelled_col(c(1, 2, 1, 2), c("Oui" = 1, "Non" = 2))
+  df  <- make_survey_df(col, "Test Q1")
+
+  path <- tmp_json()
+  extra_json <- '{"config": {}, "variables": {
+    "Q1": {
+      "var_label": "Test Q1", "role": "factor_binary", "new_name": "q1",
+      "levels": {"1": {"order": 1, "label": "Oui"}, "2": {"order": 2, "label": "Non"}}
+    },
+    "Q_EXTRA": {
+      "var_label": "Extra var", "role": "factor_nominal", "new_name": "q_extra",
+      "levels": {"1": {"order": 1, "label": "A"}}
+    }
+  }}'
+  writeLines(extra_json, path)
+
+  meta <- extract_survey_metadata(df, meta_json = path)
+  # Only Q1 from df should be present
+  expect_equal(meta$var_name, "Q1")
+  expect_false("Q_EXTRA" %in% meta$var_name)
+})
+
+test_that("J7: df vars not in JSON keep df-extracted values", {
+  # df has Q1, JSON is empty (no variables section)
+  col <- make_labelled_col(c(1, 2, 1), c("Oui" = 1, "Non" = 2))
+  df  <- make_survey_df(col, "My variable")
+
+  path <- tmp_json()
+  writeLines('{"config": {}, "variables": {}}', path)
+
+  meta <- extract_survey_metadata(df, meta_json = path)
+  expect_equal(meta$var_name, "Q1")
+  expect_true("1" %in% as.character(meta$values[[1]]))
+  expect_true("2" %in% as.character(meta$values[[1]]))
+  # var_label from df preserved
+  expect_equal(meta$var_label[1], "My variable")
+})
+
+test_that("J8: n_distinct_data = NA does not crash ai_classify_roles auto-classify", {
+  # Build metadata with n_distinct_data = NA (simulates JSON-only reconstruction)
+  meta_na <- make_classify_meta(
+    var_name = "Q_AGE",
+    var_label = "Âge",
+    labels_vec = c("NSP"),
+    values_vec = c("99"),
+    missing_vals = c("99"),
+    detected_role = "factor_nominal",
+    n_distinct_data = NA_integer_
+  )
+  meta_na$n_distinct <- 0L
+
+  # Write a JSON with this variable for ai_classify_roles to read
+  path <- tmp_json()
+  vars <- list(Q_AGE = list(
+    var_label = "Âge", role = "factor_nominal", new_name = "Q_AGE",
+    levels = list("99" = list(missing = TRUE, label = "NSP"))
+  ))
+  .write_meta_json(make_meta_list(vars), path)
+
+  # Mock ai_call_claude to avoid real API call (should not be reached for nd=0)
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude", mock_ai("{}"), envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  # Should not error (ndd would be NA without the guard)
+  expect_no_error(
+    suppressMessages(ai_classify_roles(meta_na, meta_json = path))
+  )
+})
+
+test_that("J9: level_counts and level_freqs populated on skeleton via n/pct", {
+  vars <- list(
+    Q1 = list(
+      var_label = "Test", role = "factor_nominal", new_name = "Q1",
+      levels = list(
+        "1" = list(order = 1L, label = "A", n = 60L, pct = 60L),
+        "2" = list(order = 2L, label = "B", n = 40L, pct = 40L)
+      )
+    )
+  )
+  path <- tmp_json()
+  .write_meta_json(make_meta_list(vars), path)
+  raw <- .read_meta_json(path)
+
+  skel   <- .skeleton_meta_from_json(raw$variables)
+  result <- metadata_apply_meta_json(skel, raw$variables)
+
+  expect_equal(result$level_counts[[1]], c(60L, 40L))
+  expect_equal(result$level_freqs[[1]],  c(60, 40))
+})
