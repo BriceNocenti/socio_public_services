@@ -6149,7 +6149,7 @@ generate_format_script <- function(meta_json,
     double = "continuous", identifier = "id", other = "", unclear = ""
   ) else c(
     factor_binary = "binaire", factor_ordinal = "ordinale", factor_nominal = "nominale",
-    integer_count = "discret", integer = "discret", integer_scale = "échelle",
+    integer_count = "comptage", integer = "discret", integer_scale = "échelle",
     double = "continue", identifier = "id", other = "", unclear = ""
   )
   unname(m[role]) %||% ""
@@ -6173,13 +6173,13 @@ generate_format_script <- function(meta_json,
     factor = "factor", integer = "integer", double = "double",
     character = "chr", logical = "logical", date = "date"
   ) else c(
-    factor = "catégorielle", integer = "entier", double = "décimal",
+    factor = "catégorielle", integer = "nb entier", double = "nb décimal",
     character = "texte", logical = "booléenne", date = "date"
   )
   unname(m[base])
 }
 
-# Names of the six numeric summary rows, in display order (max -> mean).
+# Names of the six numeric summary rows (keyed lookup; row order set in .cb_build_tibble).
 .cb_stat_labels <- function(lang = "fr") {
   if (identical(lang, "en"))
     c(max = "max", q3 = "Q3", median = "median", q1 = "Q1", min = "min",
@@ -6193,19 +6193,24 @@ generate_format_script <- function(meta_json,
 .cb_headers <- function(lang = "fr") {
   if (identical(lang, "en"))
     c(h = "", variable = "variable", type = "type", role = "role",
-      description = "description", na = "NA", val = "value", n = "n", pct = "%",
-      orig_val = "orig. label", orig_code = "orig. code")
+      description = "description", na = "missing_values", val = "value", n = "n",
+      pct = "freq", orig_val = "original label", orig_code = "code")
   else
-    c(h = "", variable = "variable", type = "type", role = "rôle",
-      description = "description", na = "NA", val = "valeur", n = "n", pct = "%",
-      orig_val = "libellé d'origine", orig_code = "code")
+    c(h = "", variable = "variable", type = "type", role = "role",
+      description = "description", na = "valeurs_manquantes", val = "valeur", n = "n",
+      pct = "freq", orig_val = "libellé d'origine", orig_code = "code")
 }
 
-# Compose the NA cell string "46 (0%)" (0-decimal freq); "" when not computable.
-.cb_na_string <- function(na_n, na_pct) {
+# Compose the NA cell string "NA: 46 (0%) ; label1 ; label2"; "" when not computable.
+# `miss_labels` = original labels of the levels recoded to NA (factors), listed after
+# the count so the reader sees WHICH values were treated as missing.
+.cb_na_string <- function(na_n, na_pct, miss_labels = character(0)) {
   if (is.null(na_n) || length(na_n) != 1L || is.na(na_n)) return("")
-  paste0(format(round(na_n), trim = TRUE, scientific = FALSE),
-         " (", round(na_pct %||% 0), "%)")
+  s  <- paste0("NA: ", format(round(na_n), trim = TRUE, scientific = FALSE),
+               " (", round(na_pct %||% 0), "%)")
+  ml <- miss_labels[nzchar(miss_labels)]
+  if (length(ml) > 0) s <- paste0(s, " ; ", paste(ml, collapse = " ; "))
+  s
 }
 
 # One empty codebook row (all fields blank / typed NA).
@@ -6213,7 +6218,7 @@ generate_format_script <- function(meta_json,
   base <- list(
     .row_type = "value", .h_level = NA_integer_, .block_id = NA_integer_,
     .block_kind = NA_character_, .is_double = FALSE, .stat_rule = FALSE,
-    .is_first = FALSE, .is_block_last = FALSE,
+    .is_binary = FALSE, .is_first = FALSE, .is_block_last = FALSE,
     h = NA_character_, variable = NA_character_, type = NA_character_,
     role = NA_character_, description = NA_character_, na = NA_character_,
     val = NA_character_, n = NA_real_, pct = NA_real_,
@@ -6296,31 +6301,28 @@ generate_format_script <- function(meta_json,
     is_double <- e$role == "double"
 
     # NA cell: prefer stored top-level na_n/na_pct; else derive per type ----
-    na_n_stored   <- suppressWarnings(as.numeric(jv$na_n %||% NA_real_))
-    na_pct_stored <- suppressWarnings(as.numeric(jv$na_pct %||% NA_real_))
-    na_str <- ""
-    if (!is.na(na_n_stored)) {
-      na_str <- .cb_na_string(na_n_stored, na_pct_stored)
-    } else if (is_factor) {
-      ns <- vapply(e$levels_sorted,
-                   function(lv) if (is.null(lv$n)) NA_real_ else as.numeric(lv$n),
-                   numeric(1))
-      if (!anyNA(ns) && !is.na(n_ind)) {
-        na_n   <- n_ind - sum(ns)
-        na_str <- .cb_na_string(na_n, na_n / n_ind * 100)
+    na_n_val   <- suppressWarnings(as.numeric(jv$na_n %||% NA_real_))
+    na_pct_val <- suppressWarnings(as.numeric(jv$na_pct %||% NA_real_))
+    if (is.na(na_n_val)) {
+      if (is_factor) {
+        ns <- vapply(e$levels_sorted,
+                     function(lv) if (is.null(lv$n)) NA_real_ else as.numeric(lv$n),
+                     numeric(1))
+        if (!anyNA(ns) && !is.na(n_ind)) {
+          na_n_val   <- n_ind - sum(ns)
+          na_pct_val <- na_n_val / n_ind * 100
+        }
+      } else if (is_num) {
+        na_n_val   <- suppressWarnings(as.numeric(jv$num_stats$na_n %||% NA_real_))
+        na_pct_val <- suppressWarnings(as.numeric(jv$num_stats$na_pct %||% NA_real_))
       }
-    } else if (is_num) {
-      na_str <- .cb_na_string(jv$num_stats$na_n, jv$num_stats$na_pct)
     }
-    # Append the original labels of the levels recoded to NA (factors), so the
-    # reader sees WHICH values were treated as missing.
-    if (is_factor && length(e$missing_levels) > 0 && nzchar(na_str)) {
+    # Original labels of the levels recoded to NA (factors) — listed in the cell.
+    miss_lbls <- character(0)
+    if (is_factor && length(e$missing_levels) > 0)
       miss_lbls <- vapply(e$missing_levels,
                           function(ml) ml$orig_label %||% "", character(1))
-      miss_lbls <- miss_lbls[nzchar(miss_lbls)]
-      if (length(miss_lbls) > 0)
-        na_str <- paste0(na_str, " (", paste(miss_lbls, collapse = " ; "), ")")
-    }
+    na_str <- .cb_na_string(na_n_val, na_pct_val, miss_lbls)
 
     block_kind <- if (is_factor) "factor" else if (is_num) "numeric" else "char"
     mk <- function(...) .cb_row(
@@ -6347,13 +6349,18 @@ generate_format_script <- function(meta_json,
       })
 
     } else if (is_factor && e$role == "factor_binary" && e$n_non_missing == 2L) {
-      lv <- e$levels_sorted[[1]]                       # positive level (order 1)
+      lv  <- e$levels_sorted[[1]]                      # positive level (order 1)
+      lv2 <- e$levels_sorted[[2]]                      # negative level (order 2)
       disp <- .gfs_level_label(lv, e$max_order)
       if (!identical(lv$display_label, lv$orig_label)) any_new_label <- TRUE
+      # Show BOTH original labels ("Oui / Non") in one cell for binaries.
+      orig_pair <- paste(c(lv$orig_label %||% "", lv2$orig_label %||% ""),
+                         collapse = " / ")
       block_rows <- list(mk(
+        .is_binary = TRUE,
         val = disp, n = if (is.null(lv$n)) NA_real_ else as.numeric(lv$n),
         pct = if (is.null(lv$pct)) NA_real_ else as.numeric(lv$pct),
-        orig_val = lv$orig_label, orig_code = lv$code))
+        orig_val = orig_pair, orig_code = lv$code))
 
     } else if (is_factor) {
       # A factor_binary with != 2 non-missing levels is a data-quality anomaly:
@@ -6372,13 +6379,14 @@ generate_format_script <- function(meta_json,
       if (is.null(st)) {
         block_rows <- list(mk(val = word_nost))
       } else {
+        # mean + sd FIRST, then the 5 quantiles (rule drawn between the two).
         spec <- list(
+          list(k = "mean",   v = st$mean, sd = st$sd),
           list(k = "max",    v = st$max),
           list(k = "q3",     v = st$q3),
           list(k = "median", v = st$median),
           list(k = "q1",     v = st$q1),
-          list(k = "min",    v = st$min),
-          list(k = "mean",   v = st$mean, sd = st$sd))
+          list(k = "min",    v = st$min))
         block_rows <- lapply(spec, function(s) {
           mk(val = unname(stat_lbl[s$k]),
              n   = if (is.null(s$v)) NA_real_ else as.numeric(s$v),
@@ -6394,8 +6402,10 @@ generate_format_script <- function(meta_json,
       if (e$role == "identifier") {
         val <- if (!is.na(n_dist)) paste0(n_dist, " ", word_uniq) else word_uniq
       } else if (!is.null(ex) && length(ex) > 0) {
-        val <- paste(utils::head(as.character(ex), 5L), collapse = "; ")
-        if (length(ex) > 5L) val <- paste0(val, "; …")
+        vals4 <- utils::head(as.character(ex), 4L)
+        val   <- paste0("Ex. : ", paste0('"', vals4, '"', collapse = ", "))
+        nd    <- suppressWarnings(as.numeric(n_dist))
+        if (length(ex) > 4L || (!is.na(nd) && nd > 4)) val <- paste0(val, ", …")
       } else {
         val <- if (!is.na(n_dist)) paste0(n_dist, " ", word_dist) else ""
       }
@@ -6444,31 +6454,40 @@ generate_format_script <- function(meta_json,
 }
 
 #' Write the styled Excel codebook (internal, openxlsx2).
+#'
+#' Column order: h | variable | description | type | role | na | val | n | freq |
+#' sep (empty) | orig_val | orig_code. All borders are black, thin. Each variable
+#' block is boxed (top+bottom, skipping h + the empty sep column) so battery runs
+#' separated by spacer rows keep their upper border. The empty sep column carries
+#' only vertical borders; orig_val gets a left border, orig_code a right border
+#' (also the rightmost column). Header/empty/title rows carry no block borders.
 .cb_write_xlsx <- function(cb, path, lang = "fr", orig_val_kept = TRUE) {
   if (!requireNamespace("openxlsx2", quietly = TRUE))
     stop("generate_codebook() needs the 'openxlsx2' package.", call. = FALSE)
   cm_to_pt <- function(cm) cm * 28.3465
-  RED <- "FFA10D2E"
+  RED   <- "FFA10D2E"
+  black <- openxlsx2::wb_color("black")
 
-  disp_cols <- c("h", "variable", "type", "role", "description", "na",
-                 "val", "n", "pct",
+  disp_cols <- c("h", "variable", "description", "type", "role", "na",
+                 "val", "n", "pct", "sep",
                  if (orig_val_kept) "orig_val", "orig_code")
   ci   <- setNames(seq_along(disp_cols), disp_cols)
   K    <- length(disp_cols)
-  hdr  <- .cb_headers(lang)[disp_cols]
+  hdr  <- .cb_headers(lang)
+  hdr["sep"] <- ""
+  hdr  <- hdr[disp_cols]
   n_row <- nrow(cb)
   xr   <- function(i) i + 1L                       # tibble row -> Excel row
 
-  # --- data frame to write: blank var-level cols on non-first block rows --
+  # --- data frame to write: add empty sep col, blank var-level on non-first rows
+  cb$sep <- NA_character_
   dat <- as.data.frame(cb[disp_cols], stringsAsFactors = FALSE)
-  var_lvl <- intersect(c("variable", "type", "role", "description", "na"), disp_cols)
+  var_lvl <- intersect(c("variable", "description", "type", "role", "na"), disp_cols)
   non_first <- !(cb$.is_first %in% TRUE)
   for (cc in var_lvl) dat[non_first, cc] <- NA
-  # title text lives in `h`; blank it elsewhere already (only title rows set h)
 
   wb <- openxlsx2::wb_workbook()
   wb <- openxlsx2::wb_add_worksheet(wb, "Codebook", grid_lines = FALSE)
-  # header (row 1) then data (rows 2+)
   wb <- openxlsx2::wb_add_data(wb, "Codebook", x = dat, col_names = TRUE, na = "")
   hdr_df <- as.data.frame(matrix(hdr, nrow = 1), stringsAsFactors = FALSE)
   wb <- openxlsx2::wb_add_data(wb, "Codebook", x = hdr_df, dims = "A1", col_names = FALSE, na = "")
@@ -6476,7 +6495,7 @@ generate_format_script <- function(meta_json,
   all_dims <- openxlsx2::wb_dims(rows = seq_len(n_row + 1L), cols = seq_len(K))
   wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = all_dims, name = "DejaVu Sans", size = 10)
 
-  # Header styling: bold, light fill, bottom rule, bottom-aligned.
+  # Header styling: bold, light fill, black bottom rule, bottom-aligned.
   hdr_dims <- openxlsx2::wb_dims(rows = 1, cols = seq_len(K))
   wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = hdr_dims, name = "DejaVu Sans",
                                size = 10, bold = TRUE)
@@ -6486,28 +6505,36 @@ generate_format_script <- function(meta_json,
                                      horizontal = "left", vertical = "bottom", wrap_text = TRUE)
   wb <- openxlsx2::wb_add_border(wb, "Codebook", dims = hdr_dims,
                                  top_border = NULL, left_border = NULL, right_border = NULL,
-                                 bottom_border = "medium",
-                                 bottom_color = openxlsx2::wb_color("black"))
+                                 bottom_border = "thin", bottom_color = black)
 
   # Column-wide alignment for data rows.
   data_rows <- 2:(n_row + 1L)
-  align <- function(cols, h, v = "top") {
+  align <- function(cols, h, v = "top", wrap = TRUE) {
+    cols <- intersect(cols, disp_cols)
     if (length(cols) == 0) return(invisible())
     d <- openxlsx2::wb_dims(rows = data_rows, cols = unname(ci[cols]))
     wb <<- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
-                                        horizontal = h, vertical = v, wrap_text = TRUE)
+                                        horizontal = h, vertical = v, wrap_text = wrap)
   }
-  align(intersect(c("variable", "type", "role", "description", "na"), disp_cols), "left")
-  align(intersect(c("val", "orig_val", "orig_code"), disp_cols), "left")
-  align(intersect(c("n", "pct"), disp_cols), "right")
+  align(c("variable", "description", "type", "role", "na"), "left", wrap = TRUE)
+  align("val", "left", wrap = TRUE)
+  align(c("orig_val", "orig_code"), "left", wrap = FALSE)   # never wrap the originals
+  align(c("n", "pct"), "right", wrap = FALSE)
 
-  # Per-block styling: merges, borders, number formats.
-  blocks <- split(seq_len(n_row), cb$.block_id)
+  # Description is always bold (visually striking).
+  wb <- openxlsx2::wb_add_font(wb, "Codebook",
+          dims = openxlsx2::wb_dims(rows = data_rows, cols = ci[["description"]]),
+          name = "DejaVu Sans", size = 10, bold = TRUE)
+
+  # Per-block styling: merges, NA rich text, borders, number formats.
+  blocks  <- split(seq_len(n_row), cb$.block_id)
+  hb_cols <- unname(ci[setdiff(disp_cols, c("h", "sep"))])  # horizontal block borders
   for (b in blocks) {
     if (length(b) == 0) next
     kind      <- cb$.block_kind[b[1]]
     is_double <- isTRUE(cb$.is_double[b[1]])
-    ex        <- xr(b)                      # Excel rows of this block
+    is_binary <- isTRUE(cb$.is_binary[b[1]])
+    ex        <- xr(b)
     r1 <- min(ex); r2 <- max(ex)
 
     # merge repeated variable-level cells (top-aligned) when >1 row
@@ -6515,48 +6542,74 @@ generate_format_script <- function(meta_json,
       wb <- openxlsx2::wb_merge_cells(wb, "Codebook",
               dims = openxlsx2::wb_dims(rows = r1:r2, cols = ci[[cc]]))
 
-    # vertical separators (var|value, and inside the freq/stat block)
-    vline <- function(col, w) {
-      if (!col %in% disp_cols) return(invisible())
-      wb <<- openxlsx2::wb_add_border(wb, "Codebook",
-               dims = openxlsx2::wb_dims(rows = r1:r2, cols = ci[[col]]),
-               left_border = w, left_color = openxlsx2::wb_color("gray50"),
-               top_border = NULL, right_border = NULL, bottom_border = NULL,
-               update = TRUE)
+    # NA cell rich text: bold the "NA: <count>" prefix; binaries stay on one row.
+    na_val <- cb$na[b[1]]
+    if (!is.na(na_val) && startsWith(na_val, "NA: ")) {
+      m <- regmatches(na_val, regexec("^(NA: \\S+)(.*)$", na_val))[[1]]
+      rich <- tryCatch(
+        if (length(m) == 3L)
+          openxlsx2::fmt_txt(m[2], bold = TRUE, font = "DejaVu Sans", size = 10) +
+          openxlsx2::fmt_txt(m[3], font = "DejaVu Sans", size = 10)
+        else NULL,
+        error = function(e) NULL)
+      if (!is.null(rich))
+        wb <- openxlsx2::wb_add_data(wb, "Codebook", x = rich,
+                dims = openxlsx2::wb_dims(rows = r1, cols = ci[["na"]]), col_names = FALSE)
     }
-    vline("val", "medium"); vline("n", "thin"); vline("pct", "thin")
-    if (orig_val_kept) vline("orig_val", "medium")
-    vline("orig_code", "thin")
+    wb <- openxlsx2::wb_add_cell_style(wb, "Codebook",
+            dims = openxlsx2::wb_dims(rows = r1:r2, cols = ci[["na"]]),
+            horizontal = "left", vertical = "top", wrap_text = !is_binary)
 
-    # numeric median|mean rule (top border on the mean row)
-    mean_rows <- ex[cb$.stat_rule[b] %in% TRUE]
-    if (length(mean_rows) > 0)
+    # vertical separators (black thin): value boundary, empty col, orig block
+    vborder <- function(col, sides) {
+      if (!col %in% disp_cols) return(invisible())
+      args <- list(wb, "Codebook",
+                   dims = openxlsx2::wb_dims(rows = r1:r2, cols = ci[[col]]),
+                   update = TRUE, top_border = NULL, bottom_border = NULL,
+                   left_border = NULL, right_border = NULL)
+      if ("left"  %in% sides) { args$left_border  <- "thin"; args$left_color  <- black }
+      if ("right" %in% sides) { args$right_border <- "thin"; args$right_color <- black }
+      wb <<- do.call(openxlsx2::wb_add_border, args)
+    }
+    vborder("val", "left")
+    vborder("sep", c("left", "right"))
+    if (orig_val_kept) vborder("orig_val", "left")
+    vborder("orig_code", "right")
+
+    # horizontal box: top on first row, bottom on last row (skip h + sep col)
+    wb <- openxlsx2::wb_add_border(wb, "Codebook",
+            dims = openxlsx2::wb_dims(rows = r1, cols = hb_cols),
+            top_border = "thin", top_color = black,
+            bottom_border = NULL, left_border = NULL, right_border = NULL, update = TRUE)
+    wb <- openxlsx2::wb_add_border(wb, "Codebook",
+            dims = openxlsx2::wb_dims(rows = r2, cols = hb_cols),
+            bottom_border = "thin", bottom_color = black,
+            top_border = NULL, left_border = NULL, right_border = NULL, update = TRUE)
+
+    # numeric mean|quantiles rule: bottom border on the mean (first) row
+    rule_rows <- ex[cb$.stat_rule[b] %in% TRUE]
+    if (length(rule_rows) > 0)
       wb <- openxlsx2::wb_add_border(wb, "Codebook",
-              dims = openxlsx2::wb_dims(rows = mean_rows,
+              dims = openxlsx2::wb_dims(rows = rule_rows,
                        cols = unname(ci[intersect(c("val", "n", "pct"), disp_cols)])),
-              top_border = "thin", top_color = openxlsx2::wb_color("gray50"),
-              left_border = NULL, right_border = NULL, bottom_border = NULL, update = TRUE)
+              bottom_border = "thin", bottom_color = black,
+              top_border = NULL, left_border = NULL, right_border = NULL, update = TRUE)
 
-    # number formats
+    # number formats (freq has NO % symbol)
     numfmt <- function(rows, col, fmt) {
       if (length(rows) == 0 || !col %in% disp_cols) return(invisible())
       wb <<- openxlsx2::wb_add_numfmt(wb, "Codebook",
                dims = openxlsx2::wb_dims(rows = rows, cols = ci[[col]]), numfmt = fmt)
     }
     if (kind == "factor") {
-      numfmt(ex, "n", "#,##0"); numfmt(ex, "pct", "0\"%\"")
+      numfmt(ex, "n", "#,##0"); numfmt(ex, "pct", "0")
     } else if (kind == "numeric") {
-      q_rows <- ex[!(cb$.stat_rule[b] %in% TRUE)]
+      q_rows    <- ex[!(cb$.stat_rule[b] %in% TRUE)]
+      mean_rows <- ex[cb$.stat_rule[b] %in% TRUE]
       numfmt(q_rows, "n", if (is_double) "0.0" else "0")
       numfmt(mean_rows, "n", "0.0")
       numfmt(mean_rows, "pct", "\"σ\"0.0")
     }
-
-    # block separator: medium bottom rule under the last row, full width
-    wb <- openxlsx2::wb_add_border(wb, "Codebook",
-            dims = openxlsx2::wb_dims(rows = r2, cols = seq_len(K)),
-            bottom_border = "medium", bottom_color = openxlsx2::wb_color("gray70"),
-            top_border = NULL, left_border = NULL, right_border = NULL, update = TRUE)
   }
 
   # Title rows: colored/underlined heading text + tall rows.
@@ -6574,9 +6627,10 @@ generate_format_script <- function(meta_json,
     wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i), heights = cm_to_pt(hcm))
   }
 
-  # Column widths.
-  widths <- c(h = 2.5, variable = 18, type = 12, role = 11, description = 48,
-              na = 12, val = 26, n = 9, pct = 7, orig_val = 28, orig_code = 10)
+  # Column widths (na + val + freq wider; sep thin; orig_val much wider, no wrap).
+  widths <- c(h = 2.5, variable = 18, description = 48, type = 12, role = 12,
+              na = 20, val = 30, n = 9, pct = 10, sep = 2, orig_val = 60,
+              orig_code = 12)
   wb <- openxlsx2::wb_set_col_widths(wb, "Codebook", cols = seq_len(K),
                                      widths = unname(widths[disp_cols]))
 

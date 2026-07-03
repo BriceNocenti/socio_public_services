@@ -45,14 +45,14 @@ cb_vars <- function() list(
 
 test_that("C1: type labels derive R class from role (+ r_class fallback)", {
   expect_equal(.cb_type_label("factor_ordinal", "double", "fr"), "catégorielle")
-  expect_equal(.cb_type_label("integer_count", "numeric", "fr"), "entier")
-  expect_equal(.cb_type_label("double", "numeric", "fr"), "décimal")
+  expect_equal(.cb_type_label("integer_count", "numeric", "fr"), "nb entier")
+  expect_equal(.cb_type_label("double", "numeric", "fr"), "nb décimal")
   expect_equal(.cb_type_label("identifier", "character", "fr"), "texte")
   expect_equal(.cb_type_label("factor_binary", "double", "en"), "factor")
 })
 
-test_that("C1b: role labels translate, integer_count -> discret / count", {
-  expect_equal(.cb_role_label("integer_count", "fr"), "discret")
+test_that("C1b: role labels translate, integer_count -> comptage / count", {
+  expect_equal(.cb_role_label("integer_count", "fr"), "comptage")
   expect_equal(.cb_role_label("integer_scale", "fr"), "échelle")
   expect_equal(.cb_role_label("double", "fr"), "continue")
   expect_equal(.cb_role_label("factor_ordinal", "fr"), "ordinale")
@@ -72,6 +72,8 @@ test_that("C2: binary = 1 row (positive level), val == .gfs_level_label", {
   expect_equal(rows$val, "1-Déclare")
   expect_equal(rows$n, 780)
   expect_equal(rows$pct, 78)
+  expect_true(rows$.is_binary)
+  expect_equal(rows$orig_val, "Oui / Non")   # both original labels for binaries
 })
 
 test_that("C2b: nominal/ordinal = one row per level, ascending order", {
@@ -87,19 +89,20 @@ test_that("C2c: numeric = 6 stat rows, mean row carries sd + rule", {
   cb <- .cb_build_tibble(jd)
   rows <- cb[cb$variable %in% "NBAPS" & cb$.row_type == "value", ]
   expect_equal(nrow(rows), 6L)
-  expect_equal(rows$val, c("max", "Q3", "médiane", "Q1", "min", "moyenne + écart-type"))
-  expect_equal(rows$n, c(46, 8, 5, 3, 0, 6.04))
-  expect_equal(rows$pct[6], 4.95)          # sd on the mean row
-  expect_true(rows$.stat_rule[6])
-  expect_true(all(!rows$.stat_rule[1:5]))
+  # mean + sd FIRST, then max, Q3, median, Q1, min
+  expect_equal(rows$val, c("moyenne + écart-type", "max", "Q3", "médiane", "Q1", "min"))
+  expect_equal(rows$n, c(6.04, 46, 8, 5, 3, 0))
+  expect_equal(rows$pct[1], 4.95)          # sd on the mean row (now first)
+  expect_true(rows$.stat_rule[1])
+  expect_true(all(!rows$.stat_rule[2:6]))
 })
 
-test_that("C2d: text/other = 1 row of the stored example values", {
+test_that("C2d: text/other = 1 row, 'Ex. : ' + 4 quoted example values", {
   jd <- .read_meta_json(cb_json(cb_vars()))
   cb <- .cb_build_tibble(jd)
   rows <- cb[cb$variable %in% "NOTE" & cb$.row_type == "value", ]
   expect_equal(nrow(rows), 1L)
-  expect_match(rows$val, "a; b; c; d; e")
+  expect_match(rows$val, 'Ex. : "a", "b", "c", "d"', fixed = TRUE)
 })
 
 test_that("C2e: keep_original shows raw labels (no prefix), sorted by code", {
@@ -120,15 +123,15 @@ test_that("C3: factor NA = n_individuals - sum(level n), lists missing labels", 
   cb <- .cb_build_tibble(jd)
   # FREQ: 400 + 300 + 200 = 900 valid -> 100 missing (10%); "9"=NSP recoded to NA
   na_val <- unique(cb$na[cb$variable %in% "FREQ" & !is.na(cb$variable)])
-  expect_equal(na_val, "100 (10%) (NSP)")
-  # DECL: 780 + 220 = 1000 -> 0 missing, no missing level -> no parenthesis
-  expect_equal(unique(cb$na[cb$variable %in% "DECL" & !is.na(cb$variable)]), "0 (0%)")
+  expect_equal(na_val, "NA: 100 (10%) ; NSP")
+  # DECL: 780 + 220 = 1000 -> 0 missing, no missing level -> no trailing labels
+  expect_equal(unique(cb$na[cb$variable %in% "DECL" & !is.na(cb$variable)]), "NA: 0 (0%)")
 })
 
 test_that("C3b: numeric NA read from stored top-level na_n / na_pct", {
   jd <- .read_meta_json(cb_json(cb_vars()))
   cb <- .cb_build_tibble(jd)
-  expect_equal(unique(cb$na[cb$variable %in% "NBAPS" & !is.na(cb$variable)]), "30 (3%)")
+  expect_equal(unique(cb$na[cb$variable %in% "NBAPS" & !is.na(cb$variable)]), "NA: 30 (3%)")
 })
 
 test_that("C3c: factor NA blank when n_individuals absent", {

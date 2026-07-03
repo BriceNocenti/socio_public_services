@@ -105,21 +105,32 @@ and `apply_sas_value_labels()`; resolution helpers are `.match_df_col()` /
 tibble (`.cb_build_tibble()`) then styles an xlsx (`.cb_write_xlsx()`, openxlsx2). It shares
 `.gfs_build_entries()` + `.gfs_level_label()` with `generate_format_script()` so the `val`
 column is byte-identical to the fct_recode LHS. Numeric summary values are written as exact
-numbers with per-range Excel number formats (`0.0`, `#,##0`, `0"%"`, `"σ"0.0`) — not
-pre-rounded text — so precision is preserved. `type`/`role` labels come from
+numbers with per-range Excel number formats (`0.0`, `#,##0`, `0` for freq, `"σ"0.0` for sd) —
+not pre-rounded text — so precision is preserved. `type`/`role` labels come from
 `.cb_type_label()` / `.cb_role_label()` (FR default, `lang="en"` option); `type` is derived
 from `role` (+`r_class` only for identifier/other). A `factor_binary` with exactly 2
-non-missing levels renders one row (positive/order-1 level); if it has ≠2 levels it falls back
-to showing all levels and is flagged (data-quality anomaly). The generated **format script**
-label form (`"label" -> varlab` … `|> \`attr<-\`("label", varlab)`) applies the label to the
-final converted object so it survives `factor(as.character())` / `as.integer(...)`.
-No `df` param: text example values + NA come from the JSON (stored by
-`metadata_add_level_stats`), so the codebook is fully JSON-driven. The NA cell appends the
-original labels of the missing-recoded levels, e.g. `46 (0%) (Réponse Guyane… ; Code commune…)`.
+non-missing levels renders one row (positive/order-1 level; `orig_val` shows both labels
+"Oui / Non"); if it has ≠2 levels it falls back to showing all levels and is flagged. Numeric
+blocks: **mean+sd row first**, then max/Q3/median/Q1/min, thin rule between. The generated
+**format script** label form (`"label" -> varlab` … `|> \`attr<-\`("label", varlab)`) applies
+the label to the final converted object so it survives `factor(as.character())` /
+`as.integer(...)`. No `df` param: text example values + NA come from the JSON (stored by
+`metadata_add_level_stats`), so the codebook is fully JSON-driven.
 `keep_original = TRUE` (forced in df-first mode) shows factor labels as-is, sorted by numeric
 code, no ordering prefix and no binary 1-row collapse — via the `natural_order` path in
 `.cb_build_tibble()`. Passing a **data frame** as the first arg builds a temp JSON silently
 (extract + metadata_add_level_stats, `...` → extract) and sets `keep_original`.
+
+**Key Design Decision** — Codebook xlsx layout (`.cb_write_xlsx`): column order
+`h | variable | description | type | role | missing_values | valeur | n | freq | sep | orig_val | code`
+(FR/EN headers via `.cb_headers`; `role` has no accent; an empty thin `sep` column separates the
+value block from the original-label block). All borders are **black thin**; each variable block is
+boxed top+bottom (skipping `h` + `sep`) so battery runs separated by spacer rows keep their upper
+border; `sep` gets vertical L+R borders, `orig_val` a left border, `orig_code` a right border
+(rightmost). Header/empty/title rows carry no block borders. `description` is always bold. The
+`missing_values` cell is `NA: <n> (<pct>%) ; <miss label 1> ; …` with the `NA: <n>` prefix bolded via
+`openxlsx2::fmt_txt` rich text; it wraps for all types EXCEPT factor binaries (kept on one row).
+`orig_val`/`orig_code` never wrap; text/other `valeur` = `Ex. : "v1", "v2", "v3", "v4", …` (4 values).
 
 **Key Design Decision** — Missing-value flagging in `extract_survey_metadata()` is **exact** by design:
 a level is flagged `missing` only when its (normalized) label is literally in `config.missing_chr` OR
