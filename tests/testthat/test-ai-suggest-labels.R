@@ -440,3 +440,42 @@ test_that("L9: replace_existing_new_labels=FALSE skips fully-labeled, processes 
   expect_equal(res$VAR_PART$levels[["1"]]$new_label, "A travaillé")
   expect_equal(res$VAR_PART$levels[["2"]]$new_label, "Pas travaillé")
 })
+
+# ---------------------------------------------------------------------------
+# L10: AI returns mismatched level keys — must not crash, original labels kept
+# ---------------------------------------------------------------------------
+
+test_that("L10: AI returns wrong level keys — no crash, original labels preserved", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+
+  vars <- list(
+    MY_VAR = make_labels_vars(
+      "MY_VAR",
+      keys      = c("1", "2", "8"),
+      labels    = c("Oui", "Non", "NSP"),
+      order_vec = c(1L, 2L, NA_integer_),
+      missing_keys = "8",
+      role = "factor_binary"
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  # AI returns label keys that don't match stored value codes ("one"/"two" vs "1"/"2")
+  fake_resp <- '{"MY_VAR": {"one": "Yes", "two": "No"}}'
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude", mock_ai(fake_resp), envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  # Must not crash — original labels preserved (0 matched)
+  expect_no_error(suppressMessages(suppressWarnings(
+    ai_suggest_labels(path)
+  )))
+
+  res <- .read_meta_json(path)$variables$MY_VAR$levels
+  # Keys mismatched → AI labels not applied; original labels kept as new_label
+  expect_equal(res[["1"]]$new_label, "Oui")
+  expect_equal(res[["2"]]$new_label, "Non")
+  # Missing level untouched
+  expect_true(res[["8"]]$missing)
+})

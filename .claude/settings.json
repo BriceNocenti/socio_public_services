@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Write",
+      "Edit",
+      "MultiEdit",
+      "Bash(quarto *)",
+      "Bash(Rscript tests/testthat.R)",
+      "Bash(Rscript tests/*.R)",
+      "Bash(Rscript -e \"devtools::test*)",
+      "Bash(Rscript -e \"devtools::check*)",
+      "Bash(uv run pytest*)",
+      "Bash(python -m pytest*)",
+      "Bash(python tests/*)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:www.anthropic.com)"
+    ],
+    "deny": [
+      "Write(../**)"
+    ]
+  }
+}

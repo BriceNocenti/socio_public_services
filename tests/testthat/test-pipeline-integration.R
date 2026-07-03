@@ -185,6 +185,18 @@ test_that("INT2: Emploi dummy full pipeline with SAS format file", {
     metadata_add_level_stats(json_path, .emploi_dummy)
   )
 
+  json_data <- .read_meta_json(json_path)
+  expect_false(is.null(json_data$variables$HCONT$num_stats),
+               label = "INT2: HCONT should have num_stats after metadata_add_level_stats")
+  expect_true(all(c("min", "max", "mean", "sd", "q1", "median", "q3") %in%
+                    names(json_data$variables$HCONT$num_stats)),
+              label = "INT2: HCONT num_stats must contain all 7 fields")
+  expect_false(is.null(json_data$variables$NAIA$num_stats),
+               label = "INT2: NAIA should have num_stats after metadata_add_level_stats")
+  expect_true(all(c("min", "max", "mean", "sd", "q1", "median", "q3") %in%
+                    names(json_data$variables$NAIA$num_stats)),
+              label = "INT2: NAIA num_stats must contain all 7 fields")
+
   # --- Step 4: ai_suggest_labels (mock) ---
   labels_response <- paste0(
     '{"METRODOM": {"1": "Metropole", "2": "DOM"},',
@@ -220,8 +232,10 @@ test_that("INT2: Emploi dummy full pipeline with SAS format file", {
   expect_equal(json_data$variables$HCONT$new_name, "H_CONTRAT")
 
   # --- Step 6: generate_format_script ---
-  suppressMessages(
-    generate_format_script(json_path, output_path = script_path)
+  # num_stats present -> no "numeric stats missing" warning
+  expect_no_message(
+    generate_format_script(json_path, output_path = script_path),
+    message = "numeric stats missing"
   )
 
   expect_true(file.exists(script_path))
@@ -230,4 +244,55 @@ test_that("INT2: Emploi dummy full pipeline with SAS format file", {
   expect_no_error(parse(text = script_text))
   expect_true(grepl("METRO_DOM", script_text), info = "should contain new variable name")
   expect_true(grepl("as\\.ordered", script_text), info = "should contain as.ordered for AGED ordinal")
+})
+
+
+# ===========================================================================
+# INT3: metadata_add_level_stats computes numeric stats with no factor vars
+# ===========================================================================
+test_that("INT3: metadata_add_level_stats computes numeric stats when fac_meta is empty", {
+  # Covers the early-return bug: when all factor vars have empty levels lists
+  # (e.g. after AI reclassified them away), fac_meta is empty and the old code
+  # returned early before computing numeric stats.
+  withr::local_dir(.test_proj_root)
+  json_path <- tmp_json()
+  on.exit(unlink(json_path))
+
+  fac_col <- labelled::labelled(
+    c(1, 2, 1, 2, 1, 2, 1, 2, 1, 2),
+    labels = c("Oui" = 1, "Non" = 2)
+  )
+  labelled::var_label(fac_col) <- "Variable binaire"
+  df_int3 <- tibble::tibble(
+    OUI_NON = fac_col,
+    HCONT   = c(35.0, 40.0, 35.0, 28.0, 40.0, 35.0, 40.0, 35.0, 40.0, 35.0),
+    NAIA    = c(1970L, 1985L, 1990L, 1975L, 1980L, 1985L, 1990L, 1975L, 1980L, 1970L)
+  )
+  suppressMessages(extract_survey_metadata(
+    df_int3, json_path,
+    missing_num = integer(0),
+    missing_chr = character(0)
+  ))
+
+  # Simulate the early-return scenario: clear the only factor variable's levels,
+  # as would happen if the factor had no declared labels (or after manual JSON edit).
+  # Also explicitly set NAIA role to integer_count (as AI would classify it).
+  existing <- .read_meta_json(json_path)
+  existing$variables$OUI_NON$levels <- list()
+  existing$variables$NAIA$role <- "integer_count"
+  .write_meta_json(existing, json_path)
+
+  suppressMessages(metadata_add_level_stats(json_path, df_int3))
+
+  raw <- .read_meta_json(json_path)
+  expect_false(is.null(raw$variables$HCONT$num_stats),
+               label = "INT3: HCONT must have num_stats even when fac_meta is empty")
+  expect_true(all(c("min", "max", "mean", "sd", "q1", "median", "q3") %in%
+                    names(raw$variables$HCONT$num_stats)),
+              label = "INT3: HCONT num_stats must contain all 7 fields")
+  expect_false(is.null(raw$variables$NAIA$num_stats),
+               label = "INT3: NAIA (integer_count) must have num_stats even when fac_meta is empty")
+  expect_true(all(c("min", "max", "mean", "sd", "q1", "median", "q3") %in%
+                    names(raw$variables$NAIA$num_stats)),
+              label = "INT3: NAIA num_stats must contain all 7 fields")
 })

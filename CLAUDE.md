@@ -58,6 +58,23 @@ Users can (and do) manually edit the JSON between AI steps. Key fields per varia
 `apply_sas_labels()` applies parsed labels to plain tibbles (haven_labelled output).
 The mapping section (`data; set; format VAR $FMTf;`) links format names to variable names.
 
+`apply_sas_value_labels(df, path)` is the recommended df-aware entry point: it reads a
+SAS format **script** (not a `.sas7bcat` catalog) and attaches value labels to `df`
+without changing the stored codes. Resolution is **case-insensitive** (INSEE scripts use
+mixed/lower-case names while imported columns are upper-cased) and **df-aware for the
+trailing-"f" convention**: an as-is match wins, and a single trailing "f" is stripped only
+as a fallback — so a variable that legitimately ends in "f" (e.g. `PAP_TIR_SPTF` ←
+`pap_tir_sptff`) is never truncated. Unmatched formats are reported, not silently dropped.
+`apply_sas_labels()` is now also case-insensitive and takes `overwrite = FALSE`.
+
+**Key Design Decision** — SAS var/format→column resolution is df-aware + case-insensitive;
+strip-"f" is fallback-only and never overrides a real column match. This fixes the silent
+no-op that `apply_sas_labels()` (case-sensitive) had on lower-case INSEE variables against
+an all-upper-case df. Parsing is factored into `.parse_sas_value_blocks()` /
+`.parse_sas_format_mapping()` / `.parse_sas_var_labels()`, shared by `parse_sas_formats()`
+and `apply_sas_value_labels()`; resolution helpers are `.match_df_col()` /
+`.resolve_sas_name_to_col()`.
+
 ---
 
 ## Test Suite Design
@@ -65,11 +82,10 @@ The mapping section (`data; set; format VAR $FMTf;`) links format names to varia
 ### Running Tests
 
 ```r
-source("tests/testthat.R", encoding = "UTF-8")
+# In a temp .R file (outside tests/), then run:  Rscript that_file.R   (isolated; tests live source)
+devtools::test("d:/Statistiques/github/socio_public_services")                  # whole suite (~46s)
+devtools::test("d:/Statistiques/github/socio_public_services", filter = "tab")  # one/few files: regex on test-<name>.R
 ```
-
-Always use this runner — never run individual test files directly. They depend on shared
-fixtures loaded by the runner.
 
 ### Shared Fixtures (`tests/testthat.R`)
 
@@ -78,11 +94,11 @@ Test files reference them by name (e.g., `.virage_dummy`, `.emploi_expected_role
 
 **Three dummy datasets:**
 
-| Dataset | Type | Rows | Vars | Source |
-|---------|------|------|------|--------|
-| `.virage_dummy` | haven_labelled | 30 | 6 | Real Virage survey extract |
-| `.emploi_dummy` | plain chr/num | 30 | 5 | Real Enquête Emploi extract |
-| `.edge_dummy` | mixed synthetic | 10 | 6 | Hand-crafted edge cases |
+| Dataset         | Type            | Rows | Vars | Source                      |
+|-----------------|-----------------|------|------|-----------------------------|
+| `.virage_dummy` | haven_labelled  | 30   | 6    | Real Virage survey extract  |
+| `.emploi_dummy` | plain chr/num   | 30   | 5    | Real Enquête Emploi extract |
+| `.edge_dummy`   | mixed synthetic | 10   | 6    | Hand-crafted edge cases     |
 
 Each dummy has matching configs:
 - `.{name}_missing_num`, `.{name}_missing_chr` — missing value codes
@@ -105,17 +121,18 @@ Each dummy has matching configs:
 
 ### Test File Organization
 
-| File | Prefix | What it tests |
-|------|--------|---------------|
-| `test-extract-metadata.R` | E | Role detection for all 3 dummies + regression cases |
-| `test-sas-format-parser.R` | P | `parse_sas_formats()` and `apply_sas_labels()` unit tests |
-| `test-pipeline-integration.R` | INT | End-to-end pipeline with mocked AI calls |
-| `test-ai-classify-roles.R` | A/AC | `ai_classify_roles()` logic + auto-classification |
-| `test-ai-suggest-labels.R` | L/B | `ai_suggest_labels()` prompt building + JSON writing |
-| `test-ai-merge-levels.R` | M | `ai_merge_levels()` logic |
-| `test-generate-format-script.R` | G | `generate_format_script()` code generation |
-| `test-json-roundtrip.R` | J/K | JSON read/write roundtrip, backup, migration helpers |
-| `test-nomenclatures-insee.R` | O | INSEE nomenclature helpers |
+| File                            | Prefix | What it tests                                             |
+|---------------------------------|--------|-----------------------------------------------------------|
+| `test-extract-metadata.R`       | E      | Role detection for all 3 dummies + regression cases       |
+| `test-sas-format-parser.R`      | P      | `parse_sas_formats()` and `apply_sas_labels()` unit tests |
+| `test-sas-value-labels.R`       | V      | `apply_sas_value_labels()` df-aware value-label apply      |
+| `test-pipeline-integration.R`   | INT    | End-to-end pipeline with mocked AI calls                  |
+| `test-ai-classify-roles.R`      | A/AC   | `ai_classify_roles()` logic + auto-classification         |
+| `test-ai-suggest-labels.R`      | L/B    | `ai_suggest_labels()` prompt building + JSON writing      |
+| `test-ai-merge-levels.R`        | M      | `ai_merge_levels()` logic                                 |
+| `test-generate-format-script.R` | G      | `generate_format_script()` code generation                |
+| `test-json-roundtrip.R`         | J/K    | JSON read/write roundtrip, backup, migration helpers      |
+| `test-nomenclatures-insee.R`    | O      | INSEE nomenclature helpers                                |
 
 ### Mocking AI Calls
 
@@ -151,8 +168,24 @@ assign("ai_call_claude", mock_ai(response_text), envir = globalenv())
 
 ## AI Integration
 
-- All AI calls go through `ai_call_claude()` which calls the Anthropic API
-- Default model: Haiku 4.5 (`claude-haiku-4-5`) for cost efficiency
+- All AI calls go through `ai_call_claude()` / `ai_batch_submit()` (Anthropic API)
+- Default model: Sonnet 5 (`claude-sonnet-5`) via the `.DEFAULT_AI_MODEL` constant. Haiku 4.5 is legacy.
+- Request body built by `.build_message_body()` (shared by call + batch). Reasoning-tier models
+  (Sonnet 5 / Opus 4.8 family, gated by `.is_reasoning_tier_model()`) get `thinking:{type:"adaptive"}`
+  + `output_config.effort="low"` and `+.AI_THINKING_HEADROOM` on `max_tokens`; Haiku/older models get
+  the plain body (they 400 on effort/adaptive thinking). No `temperature`/`top_p`/`top_k` ever.
+- Response text read via `.ai_extract_text()` (skips the leading adaptive-thinking block).
+  `.warn_if_truncated()` warns on `stop_reason=="max_tokens"` (sync + per batch item) so batches
+  are never silently lost.
+- Chunk sizes raised ~2–3× for Sonnet 5's 1M context (classify `chunk_size` 1000, varnames 800,
+  labels `max_levels` 400, merge `max_levels` 600). All four auto-scale `max_tokens` from their
+  chunk budget (labels/varnames no longer fixed), clamped to 128K.
+- All four AI functions cache their system prompt via `cache_control` (labels/varnames were
+  previously uncached).
 - AI prompts are built by `build_*_prompt()` functions, sent in chunks
 - `dry_run = TRUE` returns prompts without calling API (useful for debugging)
 - NEVER use AI API calls in tests to avoid costs (mock them instead)
+
+## CLAUDE.md Update Instruction
+
+When you modify the package structure (add modules, rename functions, change config fields), suggest the relevant CLAUDE.md update lines in your response : it should be minimalistic, concice, no bullshit, with nothing useless that would clutter the prompt. When there is nothing to change, skip it.

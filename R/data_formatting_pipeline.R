@@ -190,15 +190,12 @@ import_survey <- function(
 #'     \item{\code{var_labels}}{Named character vector: variable name →
 #'       variable description (from SAS \code{label} statements, if any).}
 #'   }
-parse_sas_formats <- function(path, encoding = "UTF-8") {
-  lines <- readLines(path, encoding = encoding, warn = FALSE)
-
-  # ------------------------------------------------------------------
-  # 1. Parse format definitions:  ;value [$ ]FORMATNAMEf
-  #    followed by "code"="label" lines until next ;value or end-of-section
-
-  # ------------------------------------------------------------------
-  formats <- list()            # FORMATNAMEf -> c("Label" = "code", ...)
+# Parse ";value [$ ]FORMATNAME" blocks -> named list: FORMATNAME(raw) -> c(label = code).
+# Names are labels, values are codes (matches labelled::val_labels() layout).
+# Last duplicate format wins; codes kept as raw strings. Format names are NOT
+# case-folded or "f"-stripped here — callers resolve raw names as needed.
+.parse_sas_value_blocks <- function(lines) {
+  formats      <- list()
   current_fmt  <- NULL
   current_labs <- character(0) # named: names=labels, values=codes
 
@@ -207,11 +204,9 @@ parse_sas_formats <- function(path, encoding = "UTF-8") {
 
     # Detect format header:  ;value $ MOISf   or   ;value MOISf
     if (grepl("^;value\\s", trimmed, ignore.case = TRUE)) {
-      # Save previous format block (if any)
       if (!is.null(current_fmt) && length(current_labs) > 0) {
         formats[[current_fmt]] <- current_labs
       }
-      # Extract format name (after optional $)
       m <- regmatches(trimmed,
         regexec("^;value\\s+(?:\\$\\s*)?(\\S+)", trimmed, perl = TRUE))[[1]]
       if (length(m) >= 2) {
@@ -225,62 +220,87 @@ parse_sas_formats <- function(path, encoding = "UTF-8") {
 
     # Collect "code"="label" pairs inside a format block
     if (!is.null(current_fmt)) {
-      # Match:  "code" = "label"  (tolerant of spaces around =)
       m <- regmatches(trimmed,
         regexec('^"([^"]*)"\\s*=\\s*"([^"]*)"', trimmed, perl = TRUE))[[1]]
       if (length(m) == 3) {
-        code  <- m[2]
-        label <- m[3]
-        current_labs[label] <- code
+        current_labs[m[3]] <- m[2]  # names=label, value=code
       }
-      # A line starting with ; (but not ;value) or empty block boundary
-      # terminates the current block — handled by the ;value detection above.
     }
   }
   # Flush the last format block
   if (!is.null(current_fmt) && length(current_labs) > 0) {
     formats[[current_fmt]] <- current_labs
   }
+  formats
+}
 
-  # ------------------------------------------------------------------
-  # 2. Parse variable-to-format mapping section:
-  #    data; set; format  VARNAME $FORMATf  ...  ;  run;
-  # ------------------------------------------------------------------
-  mapping <- character(0)  # named: names=VARNAME, values=FORMATNAMEf
+# Parse the "data; set; format VARNAME $FORMATf ... ; run;" mapping block
+# -> named character vector: VARNAME(raw) -> FORMATNAME(raw). character(0) if absent.
+# Names kept exactly as written (case preserved); last duplicate wins.
+.parse_sas_format_mapping <- function(lines) {
+  mapping <- character(0)
 
-  # Find the "data;" line that starts the mapping section
   data_idx <- grep("^\\s*data;\\s*$", lines, ignore.case = TRUE)
-  if (length(data_idx) > 0) {
-    map_start <- data_idx[length(data_idx)]  # use last occurrence
-    map_lines <- lines[seq(map_start, length(lines))]
-    for (ml in map_lines) {
-      mt <- trimws(ml)
-      # Match:  VARNAME $FORMATNAMEf  (one or more per line)
-      # Pattern: word chars, then $ (possibly with space), then word chars
-      matches <- gregexpr(
-        "([A-Za-z_][A-Za-z0-9_]*)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)",
-        mt, perl = TRUE)
-      if (matches[[1]][1] > 0) {
-        starts  <- matches[[1]]
-        lengths <- attr(matches[[1]], "match.length")
-        for (i in seq_along(starts)) {
-          piece <- substr(mt, starts[i], starts[i] + lengths[i] - 1L)
-          parts <- regmatches(piece,
-            regexec("^([A-Za-z_][A-Za-z0-9_]*)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)",
-                    piece, perl = TRUE))[[1]]
-          if (length(parts) == 3) {
-            mapping[parts[2]] <- parts[3]  # VARNAME -> FORMATNAMEf
-          }
+  if (length(data_idx) == 0) return(mapping)
+
+  map_start <- data_idx[length(data_idx)]  # use last occurrence
+  map_lines <- lines[seq(map_start, length(lines))]
+  for (ml in map_lines) {
+    mt <- trimws(ml)
+    # Match:  VARNAME $FORMATNAMEf  (one or more per line)
+    matches <- gregexpr(
+      "([A-Za-z_][A-Za-z0-9_]*)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)",
+      mt, perl = TRUE)
+    if (matches[[1]][1] > 0) {
+      starts  <- matches[[1]]
+      lengths <- attr(matches[[1]], "match.length")
+      for (i in seq_along(starts)) {
+        piece <- substr(mt, starts[i], starts[i] + lengths[i] - 1L)
+        parts <- regmatches(piece,
+          regexec("^([A-Za-z_][A-Za-z0-9_]*)\\s+\\$([A-Za-z_][A-Za-z0-9_]*)",
+                  piece, perl = TRUE))[[1]]
+        if (length(parts) == 3) {
+          mapping[parts[2]] <- parts[3]  # VARNAME -> FORMATNAMEf
         }
       }
     }
   }
+  mapping
+}
 
-  # ------------------------------------------------------------------
-  # 3. Build value_labels: VARNAME -> c("Label" = "code", ...)
-  # ------------------------------------------------------------------
+# Parse optional "label VARNAME="text";" statements
+# -> named character vector: toupper(VARNAME) -> description. character(0) if absent.
+.parse_sas_var_labels <- function(lines) {
+  var_labels  <- character(0)
+  label_lines <- grep("^\\s*label\\b", lines, ignore.case = TRUE, value = TRUE)
+  for (ll in label_lines) {
+    lm <- gregexpr(
+      '([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*"([^"]*)"',
+      ll, perl = TRUE)
+    if (lm[[1]][1] > 0) {
+      for (i in seq_along(lm[[1]])) {
+        start <- lm[[1]][i]
+        len   <- attr(lm[[1]], "match.length")[i]
+        piece <- substr(ll, start, start + len - 1L)
+        parts <- regmatches(piece,
+          regexec('^([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*"([^"]*)"',
+                  piece, perl = TRUE))[[1]]
+        if (length(parts) == 3) {
+          var_labels[toupper(parts[2])] <- parts[3]
+        }
+      }
+    }
+  }
+  var_labels
+}
+
+parse_sas_formats <- function(path, encoding = "UTF-8") {
+  lines   <- readLines(path, encoding = encoding, warn = FALSE)
+  formats <- .parse_sas_value_blocks(lines)
+  mapping <- .parse_sas_format_mapping(lines)
+
+  # Build value_labels: VARNAME -> c("Label" = "code", ...)
   value_labels <- list()
-
   if (length(mapping) > 0) {
     # Use mapping to link variables to formats
     for (varname in names(mapping)) {
@@ -299,32 +319,8 @@ parse_sas_formats <- function(path, encoding = "UTF-8") {
     }
   }
 
-  # ------------------------------------------------------------------
-  # 4. Parse variable labels (optional):  label VARNAME="text";
-  # ------------------------------------------------------------------
-  var_labels <- character(0)
-  label_lines <- grep("^\\s*label\\b", lines, ignore.case = TRUE, value = TRUE)
-  for (ll in label_lines) {
-    # Match patterns like:  VARNAME = "description"  or  VARNAME="description"
-    lm <- gregexpr(
-      '([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*"([^"]*)"',
-      ll, perl = TRUE)
-    if (lm[[1]][1] > 0) {
-      for (i in seq_along(lm[[1]])) {
-        start <- lm[[1]][i]
-        len   <- attr(lm[[1]], "match.length")[i]
-        piece <- substr(ll, start, start + len - 1L)
-        parts <- regmatches(piece,
-          regexec('^([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*"([^"]*)"',
-                  piece, perl = TRUE))[[1]]
-        if (length(parts) == 3) {
-          var_labels[toupper(parts[2])] <- parts[3]
-        }
-      }
-    }
-  }
-
-  list(value_labels = value_labels, var_labels = var_labels)
+  list(value_labels = value_labels,
+       var_labels   = .parse_sas_var_labels(lines))
 }
 
 
@@ -332,50 +328,222 @@ parse_sas_formats <- function(path, encoding = "UTF-8") {
 # 1a-ter. apply_sas_labels() — apply parsed SAS labels to a tibble
 # ============================================================
 
+# Build a case-insensitive lookup over a set of names:
+# named character vector tolower(key) -> original key (first occurrence wins).
+.ci_key_lookup <- function(keys) {
+  if (length(keys) == 0L) return(character(0))
+  lk   <- tolower(keys)
+  keep <- !duplicated(lk)
+  out  <- keys[keep]
+  names(out) <- lk[keep]
+  out
+}
+
 #' Apply SAS value labels and variable labels to a plain tibble.
 #'
 #' For each column that has a matching entry in \code{sas_parsed$value_labels},
-#' wraps it in \code{haven_labelled} via \code{labelled::labelled()}.
-#' Columns that already carry \code{haven_labelled} class are left untouched.
+#' wraps it in \code{haven_labelled} via \code{labelled::labelled()}. Column
+#' names are matched to \code{value_labels}/\code{var_labels} keys
+#' \strong{case-insensitively} (SAS format scripts use mixed case while imported
+#' variables are upper-cased). By default columns that already carry the
+#' \code{haven_labelled} class are left untouched; set \code{overwrite = TRUE}
+#' to replace their value labels (underlying values are never changed).
 #'
 #' Variable labels from \code{sas_parsed$var_labels} are applied only when the
 #' column does not already have a \code{label} attribute.
 #'
 #' @param df          A tibble (plain or partially labelled).
 #' @param sas_parsed  Output of \code{parse_sas_formats()}.
+#' @param overwrite   If \code{TRUE}, replace value labels on columns that are
+#'   already \code{haven_labelled}. Default \code{FALSE} (skip them).
 #'
 #' @return The tibble with \code{haven_labelled} value labels and variable
 #'   labels applied where applicable.
-apply_sas_labels <- function(df, sas_parsed) {
-  val_labs  <- sas_parsed$value_labels
-  var_labs  <- sas_parsed$var_labels
+apply_sas_labels <- function(df, sas_parsed, overwrite = FALSE) {
+  val_labs <- sas_parsed$value_labels
+  var_labs <- sas_parsed$var_labels
+
+  val_key_by_lower <- .ci_key_lookup(names(val_labs))
+  var_key_by_lower <- .ci_key_lookup(names(var_labs))
 
   for (vname in names(df)) {
-    col <- df[[vname]]
+    col   <- df[[vname]]
+    lname <- tolower(vname)
 
     # --- Value labels ---
-    if (vname %in% names(val_labs) && !inherits(col, "haven_labelled")) {
-      labs <- val_labs[[vname]]  # c("Label" = "code", ...)
+    val_key <- unname(val_key_by_lower[lname])
+    if (!is.na(val_key) && (isTRUE(overwrite) || !inherits(col, "haven_labelled"))) {
+      labs <- val_labs[[val_key]]  # c("Label" = "code", ...)
+      # Preserve any existing variable label (e.g. from parquet Arrow metadata)
+      existing_var_lbl <- attr(col, "label", exact = TRUE)
 
       if (is.numeric(col)) {
         # Coerce string codes to numeric to match column type
         labs_num <- suppressWarnings(as.numeric(labs))
         if (!anyNA(labs_num)) {
           names(labs_num) <- names(labs)
-          df[[vname]] <- labelled::labelled(col, labels = labs_num)
+          if (inherits(col, "haven_labelled")) {
+            labelled::val_labels(df[[vname]]) <- labs_num
+          } else {
+            df[[vname]] <- labelled::labelled(col, labels = labs_num,
+                                              label = existing_var_lbl)
+          }
         }
       } else {
         # Character column: labels are already character strings
-        df[[vname]] <- labelled::labelled(col, labels = labs)
+        if (inherits(col, "haven_labelled")) {
+          labelled::val_labels(df[[vname]]) <- labs
+        } else {
+          df[[vname]] <- labelled::labelled(col, labels = labs,
+                                            label = existing_var_lbl)
+        }
       }
     }
 
     # --- Variable label ---
-    if (vname %in% names(var_labs)) {
+    var_key <- unname(var_key_by_lower[lname])
+    if (!is.na(var_key)) {
       existing_lbl <- attr(df[[vname]], "label", exact = TRUE)
       if (is.null(existing_lbl) || is.na(existing_lbl) || !nzchar(existing_lbl)) {
-        labelled::var_label(df[[vname]]) <- var_labs[[vname]]
+        labelled::var_label(df[[vname]]) <- var_labs[[var_key]]
       }
+    }
+  }
+
+  df
+}
+
+
+# ============================================================
+# 1a-quater. apply_sas_value_labels() — df-aware SAS value labels
+# ============================================================
+
+# Case-insensitive exact match of a SAS name to an actual df column name.
+# Returns the real column name (original case) or NA_character_ (first hit wins).
+.match_df_col <- function(name, df_names) {
+  hit <- which(tolower(df_names) == tolower(name))
+  if (length(hit) >= 1L) df_names[hit[1L]] else NA_character_
+}
+
+# Resolve a SAS name to a df column, df-aware and reliable for the INSEE
+# trailing-"f" convention: try the name as-is (case-insensitive) FIRST, and only
+# strip a single trailing "f"/"F" if that fails. This never truncates a variable
+# that legitimately ends in "f" (e.g. PAP_TIR_SPTF) when it exists as a column.
+.resolve_sas_name_to_col <- function(name, df_names, strip_f = TRUE) {
+  col <- .match_df_col(name, df_names)
+  if (!is.na(col)) return(col)
+  if (isTRUE(strip_f) && grepl("[fF]$", name)) {
+    stripped <- substr(name, 1L, nchar(name) - 1L)
+    if (nzchar(stripped)) {
+      col <- .match_df_col(stripped, df_names)
+      if (!is.na(col)) return(col)
+    }
+  }
+  NA_character_
+}
+
+#' Apply value labels from a SAS PROC FORMAT script to a data frame.
+#'
+#' Convenience wrapper that reads a SAS format \strong{script} (PROC FORMAT text,
+#' not a \code{.sas7bcat} catalog), resolves its formats to the columns of
+#' \code{df}, and attaches the value labels as \code{haven_labelled} value labels
+#' \strong{without changing the underlying stored codes}.
+#'
+#' Resolution is df-aware and case-insensitive:
+#' \itemize{
+#'   \item When the script has a \code{data; set; format ...} mapping block, each
+#'     variable is matched to a df column case-insensitively (the mapping variable
+#'     name already carries no trailing-"f", so no stripping is done).
+#'   \item Otherwise each format name is resolved with \code{.resolve_sas_name_to_col()}:
+#'     an as-is (case-insensitive) match wins; a single trailing "f" is stripped
+#'     only as a fallback, so variables that legitimately end in "f" are never
+#'     truncated.
+#' }
+#'
+#' @param df         A data frame / tibble (typically freshly imported, values
+#'   present but value labels missing).
+#' @param path       Path to the SAS PROC FORMAT text script.
+#' @param encoding   Character encoding passed to \code{readLines()}. Default \code{"UTF-8"}.
+#' @param strip_f    Enable the trailing-"f" fallback in the no-mapping branch.
+#'   Default \code{TRUE}. \code{FALSE} = exact case-insensitive names only.
+#' @param overwrite  If \code{TRUE}, replace value labels on columns already
+#'   \code{haven_labelled}. Default \code{FALSE} (skip them).
+#' @param var_labels If \code{TRUE} (default), also apply SAS \code{label} variable
+#'   descriptions, only where the column has no existing label.
+#' @param quiet      If \code{TRUE}, suppress the summary message. Default \code{FALSE}.
+#'
+#' @return \code{df} with value (and optional variable) labels applied.
+#'
+#' @examples
+#' \dontrun{
+#' df <- apply_sas_value_labels(df, "Doc/Formats/formats_sas_lil-1620.txt")
+#' labelled::get_value_labels(df) |> head()
+#' }
+apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
+                                   overwrite = FALSE, var_labels = TRUE,
+                                   quiet = FALSE) {
+  lines    <- readLines(path, encoding = encoding, warn = FALSE)
+  formats  <- .parse_sas_value_blocks(lines)
+  mapping  <- .parse_sas_format_mapping(lines)
+  df_names <- names(df)
+
+  resolved  <- list()         # actual df col name -> c("Label" = "code", ...)
+  unmatched <- character(0)    # SAS names (var or format) with no df column
+
+  if (length(mapping) > 0) {
+    # Mapping present: the mapping variable already lacks the extra "f", so match
+    # it to a df column case-insensitively (no stripping).
+    for (varname in names(mapping)) {
+      fmt_name <- mapping[[varname]]
+      if (!(fmt_name %in% names(formats))) next  # mapping points to unknown format
+      col <- .match_df_col(varname, df_names)
+      if (is.na(col)) { unmatched <- c(unmatched, varname); next }
+      resolved[[col]] <- formats[[fmt_name]]
+    }
+  } else {
+    # No mapping: resolve each raw format name df-aware (as-is, then strip "f").
+    for (fmt_name in names(formats)) {
+      col <- .resolve_sas_name_to_col(fmt_name, df_names, strip_f = strip_f)
+      if (is.na(col)) { unmatched <- c(unmatched, fmt_name); next }
+      resolved[[col]] <- formats[[fmt_name]]
+    }
+  }
+
+  # Variable labels (optional): resolve keys to real df columns case-insensitively.
+  vlabs_resolved <- character(0)
+  if (isTRUE(var_labels)) {
+    vlabs <- .parse_sas_var_labels(lines)
+    for (k in names(vlabs)) {
+      col <- .match_df_col(k, df_names)
+      if (!is.na(col)) vlabs_resolved[col] <- vlabs[[k]]
+    }
+  }
+
+  # Columns already labelled among the matched ones (for the summary).
+  already_labelled <- Filter(
+    function(cn) inherits(df[[cn]], "haven_labelled"), names(resolved))
+
+  # Delegate the actual attach (keys are already exact df column names).
+  df <- apply_sas_labels(
+    df,
+    list(value_labels = resolved, var_labels = vlabs_resolved),
+    overwrite = overwrite)
+
+  if (!isTRUE(quiet)) {
+    note <- ""
+    if (length(already_labelled) > 0) {
+      note <- sprintf(" (%d already-labelled column(s) %s)",
+                      length(already_labelled),
+                      if (isTRUE(overwrite)) "replaced" else "kept as-is")
+    }
+    message(sprintf(
+      "apply_sas_value_labels: matched %d df column(s) to SAS formats%s; %d SAS name(s) unmatched.",
+      length(resolved), note, length(unmatched)))
+    if (length(unmatched) > 0) {
+      more <- if (length(unmatched) > 20L)
+        sprintf(" ... (+%d more)", length(unmatched) - 20L) else ""
+      message("  Unmatched (no df column): ",
+              paste(utils::head(unmatched, 20L), collapse = ", "), more)
     }
   }
 
@@ -1091,12 +1259,29 @@ apply_sas_labels <- function(df, sas_parsed) {
       )
     }
 
+    # -- num_stats sub-block (optional, for numeric variables) ----------------
+    ns <- entry[["num_stats"]]
+    num_stats_body <- if (!is.null(ns) && length(ns) > 0) {
+      ns_fields <- c("min", "max", "mean", "sd", "q1", "median", "q3")
+      ns_present <- intersect(ns_fields, names(ns))
+      ns_tokens <- vapply(ns_present, function(fld) {
+        paste0('"', fld, '": ', scalar_str(ns[[fld]]))
+      }, character(1))
+      paste0('      "num_stats": { ', paste(ns_tokens, collapse = ", "), " }")
+    } else NULL
+
     comma <- if (vi < n_vars) "," else ""
+    # scalar lines end with commas already; levels_body needs a comma when num_stats follows
+    levels_body_out <- if (!is.null(num_stats_body))
+      paste0(levels_body, ",")
+    else
+      levels_body
+    body_parts <- c(paste(s_lines, collapse = "\n"), levels_body_out)
+    if (!is.null(num_stats_body)) body_parts <- c(body_parts, num_stats_body)
     var_blocks[[vi]] <- paste0(
       '    "', esc(vname), '": {
 ',
-      paste(s_lines, collapse = "\n"), "\n",
-      levels_body, "\n",
+      paste(body_parts, collapse = "\n"), "\n",
       '    }', comma
     )
   }
@@ -1908,15 +2093,11 @@ extract_survey_metadata <- function(
       detected_role <- .effective_roles[[vname]]
     }
 
-    # --- new_labels: copy of labels with missing candidates pre-marked as "NULL" ---
-    new_labels_init <- ifelse(is_miss, "NULL", raw_labels)
-
     # --- For non-factor roles, labels are not meaningful — clear them ---
     if (detected_role %in% c("double", "integer", "identifier")) {
-      raw_values      <- character(0)
-      raw_labels      <- character(0)
-      new_labels_init <- character(0)
-      is_miss         <- logical(0)
+      raw_values <- character(0)
+      raw_labels <- character(0)
+      is_miss    <- logical(0)
     }
 
     # --- order vector: initial sequential assignment for non-missing levels ---
@@ -1970,12 +2151,11 @@ extract_survey_metadata <- function(
     levels_list <- if (length(raw_values) > 0) {
       purrr::set_names(
         purrr::pmap(
-          list(raw_values, raw_labels, is_miss, order_init, new_labels_init),
-          function(v, l, m, o, nl) {
+          list(raw_values, raw_labels, is_miss, order_init),
+          function(v, l, m, o) {
             entry <- list(label = l, missing = isTRUE(m))
             if (!isTRUE(m)) {
-              entry$order     <- if (!is.na(o)) o else NA_integer_
-              entry$new_label <- if (!is.null(nl) && nl != "NULL") nl else NULL
+              entry$order <- if (!is.na(o)) o else NA_integer_
             }
             entry
           }
@@ -2248,7 +2428,33 @@ metadata_add_level_stats <- function(meta_json, df) {
     metadata$var_name      %in% names(df), ]
   fac_meta <- fac_meta[purrr::map_lgl(fac_meta$levels, ~ length(.x) > 0), ]
 
+  # --- Load JSON once (needed by both numeric and factor sections) ----------
+  .backup_meta_json(json_path, "level_stats")
+  existing <- .read_meta_json(json_path)
+
+  # --- Compute and persist numeric stats (always runs, independent of factors)
+  num_roles <- c("integer", "integer_count", "integer_scale", "double")
+  num_meta  <- metadata[metadata$detected_role %in% num_roles &
+                        metadata$var_name %in% names(df), ]
+  # Missing codes: merge level-declared codes + global config missing_num
+  config_miss_num <- as.character(existing$config$missing_num %||% character(0))
+  for (i in seq_len(nrow(num_meta))) {
+    vn  <- num_meta$var_name[[i]]
+    col <- df[[vn]]
+    if (is.null(col)) next
+    lvls <- existing$variables[[vn]]$levels
+    level_miss_codes <- if (!is.null(lvls) && length(lvls) > 0)
+      names(Filter(function(l) isTRUE(l$missing), lvls))
+    else character(0)
+    miss_codes <- unique(c(level_miss_codes, config_miss_num))
+    existing$variables[[vn]]$num_stats <- .gfs_compute_numeric_stats(col, miss_codes)
+  }
+
+  # Early return when no factor vars have declared levels (numeric stats already done)
   if (nrow(fac_meta) == 0) {
+    .write_meta_json(existing, json_path)
+    message("metadata_add_level_stats: no factor variables with declared levels; ",
+            "numeric stats computed for ", nrow(num_meta), " variable(s).")
     return(invisible(.survey_meta_from_json(json_path, .read_meta_json(json_path))))
   }
 
@@ -2298,8 +2504,6 @@ metadata_add_level_stats <- function(meta_json, df) {
   )]
 
   # --- Persist n/pct to JSON -----------------------------------------------
-  .backup_meta_json(json_path, "level_stats")
-  existing  <- .read_meta_json(json_path)
   n_updated <- 0L
   data.table::setorder(meta_vals, var_name, position)
 
@@ -2315,22 +2519,6 @@ metadata_add_level_stats <- function(meta_json, df) {
         existing$variables[[vn]]$levels[[key]][["pct"]] <- as.integer(pct)
     }
     n_updated <- n_updated + 1L
-  }
-
-  # --- Also compute and persist numeric stats for numeric/double roles ------
-  num_roles <- c("integer", "integer_count", "integer_scale", "double")
-  num_meta  <- metadata[metadata$detected_role %in% num_roles &
-                        metadata$var_name %in% names(df), ]
-  for (i in seq_len(nrow(num_meta))) {
-    vn  <- num_meta$var_name[[i]]
-    col <- df[[vn]]
-    if (is.null(col)) next
-    # Gather missing codes from JSON levels (if any)
-    lvls <- existing$variables[[vn]]$levels
-    miss_codes <- if (!is.null(lvls) && length(lvls) > 0)
-      names(Filter(function(l) isTRUE(l$missing), lvls))
-    else character(0)
-    existing$variables[[vn]]$num_stats <- .gfs_compute_numeric_stats(col, miss_codes)
   }
 
   .write_meta_json(existing, json_path)
@@ -2588,32 +2776,85 @@ export_metadata_excel <- function(
 # 6. AI helpers — httr2 only, no reticulate
 # ============================================================
 
-#' Single synchronous call to Claude API
-#'
-#' @param prompt     User message string.
-#' @param model      Model ID. Default: Haiku 4.5 (fast, cheap).
-#'                   Use "claude-sonnet-4-6" for messy codebook parsing.
-#' @param api_key    ANTHROPIC_API_KEY env var by default.
-#' @param max_tokens Max response tokens.
-#' @param system     Optional system prompt string.
-#'
-#' @return Parsed JSON response list.
-ai_call_claude <- function(
-    prompt,
-    model      = "claude-haiku-4-5", # "claude-haiku-4-5-20251001"
-    api_key    = Sys.getenv("ANTHROPIC_API_KEY"),
-    max_tokens = 4096,
-    system     = NULL
-) {
-  if (api_key == "") stop("ANTHROPIC_API_KEY not set. ",
-                          "Run: Sys.setenv(ANTHROPIC_API_KEY = 'sk-...')")
+# DESIGN: Single source of truth for the default AI model. Sonnet 5 shares Opus 4.8's request
+# surface (adaptive thinking by default, effort parameter, no sampling params), unlike the legacy
+# Haiku 4.5 surface. Change here to switch the whole pipeline. See .is_reasoning_tier_model().
+.DEFAULT_AI_MODEL <- "claude-sonnet-5"
 
+# Headroom added to max_tokens for adaptive-thinking tokens on reasoning-tier models (thinking
+# shares the max_tokens budget). Only spent if the model actually thinks; the cap itself is free.
+.AI_THINKING_HEADROOM <- 8192L
+
+# Why this exists: Sonnet 5 / Opus 4.8 / 4.7 / 4.6 / Sonnet 4.6 share one request surface —
+# adaptive thinking, the effort parameter, and rejection of temperature/top_p/top_k. Haiku 4.5 and
+# older models 400 on effort and adaptive thinking, so those fields must be gated to this family.
+.is_reasoning_tier_model <- function(model) {
+  grepl("sonnet-5|opus-4-[678]|sonnet-4-6", model)
+}
+
+# Build the Anthropic request body (also used as each batch request's `params`). For reasoning-tier
+# models it enables adaptive thinking, sets effort, and reserves thinking headroom in max_tokens
+# (clamped to Sonnet 5's 128K output ceiling). Haiku/older models get the plain body unchanged.
+.build_message_body <- function(model, prompt, max_tokens, system = NULL, effort = "low") {
   body <- list(
     model      = model,
     max_tokens = max_tokens,
     messages   = list(list(role = "user", content = prompt))
   )
   if (!is.null(system)) body$system <- system
+  if (.is_reasoning_tier_model(model)) {
+    body$thinking      <- list(type = "adaptive")
+    body$output_config <- list(effort = effort)
+    body$max_tokens    <- min(128000L, max_tokens + .AI_THINKING_HEADROOM)
+  }
+  body
+}
+
+# Return the text of the first content block that carries text, skipping the leading (empty-text)
+# thinking block that adaptive-thinking models emit. Works with the plain {content:[{text:...}]}
+# shape too, so mocked responses and non-thinking models are unaffected.
+.ai_extract_text <- function(resp) {
+  for (b in resp$content) if (!is.null(b$text)) return(b$text)
+  NULL
+}
+
+# Warn (never silently) when a response was cut off by the output cap. Turns a truncated JSON — and,
+# for batch jobs, a paid-and-waited lost item — into a visible signal to raise the budget.
+.warn_if_truncated <- function(msg, id = NULL) {
+  if (identical(msg$stop_reason, "max_tokens")) {
+    warning("Claude response truncated (stop_reason = max_tokens)",
+            if (!is.null(id)) paste0(" for '", id, "'") else "",
+            " — output cut off; raise the token budget or reduce chunk size.",
+            call. = FALSE)
+  }
+  invisible(msg)
+}
+
+#' Single synchronous call to Claude API
+#'
+#' @param prompt     User message string.
+#' @param model      Model ID. Default: Sonnet 5 (`.DEFAULT_AI_MODEL`). Reasoning-tier models
+#'                   (Sonnet 5 / Opus 4.8 family) get adaptive thinking + effort automatically.
+#' @param api_key    ANTHROPIC_API_KEY env var by default.
+#' @param max_tokens Max response tokens (answer budget; thinking headroom is added automatically
+#'                   for reasoning-tier models).
+#' @param system     Optional system prompt (string, or list of cache_control content blocks).
+#' @param effort     Effort level for reasoning-tier models: "low" (default), "medium", "high",
+#'                   "xhigh", "max". Ignored by Haiku/older models.
+#'
+#' @return Parsed JSON response list.
+ai_call_claude <- function(
+    prompt,
+    model      = .DEFAULT_AI_MODEL,
+    api_key    = Sys.getenv("ANTHROPIC_API_KEY"),
+    max_tokens = 4096,
+    system     = NULL,
+    effort     = "low"
+) {
+  if (api_key == "") stop("ANTHROPIC_API_KEY not set. ",
+                          "Run: Sys.setenv(ANTHROPIC_API_KEY = 'sk-...')")
+
+  body <- .build_message_body(model, prompt, max_tokens, system, effort)
 
   # When system is a list (content blocks with cache_control), add the
   # prompt-caching beta header required by Anthropic.
@@ -2624,37 +2865,43 @@ ai_call_claude <- function(
   if (use_cache)
     headers[["anthropic-beta"]] <- "prompt-caching-2024-07-31"
 
-  do.call(httr2::req_headers, c(list(httr2::request("https://api.anthropic.com/v1/messages")),
+  resp <- do.call(httr2::req_headers, c(list(httr2::request("https://api.anthropic.com/v1/messages")),
                                  headers)) |>
     httr2::req_body_json(body) |>
+    httr2::req_timeout(seconds = 900) |>
     httr2::req_error(is_error = function(resp) FALSE) |>
     httr2::req_perform() |>
     httr2::resp_body_json()
+
+  .warn_if_truncated(resp)
+  resp
 }
 
 
 #' Submit a Message Batch job (50% cheaper, separate rate limits, async)
 #'
 #' @param requests  List of lists, each: list(custom_id = "...", prompt = "...")
-#' @param model     Model ID. Default: Haiku 4.5.
+#' @param model     Model ID. Default: Sonnet 5 (`.DEFAULT_AI_MODEL`).
 #' @param api_key   ANTHROPIC_API_KEY env var by default.
-#' @param max_tokens Max tokens per response.
-#' @param system    Optional system prompt string (forwarded to every request).
+#' @param max_tokens Max tokens per response (answer budget; thinking headroom added for
+#'                   reasoning-tier models).
+#' @param system    Optional system prompt (string, or list of cache_control blocks); forwarded
+#'                   to every request.
+#' @param effort    Effort level for reasoning-tier models (default "low"). See ai_call_claude().
 #'
 #' @return Parsed API response with $id = batch_id for ai_batch_retrieve().
 ai_batch_submit <- function(
     requests,
-    model      = "claude-haiku-4-5",
+    model      = .DEFAULT_AI_MODEL,
     api_key    = Sys.getenv("ANTHROPIC_API_KEY"),
     max_tokens = 4096,
-    system     = NULL
+    system     = NULL,
+    effort     = "low"
 ) {
   if (api_key == "") stop("ANTHROPIC_API_KEY not set.")
 
   batch_requests <- unname(purrr::map(requests, function(req) {
-    params <- list(model = model, max_tokens = max_tokens,
-                   messages = list(list(role = "user", content = req$prompt)))
-    if (!is.null(system)) params$system <- system
+    params <- .build_message_body(model, req$prompt, max_tokens, system, effort)
     list(custom_id = req$custom_id, params = params)
   }))
 
@@ -2730,7 +2977,9 @@ ai_batch_retrieve <- function(
   purrr::set_names(
     purrr::map(parsed, function(r) {
       if (r[["result"]][["type"]] == "succeeded") {
-        r[["result"]][["message"]][["content"]][[1]][["text"]]
+        msg <- r[["result"]][["message"]]
+        .warn_if_truncated(msg, id = r[["custom_id"]])
+        .ai_extract_text(msg)
       } else {
         type <- r[["result"]][["type"]] %||% "unknown"
         err  <- r[["result"]][["error"]]
@@ -2748,7 +2997,7 @@ ai_batch_retrieve <- function(
 # 7. ai_classify_roles()
 # ============================================================
 
-#' Classify ambiguous variables with Haiku, print copy-pasteable R vectors
+#' Classify ambiguous variables with the AI model, print copy-pasteable R vectors
 #'
 #' Only sends variables that genuinely need refinement:
 #'   - factor_nominal  (all: may be ordinal)
@@ -2795,11 +3044,11 @@ ai_batch_retrieve <- function(
 #'                         each role, to guide Haiku. Names must be role codes:
 #'                         F, O, B, S, C.
 #' @param api_key          ANTHROPIC_API_KEY env var by default.
-#' @param model            Default: Haiku 4.5.
-#' @param chunk_size       Number of unique label sets per API call. Default 400.
-#'                         Large chunks preserve cross-variable context and are
-#'                         safe: output is ~10 tokens/line, so 400 sets ≈ 4K
-#'                         output tokens — well within Haiku's 8K limit.
+#' @param model            Default: Sonnet 5 (`.DEFAULT_AI_MODEL`).
+#' @param chunk_size       Number of unique label sets per API call. Default 1000
+#'                         (raised for Sonnet 5's 1M context). Large chunks preserve
+#'                         cross-variable context; the output cap auto-scales with
+#'                         chunk_size (see max_tok) and stays under the 128K ceiling.
 #' @param use_batch        If TRUE, use the Anthropic batch API instead of
 #'                         synchronous calls. Default FALSE.
 #' @param dry_run          If TRUE, print the system/user prompts without calling
@@ -2812,11 +3061,11 @@ ai_batch_retrieve <- function(
 ai_classify_roles <- function(
     meta_json,
     ordinal_desc     = FALSE,
-    chunk_size       = 400L,
+    chunk_size       = 1000L,  # Sonnet 5 (1M context): 2.5x Haiku-era 400L
     use_batch        = FALSE,
     dry_run          = FALSE,
     api_key          = Sys.getenv("ANTHROPIC_API_KEY"),
-    model            = "claude-haiku-4-5",
+    model            = .DEFAULT_AI_MODEL,
     max_labels_sent  = 10L,
     log_raw_answer   = FALSE
 ) {
@@ -2997,8 +3246,8 @@ ai_classify_roles <- function(
     )
   })
 
-  # Max tokens: ~20 tokens per output line is ample (id + code + desc + miss)
-  max_tok <- max(256L, ceiling(nrow(unique_sets) / length(chunks)) * 20L)
+  # Max tokens: ~20 tokens/output line * 1.3 for Sonnet 5's fatter tokenizer (id + code + desc + miss)
+  max_tok <- max(512L, ceiling(nrow(unique_sets) / length(chunks)) * 26L)
 
   # --- Dry run: print prompts and exit without calling the API ---
   if (dry_run) {
@@ -3032,7 +3281,7 @@ ai_classify_roles <- function(
       resp <- ai_call_claude(p, model = model, api_key = api_key,
                              system = system_prompt_cached,
                              max_tokens = max_tok)
-      resp$content[[1]]$text
+      .ai_extract_text(resp)
     })
   } else {
     message("ai_classify_roles: batch mode (", nrow(unique_sets), " unique set(s))")
@@ -3276,7 +3525,7 @@ invert_ordinal_order <- function(meta_json) {
 # 8. ai_suggest_missing()
 # ============================================================
 
-#' Use Haiku to suggest missing value candidates from value labels
+#' Use the AI model to suggest missing value candidates from value labels
 #'
 #' Collects the LAST `max_vals` value labels from each non-identifier variable
 #' (missing codes almost always have the highest numeric codes, so they appear
@@ -3298,7 +3547,7 @@ invert_ordinal_order <- function(meta_json) {
 #' @param max_vals      Max value labels to keep per variable (last N, sorted).
 #'                      Default 10.
 #' @param api_key       ANTHROPIC_API_KEY env var by default.
-#' @param model         Default: Haiku 4.5.
+#' @param model         Default: Sonnet 5.
 #' @param max_tokens    Max response tokens. 512 is ample for a label list.
 #' @param debug         If TRUE, prints the raw Haiku response to console before
 #'                      parsing. Use when labels are being ignored unexpectedly.
@@ -3310,7 +3559,7 @@ ai_suggest_missing <- function(
     examples   = NULL,
     max_vals   = 10L,
     api_key    = Sys.getenv("ANTHROPIC_API_KEY"),
-    model      = "claude-haiku-4-5",
+    model      = .DEFAULT_AI_MODEL,
     max_tokens = 512L,
     debug      = FALSE
 ) {
@@ -3370,7 +3619,7 @@ ai_suggest_missing <- function(
 
   resp <- ai_call_claude(prompt, model = model, api_key = api_key,
                          max_tokens = max_tokens)
-  raw_text <- resp$content[[1]]$text
+  raw_text <- .ai_extract_text(resp)
 
   if (debug) {
     message("\n--- ai_suggest_missing DEBUG: raw Haiku response ---")
@@ -3592,7 +3841,7 @@ ai_suggest_missing <- function(
 # 9. ai_merge_levels()
 # ============================================================
 
-#' Use Haiku to semantically merge factor level groups
+#' Use the AI model to semantically merge factor level groups
 #'
 #' Sends ordinal (and optionally nominal) variables to Claude Haiku and asks it
 #' to decide which adjacent categories should be merged based on frequencies,
@@ -3629,7 +3878,7 @@ ai_suggest_missing <- function(
 #'   Default FALSE.
 #' @param dry_run      If TRUE, print prompts without calling the API.
 #' @param api_key      ANTHROPIC_API_KEY env var by default.
-#' @param model        Default: Haiku 4.5.
+#' @param model        Default: Sonnet 5.
 #'
 #' @return Invisibly returns \code{meta_json}.  In dry_run mode returns the
 #'         prompt list invisibly.
@@ -3640,12 +3889,12 @@ ai_merge_levels <- function(
     nominal                  = FALSE,
     optimal_levels           = 2:5,
     min_pct                  = 5L,
-    max_levels               = 250L,
+    max_levels               = 600L,  # Sonnet 5 (1M context): ~2.4x Haiku-era 250L
     max_levels_in_single_var = 30L,
     use_batch                = FALSE,
     dry_run                  = FALSE,
     api_key                  = Sys.getenv("ANTHROPIC_API_KEY"),
-    model                    = "claude-haiku-4-5"
+    model                    = .DEFAULT_AI_MODEL
 ) {
   json_path <- .resolve_json_path(meta_json)
   loaded    <- .load_meta(json_path)
@@ -3819,8 +4068,8 @@ ai_merge_levels <- function(
   )
 
   # Each level needs ~20 tokens in output (key + order integer in JSON).
-  # Add 20% headroom. Floor at 1024 to handle fixed overhead.
-  max_tok <- max(1024L, ceiling(max_levels * 20L * 1.5))
+  # 20% headroom * 1.3 for Sonnet 5's fatter tokenizer (~40/level). Floor at 1024 for overhead.
+  max_tok <- max(1024L, ceiling(max_levels * 40L))
 
   # Dry run
   if (dry_run) {
@@ -3854,7 +4103,7 @@ ai_merge_levels <- function(
       resp <- ai_call_claude(p, model = model, api_key = api_key,
                              system = system_prompt_cached,
                              max_tokens = max_tok)
-      resp$content[[1]]$text
+      .ai_extract_text(resp)
     })
   } else {
     message("ai_merge_levels: batch mode (", nrow(target), " var(s))")
@@ -3969,7 +4218,7 @@ ai_merge_levels <- function(
 # 10. ai_suggest_labels()
 # ============================================================
 
-#' Use Haiku to suggest concise French factor level labels
+#' Use the AI model to suggest concise French factor level labels
 #'
 #' Sends factor variables to Claude (as JSON) and asks it to shorten all factor
 #' level labels to <= 30 characters.
@@ -4010,29 +4259,28 @@ ai_merge_levels <- function(
 #' @param vars         Optional character vector of var_name to restrict to.
 #' @param meta_json    Path to \code{*.survey_meta.json} (required).
 #' @param max_levels   Maximum total non-null level entries per API request.
-#'   Default 150. Variables whose individual entry count exceeds max_levels are
-#'   skipped with a warning.
-#' @param chunk_size   Deprecated. Use max_levels instead.  If supplied, sets
-#'   max_levels = chunk_size * 5L with a warning.
+#'   Default 400 (raised for Sonnet 5's 1M context). Variables whose individual
+#'   entry count exceeds max_levels are skipped with a warning. The output cap
+#'   auto-scales with max_levels, staying under the 128K ceiling.
 #' @param use_batch    Logical. Use the Anthropic Message Batch API (cheaper,
 #'                     async).  Default FALSE.
 #' @param dry_run      If TRUE, print the prompt(s) that would be sent and
 #'                     return invisibly without calling the API.  Default FALSE.
 #' @param api_key      ANTHROPIC_API_KEY env var by default.
-#' @param model        Default: Haiku 4.5.
+#' @param model        Default: Sonnet 5.
 #'
 #' @return Invisibly returns \code{meta_json}.  In dry_run mode:
 #'         invisibly returns a list of the prompt strings.
 ai_suggest_labels <- function(
     meta_json,
     vars          = NULL,
-    max_levels               = 150L,
+    max_levels               = 400L,   # Sonnet 5 (1M context): ~2.7x Haiku-era 150L
     max_levels_in_single_var = 30L,
     replace_existing_new_labels = FALSE,
     use_batch     = FALSE,
     dry_run       = FALSE,
     api_key       = Sys.getenv("ANTHROPIC_API_KEY"),
-    model         = "claude-haiku-4-5"
+    model         = .DEFAULT_AI_MODEL
 ) {
   json_path <- .resolve_json_path(meta_json)
   loaded    <- .load_meta(json_path)
@@ -4313,22 +4561,32 @@ ai_suggest_labels <- function(
     return(invisible(prompts))
   }
 
+  # Auto-scale the output cap to the chunk budget (Sonnet 5's fatter tokenizer + headroom);
+  # never a fixed number a large/verbose chunk could silently outgrow. The cap is free (billed on
+  # actual output) and clamped below the 128K ceiling.
+  max_tok <- min(120000L, max(8000L, as.integer(max_levels) * 130L))
+
+  # Cache the static system prompt so multi-chunk runs on large surveys don't re-bill it.
+  system_prompt_cached <- list(
+    list(type = "text", text = system_prompt, cache_control = list(type = "ephemeral"))
+  )
+
   # ---------- API calls -----------------------------------------------------
   if (!use_batch) {
     message("ai_suggest_labels: synchronous (", nrow(target), " vars, ",
             length(prompts), " chunk(s))")
     results_text <- purrr::imap(prompts, function(p, i) {
       message("  Chunk ", i, "/", length(prompts))
-      resp <- ai_call_claude(p, model = model, api_key = api_key,
-                             system = system_prompt)
-      resp$content[[1]]$text
+      resp <- ai_call_claude(p, model = model, api_key = api_key, max_tokens = max_tok,
+                             system = system_prompt_cached)
+      .ai_extract_text(resp)
     })
   } else {
     message("ai_suggest_labels: batch mode (", nrow(target), " vars)")
     requests <- purrr::imap(prompts, ~ list(custom_id = paste0("labels_", .y),
                                             prompt     = .x))
-    batch    <- ai_batch_submit(requests, model = model, api_key = api_key,
-                                system = system_prompt)
+    batch    <- ai_batch_submit(requests, model = model, api_key = api_key, max_tokens = max_tok,
+                                system = system_prompt_cached)
     message("Batch submitted. ID: ", batch$id)
     raw      <- ai_batch_retrieve(batch$id, api_key = api_key)
     results_text <- purrr::map(purrr::set_names(names(raw)), ~ raw[[.x]])
@@ -4491,7 +4749,7 @@ ai_suggest_labels <- function(
         val <- parsed[[vname]]
         if (is.list(val) && !is.null(names(val))) {
           # New keyed format: {"value_code": "new_label", ...}
-          raw_map[[vname]] <- purrr::map_chr(val, as.character)
+          raw_map[[vname]] <- as.list(purrr::map_chr(val, as.character))
         } else if (is.character(val) ||
                    (is.list(val) && all(purrr::map_lgl(val, is.character)))) {
           # Legacy positional array format
@@ -4694,7 +4952,7 @@ ai_suggest_labels <- function(
 # 11. ai_suggest_varnames()
 # ============================================================
 
-#' Use Haiku to suggest short UPPER_SNAKE_CASE R variable names
+#' Use the AI model to suggest short UPPER_SNAKE_CASE R variable names
 #'
 #' Calls the Anthropic API (synchronous or batch) to propose new names for all
 #' variables in `metadata`. Results are written directly to meta_json.
@@ -4702,27 +4960,29 @@ ai_suggest_labels <- function(
 #' @param metadata       Varmod tibble from `extract_survey_metadata()`.
 #' @param vars           Optional character vector of `var_name` to restrict.
 #' @param meta_json      Path to the unified `*.survey_meta.json` file (required).
-#' @param chunk_size     Variables per API request. Default 300L (large enough
-#'                       to handle most datasets in one call; dedup handles
-#'                       cross-chunk name collisions automatically).
+#' @param chunk_size     Variables per API request. Default 800L (raised for
+#'                       Sonnet 5's 1M context; larger chunks let the model see
+#'                       more siblings and self-avoid name collisions in one call).
+#' @param max_tokens     Output cap. Default NULL = auto-scale from chunk_size
+#'                       (clamped under the 128K ceiling); pass an integer to override.
 #' @param max_new_labels Max number of non-NULL new labels sent per variable to
 #'                       help the model understand the content. Default 4L.
 #' @param use_batch      If TRUE, use the Anthropic batch API. Default FALSE.
 #' @param dry_run        If TRUE, print prompts without calling the API.
 #' @param api_key        Anthropic API key. Default: `ANTHROPIC_API_KEY` env var.
-#' @param model          Model to use. Default `"claude-haiku-4-5"`.
+#' @param model          Model to use. Default: Sonnet 5 (`.DEFAULT_AI_MODEL`).
 #'
 #' @return Invisibly: `meta_json` (or the list of prompts in dry_run mode).
 ai_suggest_varnames <- function(
     meta_json,
     vars           = NULL,
-    chunk_size     = 300L,
+    chunk_size     = 800L,   # Sonnet 5 (1M context): ~2.7x Haiku-era 300L
     max_new_labels = 4L,
-    max_tokens     = 20000L,
+    max_tokens     = NULL,   # NULL -> auto-scale from chunk_size (see below)
     use_batch      = FALSE,
     dry_run        = FALSE,
     api_key        = Sys.getenv("ANTHROPIC_API_KEY"),
-    model          = "claude-haiku-4-5"
+    model          = .DEFAULT_AI_MODEL
 ) {
   json_path <- .resolve_json_path(meta_json)
   loaded    <- .load_meta(json_path)
@@ -4820,6 +5080,17 @@ ai_suggest_varnames <- function(
     return(invisible(prompts))
   }
 
+  # Auto-scale the output cap from the chunk size (unless the caller set max_tokens explicitly);
+  # Sonnet 5's fatter tokenizer + headroom, clamped below the 128K ceiling. The cap is free.
+  if (is.null(max_tokens)) {
+    max_tokens <- min(120000L, max(8000L, as.integer(chunk_size) * 90L))
+  }
+
+  # Cache the static system prompt so multi-chunk runs on large surveys don't re-bill it.
+  system_prompt_cached <- list(
+    list(type = "text", text = system_prompt, cache_control = list(type = "ephemeral"))
+  )
+
   # ---------- API calls -----------------------------------------------------
   cache_dir  <- file.path(tempdir(), "varnames_cache")
   dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
@@ -4830,8 +5101,8 @@ ai_suggest_varnames <- function(
     results_text <- purrr::imap(prompts, function(p, i) {
       message("  Chunk ", i, "/", length(prompts))
       resp <- ai_call_claude(p, model = model, api_key = api_key,
-                             system = system_prompt, max_tokens = max_tokens)
-      txt <- resp$content[[1]]$text
+                             system = system_prompt_cached, max_tokens = max_tokens)
+      txt <- .ai_extract_text(resp)
       # Cache raw response for debugging
       cache_file <- file.path(cache_dir, paste0("chunk_", i, "_raw.txt"))
       writeLines(enc2utf8(if (is.null(txt)) "" else txt), cache_file, useBytes = TRUE)
@@ -4843,7 +5114,7 @@ ai_suggest_varnames <- function(
     requests <- purrr::imap(prompts, ~ list(custom_id = paste0("varnames_", .y),
                                             prompt     = .x))
     batch <- ai_batch_submit(requests, model = model, api_key = api_key,
-                             system = system_prompt, max_tokens = max_tokens)
+                             system = system_prompt_cached, max_tokens = max_tokens)
     message("Batch submitted. ID: ", batch$id)
     raw   <- ai_batch_retrieve(batch$id, api_key = api_key)
     # Cache raw batch responses

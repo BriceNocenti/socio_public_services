@@ -11,7 +11,7 @@
 # #    in R Project with renv:: : possibly need to turn off firewall
 # install.packages(c(
 #   "tidyverse", # "dplyr", "stringr", "forcats", "ggplot2", "tibble", "tidyr", "rlang", "purrr", "vctrs",
-#   "knitr", "rmarkdown", "kableExtra", "devtools", "ragg",
+#   "knitr", "rmarkdown", "kableExtra", "devtools", "ragg", "here", "bench", "btw",
 #   "tabxplor", "FactoMineR", "ggfacto", "openxlsx",
 #   "tidymodels", "nnet", "mice", #, "srvyr",
 #   "TraMineR", "TraMineRextras", "WeightedCluster", "seqhandbook", "fuzzyjoin",
@@ -1044,6 +1044,7 @@ lv <- function(data, ..., lines = TRUE) {
 
 
 
+
 # #Furrr to use map functions with multicore (future_map) :
 # if (future::availableCores() > 1) { nb_cores <- future::availableCores() - 1 } else { nb_cores <- 1 }
 # future::plan(multisession, workers = nb_cores) # multiprocess, because multicore don't work on Windows ?
@@ -1393,6 +1394,27 @@ var_label_to_first_level <- function(
     )
   ) |> 
     labelled::`var_label<-`(label)
+}
+
+# json functions ----
+
+#' Convert factor levels of selected variables to JSON
+#'
+#' @param df A data frame containing factor variables.
+#' @param ... <[`tidy-select`][dplyr::dplyr_tidy_select]> One or more unquoted
+#'   variable selection expressions passed to [dplyr::select()].
+#' @return A JSON string (character) with variable names as keys and their
+#'   levels as arrays. Non-factor variables in the selection are silently ignored.
+#' @examples
+#' lvs_to_json(forcats::gss_cat, marital, race)
+#' lvs_to_json(forcats::gss_cat, starts_with("r"))
+#' lvs_to_json(forcats::gss_cat, where(is.factor))
+lvs_to_json <- function(df, ...) {
+    df |>
+    dplyr::select(...) |>
+    dplyr::select(where(is.factor)) |>  # silently drop non-factors
+    purrr::map(levels) |>
+    jsonlite::toJSON(pretty = TRUE, auto_unbox = FALSE)
 }
 
 
@@ -2942,7 +2964,7 @@ multicut <- function(
 #   }
 #   cat("\n")
 #   
-#   # FIX #2: sep_zero + manual cutpoints
+#   #  #2: sep_zero + manual cutpoints
 #   cat("FIX #2: sep_zero=TRUE with manual cutpoints\n")
 #   cat(strrep("-", 70), "\n")
 #   

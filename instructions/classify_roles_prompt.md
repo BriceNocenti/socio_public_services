@@ -629,4 +629,3 @@ Output: {"id":"IMPLICATION","role":"unclear"}
 Reasoning: First three labels suggest an ordinal scale, but "Variable" could be a genuine fourth category (not just catch-all) — ambiguous.
 
 Only classify as "unclear" when the variable could reasonably be either factor_nominal or factor_ordinal and you cannot determine which from the labels ; or when the variable could reasonably be either integer_count or integer_scale.
-

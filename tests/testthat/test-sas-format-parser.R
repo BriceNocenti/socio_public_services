@@ -300,3 +300,53 @@ test_that("P9b: apply_sas_labels does NOT overwrite existing R variable label", 
   result <- apply_sas_labels(df, sas_parsed)
   expect_equal(attr(result$MYVAR, "label"), "Existing R label")
 })
+
+
+# ===========================================================================
+# P10: apply_sas_labels — value labels do NOT strip existing variable label
+#      (character column, reproduces parquet Arrow metadata use case)
+# ===========================================================================
+test_that("P10: apply_sas_labels preserves existing variable label when adding value labels (character)", {
+  df <- tibble::tibble(
+    METRODOM = structure(
+      c("1", "2", "1"),
+      label = "R\u00e9gion du logement (M\u00e9tropole vs DOM)"
+    )
+  )
+  sas_parsed <- list(
+    value_labels = list(
+      METRODOM = c("France m\u00e9tropolitaine" = "1",
+                   "D\u00e9partements d'outre-mer" = "2")
+    ),
+    var_labels = character(0)
+  )
+
+  result <- apply_sas_labels(df, sas_parsed)
+  expect_true(inherits(result$METRODOM, "haven_labelled"))
+  expect_equal(attr(result$METRODOM, "label"),
+               "R\u00e9gion du logement (M\u00e9tropole vs DOM)")
+})
+
+
+# ===========================================================================
+# P11: apply_sas_labels — value labels do NOT strip existing variable label
+#      (numeric column)
+# ===========================================================================
+test_that("P11: apply_sas_labels preserves existing variable label when adding value labels (numeric)", {
+  df <- tibble::tibble(
+    AGED = structure(
+      c(20, 30, 50),
+      label = "\u00c2ge en tranche d\u00e9cennale"
+    )
+  )
+  sas_parsed <- list(
+    value_labels = list(
+      AGED = c("20-29 ans" = 20, "30-39 ans" = 30, "50-59 ans" = 50)
+    ),
+    var_labels = character(0)
+  )
+
+  result <- apply_sas_labels(df, sas_parsed)
+  expect_true(inherits(result$AGED, "haven_labelled"))
+  expect_equal(attr(result$AGED, "label"), "\u00c2ge en tranche d\u00e9cennale")
+})

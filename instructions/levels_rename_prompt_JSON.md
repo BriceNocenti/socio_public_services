@@ -98,7 +98,7 @@ Les clés de `"levels"` sont les **codes de valeur** (codes Stata : `"1"`, `"2"`
 - Abréviations admises quand compréhensibles : `CAP BEP`, `Bac pro`, `Bac+2`, `Licence`, `Bac+5`
 
 ### Variables binaires (Oui/Non, QCM, ...)
-- Le niveau positif ("Oui" ou équivalent) est toujours envoyé **en premier**.
+- Le niveau positif ("Oui" ou équivalent) est supposé être toujours envoyé **en premier**, mais attention aux possibles inversions.
 - Remplacer le niveau positif par un syntagme court décrivant la pratique/catégorie, tiré de `desc`. Enlever les articles, garder le noyau → `"Un parent"` → `"Parent"`. Si le contexte est ambigu, ajouter un préfixe court : `"Sévices: père"`, `"Licencié: orientation"`.
 - Remplacer le niveau négatif ("Non" ou équivalent) par une expression courte commençant par `"Pas"` (ex: `"Pas couture"`). Si `"Pas X"` serait trop générique pour être compris sans lire `desc`, utiliser un terme plus spécifique tiré de `desc` : `"Pas proche alcoolique"`, `"Pas père"`, `"Jamais foyer"`.
 - Les deux niveaux doivent être interprétables sans lire `desc`.
@@ -207,7 +207,7 @@ Trois variables d'une même batterie partagent la même échelle Non/Parfois/Sou
 
 ### Binaire – variables sœurs (même Oui/Non, sujets différents)
 
-Quatre variables d'une batterie partagent les mêmes labels "Oui" / "Non". Les deux niveaux doivent porter un contexte spécifique pour chaque variable.
+Les variables d'une même batterie partagent les mêmes labels "Oui" / "Non". Pour chaque variable, les nouveaux noms de catégories doivent informer sur le contexte et permettre de les distinguer immédiatemment.
 
 **Entrée :**
 ```json
@@ -216,6 +216,24 @@ Quatre variables d'une batterie partagent les mêmes labels "Oui" / "Non". Les d
 **Sortie :**
 ```json
 {"EMP12C_01": {"01": "Licencié: orientation sexuelle", "00": "Pas orientation sexuelle"}, "EMP12C_02": {"01": "Licencié: religion", "00": "Pas religion"}, "EA10A_00": {"01": "Enfance: proche alcoolique", "00": "Pas proche alcoolique"}, "EA10B_02": {"01": "Enfance: frères/sœurs drogue", "00": "Pas drogue"}}
+```
+
+---
+
+### Binaire – attention aux doubles négations
+
+Quand la question est dans une batterie à réponses multiples, et que `desc` correspond à une réponse `Non`, la signification des levels `Oui` et `Non` peut être inversée : "Oui, la personne a donné une réponse 'Non'".
+
+**Entrée :**
+```json
+[{"var": "EA10D_00", "type": "binary",
+  "desc": "Au cours de votre enfance et adolescence, vous-même ou un de vos proches avez-vous connu les situations suivantes ? d) Sévices, coups répétés 0. Non",
+  "levels": {"01": "Oui", "00": "Non"}}]
+```
+
+**Sortie :**
+```json
+{"EA10D_00": {"01": "Sévices: ni vous ni proche", "00": "Sévices vous ou proche"}}
 ```
 
 ---

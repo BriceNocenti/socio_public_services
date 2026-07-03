@@ -610,6 +610,35 @@ test_that("H6: metadata_add_level_stats never produces n=0 for any key when join
   expect_false(isTRUE(q$levels[["2"]]$missing))
 })
 
+test_that("H7: metadata_add_level_stats excludes config missing_num from numeric stats", {
+  # Dataset: a labelled factor with sentinel code 99 actually observed in data
+  # (so config$missing_num gets populated with 99), plus a plain numeric SCORE
+  # column also containing 99 — which must be excluded from the computed stats.
+  path <- tmp_json()
+  on.exit(unlink(path))
+  fac_col <- make_labelled_col(
+    c(1, 2, 1, 2, 99),                            # 99 is observed in the data
+    c("Oui" = 1, "Non" = 2, "NSP" = 99)
+  )
+  labelled::var_label(fac_col) <- "Question binaire"
+  df_h7 <- tibble::tibble(Q1 = fac_col, SCORE = c(10L, 20L, 30L, 99L, 20L))
+  suppressMessages(
+    extract_survey_metadata(df_h7, path, missing_num = c(99L), missing_chr = character(0))
+  )
+  # Verify sentinel was stored in config
+  cfg <- .read_meta_json(path)$config
+  expect_true(99 %in% unlist(cfg$missing_num), label = "H7: 99 must be in config$missing_num")
+
+  suppressMessages(metadata_add_level_stats(path, df_h7))
+  raw <- .read_meta_json(path)
+  st  <- raw$variables$SCORE$num_stats
+  expect_false(is.null(st), label = "H7: SCORE must have num_stats")
+  # 99 is in config$missing_num → must be excluded; valid values are 10, 20, 30, 20
+  expect_equal(st$max,  30,  label = "H7: max must exclude sentinel 99")
+  expect_equal(st$min,  10,  label = "H7: min must be 10")
+  expect_equal(st$mean, 20,  label = "H7: mean must be 20 (mean of 10+20+30+20 / 4)")
+})
+
 # ---------------------------------------------------------------------------
 # I. Empty string NA conversion in import_survey()
 # ---------------------------------------------------------------------------

@@ -138,6 +138,15 @@ test_that("E4: Emploi dummy JSON roundtrip preserves SAS labels", {
   # HCONT should exist but have no levels (double)
   expect_true("HCONT" %in% names(vars))
   expect_equal(vars[["HCONT"]]$role, "double")
+
+  # Variable labels from the dummy (simulating parquet Arrow metadata) must
+  # survive SAS value-label application and appear in the JSON
+  expect_equal(vars[["METRODOM"]]$var_label,
+               "R\u00e9gion du logement de r\u00e9sidence en 2 modalit\u00e9s (M\u00e9tropole vs DOM)")
+  expect_equal(vars[["AGED"]]$var_label,
+               "Age en tranche d\u00e9cennale")
+  expect_equal(vars[["PCS1"]]$var_label,
+               "Cat\u00e9gorie socio-professionnelle (PCS) de l'emploi principal - Niveau 1")
 })
 
 
