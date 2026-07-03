@@ -60,3 +60,48 @@ test_that("MC8: .warn_if_truncated warns only on stop_reason == max_tokens", {
 test_that("MC9: default model is Sonnet 5", {
   expect_identical(.DEFAULT_AI_MODEL, "claude-sonnet-5")
 })
+
+# --- Robust JSON recovery (labels/merge) ------------------------------------
+
+test_that("MC10: .parse_var_object_chunk parses well-formed output without recovery", {
+  res <- .parse_var_object_chunk('{"V1": {"1": "Oui", "0": "Non"}, "V2": {"1": "A"}}')
+  expect_false(res$recovered)
+  expect_setequal(names(res$map), c("V1", "V2"))
+  expect_identical(res$map$V1$`1`, "Oui")
+})
+
+test_that("MC11: .parse_var_object_chunk recovers from a premature outer brace", {
+  # The real failure: a stray '}' closes the object early, then more vars follow.
+  txt <- '{"V1": {"1": "Oui"}}, "DECL": {"1": "A"}, "FAM_FOOT": {"1": "B"}}'
+  res <- .parse_var_object_chunk(txt)
+  expect_true(res$recovered)
+  expect_setequal(names(res$map), c("V1", "DECL", "FAM_FOOT"))
+  expect_identical(res$map$DECL$`1`, "A")
+})
+
+test_that("MC12: .parse_var_object_chunk recovers from two concatenated objects", {
+  res <- .parse_var_object_chunk('{"V1": {"1": "Oui"}} {"V2": {"1": "A"}}')
+  expect_true(res$recovered)
+  expect_setequal(names(res$map), c("V1", "V2"))
+})
+
+test_that("MC13: recovery ignores braces inside string labels", {
+  # Malformed wrapper forces Strategy 2; V's label contains a '}'.
+  res <- .parse_var_object_chunk('{"V": {"1": "a}b"}}, "W": {"1": "x"}}')
+  expect_true(res$recovered)
+  expect_identical(res$map$V$`1`, "a}b")
+  expect_identical(res$map$W$`1`, "x")
+})
+
+test_that("MC14: .extract_var_objects skips inner level-code keys", {
+  entries <- .extract_var_objects('{"FAM_FOOT": {"1": "Oui", "0": "Non"}}')
+  expect_identical(names(entries), "FAM_FOOT")
+})
+
+test_that("MC15: .convert_label_val handles keyed objects and positional arrays", {
+  keyed <- .convert_label_val(list("1" = "Oui", "0" = "Non"))
+  expect_identical(keyed[["1"]], "Oui")
+  arr <- .convert_label_val(list("A", "B"))
+  expect_identical(unname(arr), c("A", "B"))
+  expect_null(.convert_label_val(42L))
+})

@@ -1088,3 +1088,33 @@ test_that("AC2: edge dummy SINGLE_VAL (nd:1) auto-classified as factor_unique_va
   expect_equal(res$role, "factor_unique_value",
                info = paste("SINGLE_VAL role:", res$role))
 })
+
+
+test_that("J-bin: AI-proposed factor_binary on a 3-level var is kept nominal", {
+  withr::local_dir(.test_proj_root)
+  path <- tmp_json()
+  vars <- list(
+    ENVIE = list(
+      var_label = "Envie de pratiquer",
+      role      = "factor_nominal",
+      levels    = list(
+        "0" = list(label = "Non"),
+        "1" = list(label = "Oui"),
+        "7" = list(label = "Non concerné(e)"),        # 3rd real non-missing level
+        "9" = list(missing = TRUE, label = "Non-réponse")
+      )
+    )
+  )
+  .write_meta_json(make_meta_list(vars), path)
+
+  .orig <- get("ai_call_claude", envir = globalenv())
+  assign("ai_call_claude",
+    mock_ai('{"id":"ENVIE","role":"factor_binary","desc":"unknown"}'),
+    envir = globalenv())
+  on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
+
+  suppressMessages(ai_classify_roles(path))
+
+  # 3 non-missing levels → the structural guard keeps it nominal, never binary.
+  expect_equal(.read_meta_json(path)$variables$ENVIE$role, "factor_nominal")
+})

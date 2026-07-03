@@ -18,6 +18,7 @@
 #   factor_binary — exactly 2 non-missing levels
 #   factor_ordinal — ≥3 ordered levels — set by AI/user
 #   factor_nominal — ≥3 unordered levels (default for labelled ≥3)
+#   other          - autre"
 #
 # LEVEL ORDER FIELD (levels[code].order):
 #   factor_binary/ordinal/nominal: integer ≥ 1 = desired display position
@@ -1124,14 +1125,14 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
 
   # ---- config section -------------------------------------------------------
   cfg        <- meta_list$config
-  cfg_fields <- c("dataset", "missing_num", "missing_chr", "yes_labels", "no_labels")
+  cfg_fields <- c("dataset", "n_individuals", "missing_num", "missing_chr", "yes_labels", "no_labels")
   cfg_lines  <- c('  "config": {')
   cfg_keys   <- intersect(cfg_fields, names(cfg))   # only present keys, in order
   for (i in seq_along(cfg_keys)) {
     k   <- cfg_keys[[i]]
     val <- cfg[[k]]
-    # dataset is a scalar string; missing_num/chr/yes_labels/no_labels are arrays
-    v_str <- if (k == "dataset" || (length(val) == 1 && is.character(val) && k == "dataset")) {
+    # dataset (string) and n_individuals (number) are scalars; the rest are arrays
+    v_str <- if (k %in% c("dataset", "n_individuals")) {
       scalar_str(val[[1]])
     } else if (length(val) > 1 || k %in% c("missing_num", "missing_chr", "yes_labels", "no_labels")) {
       arr_str(unlist(val))
@@ -1174,6 +1175,27 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
       s_lines <- c(s_lines,
         paste0('      ', rpad('"n_distinct_data"', w_field), ': ',
                as.character(as.integer(ndd_val)), ','))
+    }
+    # Optional: na_n / na_pct — missing count/percent AFTER formatting, stored
+    # uniformly at the variable level for ALL var types (factor/numeric/text).
+    na_n_val <- entry[["na_n"]]
+    if (!is.null(na_n_val) && length(na_n_val) == 1L && !is.na(na_n_val)) {
+      s_lines <- c(s_lines,
+        paste0('      ', rpad('"na_n"', w_field), ': ',
+               as.character(as.integer(na_n_val)), ','))
+    }
+    na_pct_val <- entry[["na_pct"]]
+    if (!is.null(na_pct_val) && length(na_pct_val) == 1L && !is.na(na_pct_val)) {
+      s_lines <- c(s_lines,
+        paste0('      ', rpad('"na_pct"', w_field), ': ',
+               scalar_str(round(as.numeric(na_pct_val), 1)), ','))
+    }
+    # Optional: examples — a few distinct raw values (text/other variables)
+    ex_val <- entry[["examples"]]
+    if (!is.null(ex_val) && length(ex_val) > 0) {
+      s_lines <- c(s_lines,
+        paste0('      ', rpad('"examples"', w_field), ': ',
+               arr_str(as.character(ex_val)), ','))
     }
 
     # -- levels sub-block ------------------------------------------------------
@@ -1298,6 +1320,7 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
     ' (nom dans le fichier de donn\u00e9es final).",\n',
     '    "fields": {\n',
     '      "config.dataset"                  : "Nom du fichier de donn\u00e9es source",\n',
+    '      "config.n_individuals"            : "Nombre total de lignes (individus) du jeu de donn\u00e9es \u2014 sert au calcul du taux de valeurs manquantes",\n',
     '      "config.missing_num"              : "Codes num\u00e9riques trait\u00e9s comme valeurs manquantes ou non-r\u00e9ponses (exclus de l\'analyse)",\n',
     '      "config.missing_chr"              : "Libell\u00e9s textuels trait\u00e9s comme valeurs manquantes ou non-r\u00e9ponses",\n',
     '      "config.yes_labels"               : "Libell\u00e9s qui d\u00e9signent la modalit\u00e9 positive des variables binaires (ex : Oui, Choisi)",\n',
@@ -1311,7 +1334,11 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
     '      "variables.VAR.levels.CODE.label"      : "Libell\u00e9 original de cette modalit\u00e9 de r\u00e9ponse",\n',
     '      "variables.VAR.levels.CODE.new_label"  : "Libell\u00e9 court pour l\'affichage dans les tableaux (sugg\u00e9r\u00e9 par l\'IA, modifiable)",\n',
     '      "variables.VAR.levels.CODE.n"          : "Nombre de r\u00e9pondant\u00b7es ayant choisi cette modalit\u00e9",\n',
-    '      "variables.VAR.levels.CODE.pct"        : "Pourcentage de r\u00e9pondant\u00b7es ayant choisi cette modalit\u00e9 (hors valeurs manquantes)"\n',
+    '      "variables.VAR.levels.CODE.pct"        : "Pourcentage de r\u00e9pondant\u00b7es ayant choisi cette modalit\u00e9 (hors valeurs manquantes)",\n',
+    '      "variables.VAR.na_n"                   : "Nombre de valeurs manquantes (NA + codes/modalit\u00e9s manquant\u00b7es) apr\u00e8s formatage \u2014 toutes variables",\n',
+    '      "variables.VAR.na_pct"                 : "Pourcentage de valeurs manquantes (sur le nombre total d\'individus)",\n',
+    '      "variables.VAR.examples"               : "Quelques valeurs brutes distinctes (variables textuelles), pour illustration dans le codebook",\n',
+    '      "variables.VAR.num_stats"             : "Statistiques r\u00e9sum\u00e9es (variables num\u00e9riques) : min, max, mean, sd, q1, median, q3"\n',
     '    }\n',
     '  }'
   )
@@ -2283,6 +2310,7 @@ extract_survey_metadata <- function(
 
   .cfg_new <- if (.meta_json_existed) .meta_json_data$config else list()
   if (!is.null(attr(df, "path"))) .cfg_new$dataset <- basename(attr(df, "path"))
+  .cfg_new$n_individuals <- nrow(df)
   .cfg_new$missing_num <- as.list(.missing_num_used)
   .cfg_new$missing_chr <- as.list(.missing_chr_used)
   if (!is.null(.yes_labels_used)) .cfg_new$yes_labels <- as.list(.yes_labels_used)
@@ -2396,26 +2424,38 @@ extract_survey_metadata <- function(
 # 2b. metadata_add_level_stats()
 # ============================================================
 
-#' Add per-level count and frequency columns to metadata
+#' Add per-level counts/frequencies and numeric summary stats to the JSON
 #'
-#' Computes, for each factor variable, the count and non-missing frequency
-#' of each level.  Call this AFTER extract_survey_metadata() has settled on
-#' correct role assignments and BEFORE ai_suggest_labels().
+#' Writes, per factor level, `n` (count) and `pct` (non-missing frequency, 0
+#' decimals; missing levels excluded from the denominator), and per numeric
+#' variable a `num_stats` block. Also refreshes `config.n_individuals` and,
+#' uniformly for every variable, top-level `na_n`/`na_pct` (count/percent of
+#' individuals that end up NA after formatting). For text/"other" variables it
+#' also stores a few distinct `examples` values (used by `generate_codebook()`
+#' so it no longer needs the `df`).
+#' Call this AFTER `ai_classify_roles()` (so roles are settled) and BEFORE
+#' `ai_suggest_labels()`.
 #'
-#' Two list-columns are added (or replaced if they already exist):
-#'   - `level_counts`  : integer vector, one element per label (including "NULL")
-#'   - `level_freqs`   : numeric vector, percent 0-100 rounded to 0 decimals.
-#'                       Missing values (NULL-coded rows) are excluded from the
-#'                       denominator, so the non-NULL entries sum to 100.
+#' When `add_observed_levels = TRUE` (default), for **factor** variables it adds
+#' value codes that occur in `df` but are absent from the JSON value labels
+#' (e.g. a level that was missing from the SAS format script). These are written
+#' with an empty `label` (flagged for you to review/fill or mark missing) and are
+#' counted in `n`/`pct` as ordinary non-missing levels. They are done here (not
+#' at extract time) so numeric variables mis-detected as factors before role
+#' classification do not accumulate thousands of spurious levels. Variables with
+#' more than `max_new_levels` such codes are reported but not added (likely a
+#' nomenclature — use `apply_nomenclatures()` or raise the threshold).
 #'
-#' Non-factor roles get empty integer(0) / numeric(0) vectors.
-#' Uses data.table for fast tabulation across all factor columns at once.
+#' @param meta_json           Path to the JSON (or a `survey_meta` object).
+#' @param df                  The original survey tibble (from `import_survey()`).
+#' @param add_observed_levels Add df-observed factor levels absent from the JSON
+#'                            value labels (empty `label`). Default `TRUE`.
+#' @param max_new_levels      Per-variable cap on such additions. Default `50`.
 #'
-#' @param metadata  Varmod tibble from extract_survey_metadata().
-#' @param df        The original survey tibble (from import_survey()).
-#'
-#' @return metadata with two new list-columns: level_counts, level_freqs.
-metadata_add_level_stats <- function(meta_json, df) {
+#' @return `invisible(survey_meta)`.
+metadata_add_level_stats <- function(meta_json, df,
+                                     add_observed_levels = TRUE,
+                                     max_new_levels      = 50L) {
   factor_roles <- c("factor_binary", "factor_nominal", "factor_ordinal")
 
   json_path <- .resolve_json_path(meta_json)
@@ -2432,6 +2472,10 @@ metadata_add_level_stats <- function(meta_json, df) {
   .backup_meta_json(json_path, "level_stats")
   existing <- .read_meta_json(json_path)
 
+  # Total row count — required by generate_codebook() for missing-value rates.
+  # Set/refresh here so a plain (AI-free) JSON also carries it.
+  existing$config$n_individuals <- nrow(df)
+
   # --- Compute and persist numeric stats (always runs, independent of factors)
   num_roles <- c("integer", "integer_count", "integer_scale", "double")
   num_meta  <- metadata[metadata$detected_role %in% num_roles &
@@ -2447,7 +2491,32 @@ metadata_add_level_stats <- function(meta_json, df) {
       names(Filter(function(l) isTRUE(l$missing), lvls))
     else character(0)
     miss_codes <- unique(c(level_miss_codes, config_miss_num))
-    existing$variables[[vn]]$num_stats <- .gfs_compute_numeric_stats(col, miss_codes)
+    st <- .gfs_compute_numeric_stats(col, miss_codes)
+    existing$variables[[vn]]$num_stats <- st
+    # Top-level NA (count + pct) — uniform storage across all variable types.
+    na_n <- if (!is.null(st)) as.integer(st$na_n) else length(col)
+    existing$variables[[vn]]$na_n   <- na_n
+    existing$variables[[vn]]$na_pct <- if (length(col) > 0) na_n / length(col) * 100 else 0
+  }
+
+  # --- Text / other variables: examples + NA (JSON-stored for the codebook) --
+  # Runs regardless of factor presence (before the early return below) so a
+  # plain, AI-free JSON also carries example values and NA rates.
+  other_meta <- metadata[
+    !(metadata$detected_role %in% c(factor_roles, num_roles)) &
+    metadata$var_name %in% names(df), ]
+  for (i in seq_len(nrow(other_meta))) {
+    vn  <- other_meta$var_name[[i]]
+    col <- df[[vn]]
+    if (is.null(col) || is.null(existing$variables[[vn]])) next
+    na_n <- sum(is.na(col))
+    existing$variables[[vn]]$na_n   <- as.integer(na_n)
+    existing$variables[[vn]]$na_pct <- if (nrow(df) > 0) na_n / nrow(df) * 100 else 0
+    # Example values only for genuinely textual vars (not identifiers/IDs).
+    if (!identical(other_meta$detected_role[[i]], "identifier")) {
+      uv <- unique(as.character(col[!is.na(col)]))
+      if (length(uv) > 0) existing$variables[[vn]]$examples <- utils::head(uv, 5L)
+    }
   }
 
   # Early return when no factor vars have declared levels (numeric stats already done)
@@ -2479,16 +2548,48 @@ metadata_add_level_stats <- function(meta_json, df) {
     data.table::data.table(var_name = vn, val = as.character(df[[vn]]))))
   counts_dt <- dt_long[!is.na(val), .(n = .N), by = .(var_name, val)]
 
-  # --- Mismatch report: observed values absent from declared levels ----------
+  # --- Observed values absent from declared levels ---------------------------
   unmatched <- counts_dt[!meta_vals, on = .(var_name, val = val_chr)]
-  if (nrow(unmatched) > 0) {
+
+  # Add them as new factor levels (empty label, for review) so they are counted
+  # in n/pct. Numeric var mis-detected as factors are excluded upstream (fac_meta
+  # only holds factor roles), avoiding the "thousands of levels" explosion.
+  added_report   <- character(0)
+  skipped_report <- character(0)
+  if (isTRUE(add_observed_levels) && nrow(unmatched) > 0) {
+    add_rows <- list()
+    for (vn in unique(as.character(unmatched$var_name))) {
+      if (is.null(existing$variables[[vn]])) next
+      u <- unmatched[var_name == vn][order(val)]
+      if (nrow(u) > max_new_levels) {
+        skipped_report <- c(skipped_report, sprintf("%s (%d codes)", vn, nrow(u)))
+        next
+      }
+      lvls       <- existing$variables[[vn]]$levels %||% list()
+      cur_orders <- suppressWarnings(as.numeric(
+                      purrr::map_chr(lvls, ~ as.character(.x$order %||% NA))))
+      max_ord    <- if (any(is.finite(cur_orders))) max(cur_orders[is.finite(cur_orders)]) else 0
+      base_pos   <- max(c(0L, meta_vals[var_name == vn]$position))
+      for (j in seq_len(nrow(u))) {
+        code <- as.character(u$val[[j]])
+        if (!is.null(existing$variables[[vn]]$levels[[code]])) next
+        existing$variables[[vn]]$levels[[code]] <- list(
+          order = as.integer(max_ord + j), label = "")
+        add_rows[[length(add_rows) + 1L]] <- data.table::data.table(
+          var_name = vn, position = base_pos + j, val_chr = code, is_null = FALSE)
+        added_report <- c(added_report,
+          sprintf("  %-22s code=%-8s (n=%d)", vn, code, u$n[[j]]))
+      }
+    }
+    if (length(add_rows) > 0)
+      meta_vals <- data.table::rbindlist(c(list(meta_vals), add_rows), use.names = TRUE)
+  } else if (nrow(unmatched) > 0) {
+    # Feature disabled: keep the classic "excluded" report.
     detail <- unmatched[order(var_name, val),
                         paste0("  ", var_name, ': "', val, '" (n=', n, ")")]
-    message("metadata_add_level_stats: ",
-            data.table::uniqueN(unmatched$var_name),
+    message("metadata_add_level_stats: ", data.table::uniqueN(unmatched$var_name),
             " variable(s) have observed values not in declared levels ",
-            "(excluded from counts):\n",
-            paste(detail, collapse = "\n"))
+            "(excluded from counts):\n", paste(detail, collapse = "\n"))
   }
 
   # --- Left join: fill observed counts for matched levels -------------------
@@ -2518,12 +2619,35 @@ metadata_add_level_stats <- function(meta_json, df) {
       if (!is.na(pct))
         existing$variables[[vn]]$levels[[key]][["pct"]] <- as.integer(pct)
     }
+    # Top-level NA for the factor: individuals that end up NA after formatting
+    # = n_individuals - Sigma(observed non-missing level n).
+    tv <- vn_rows$total_valid[1]
+    if (length(tv) == 1L && !is.na(tv)) {
+      na_n <- nrow(df) - tv
+      existing$variables[[vn]]$na_n   <- as.integer(na_n)
+      existing$variables[[vn]]$na_pct <- if (nrow(df) > 0) na_n / nrow(df) * 100 else 0
+    }
     n_updated <- n_updated + 1L
   }
 
   .write_meta_json(existing, json_path)
   message("metadata_add_level_stats: updated n/pct for ", n_updated,
           " variable(s) in ", basename(json_path))
+
+  if (length(added_report) > 0) {
+    message("\nmetadata_add_level_stats: added ", length(added_report),
+            " observed level(s) not in the value labels, with an EMPTY label.\n",
+            "  → review each in the JSON: fill its \"label\", or mark it \"missing\": true.\n",
+            "  (they are counted in n/pct; empty labels are skipped by ai_suggest_labels)\n",
+            paste(added_report, collapse = "\n"))
+  }
+  if (length(skipped_report) > 0) {
+    message("\nmetadata_add_level_stats: ", length(skipped_report),
+            " factor variable(s) had > ", max_new_levels,
+            " observed codes absent from the value labels — NOT added ",
+            "(likely a nomenclature; use apply_nomenclatures() or raise ",
+            "max_new_levels): ", paste(skipped_report, collapse = ", "))
+  }
 
   invisible(.survey_meta_from_json(json_path, .read_meta_json(json_path)))
 }
@@ -3370,20 +3494,29 @@ ai_classify_roles <- function(
   existing <- .read_meta_json(json_path)
 
   n_updated <- 0L
+  binary_remapped <- character(0)
   for (vn in names(detected_roles)) {
     if (is.null(existing$variables[[vn]])) next
     new_role <- detected_roles[[vn]]
+
+    # Structural invariant: factor_binary requires exactly 2 non-missing levels.
+    # Never write a binary role for a variable that doesn't have them, so the AI
+    # cannot introduce a role ↔ levels inconsistency (mapped to nominal instead).
+    levs <- existing$variables[[vn]]$levels
+    non_miss_keys <- if (!is.null(levs) && length(levs) > 0)
+      purrr::keep(names(levs), ~ !isTRUE(levs[[.x]]$missing)) else character(0)
+    n_valid <- length(non_miss_keys)
+    if (new_role == "factor_binary" && n_valid != 2L) {
+      new_role <- "factor_nominal"
+      binary_remapped <- c(binary_remapped, vn)
+    }
+
     existing$variables[[vn]]$role <- new_role
     n_updated <- n_updated + 1L
 
     # Write "order" integers based on direction for ordinal and binary
     dir_code <- if (vn %in% names(dir_overrides)) dir_overrides[[vn]] else "unknown"
-    levs <- existing$variables[[vn]]$levels
     if (is.null(levs) || length(levs) == 0) next
-
-    # Identify non-missing levels (those without missing: true)
-    non_miss_keys <- purrr::keep(names(levs), ~ !isTRUE(levs[[.x]]$missing))
-    n_valid <- length(non_miss_keys)
     if (n_valid == 0) next
 
     if (new_role == "factor_ordinal") {
@@ -3455,6 +3588,11 @@ ai_classify_roles <- function(
 
   message("\n", strrep("=", 60))
   message("ai_classify_roles: ", n_updated, " variable(s) updated in: ", json_path)
+  if (length(binary_remapped) > 0) {
+    message("  (", length(binary_remapped), " kept factor_nominal — AI proposed ",
+            "factor_binary but they lack exactly 2 non-missing levels: ",
+            paste(binary_remapped, collapse = ", "), ")")
+  }
   message("Review role/order fields in the JSON.")
 
   if (length(extra_missing) > 0) {
@@ -4122,14 +4260,15 @@ ai_merge_levels <- function(
   parsed <- list()
   for (txt in results_text) {
     if (is.null(txt) || !nzchar(txt)) next
-    tryCatch({
-      json_str <- stringr::str_extract(txt, "(?s)\\{.+\\}")
-      if (is.na(json_str)) stop("No JSON object found")
-      chunk_parsed <- jsonlite::fromJSON(json_str, simplifyVector = FALSE)
-      parsed <- c(parsed, chunk_parsed)
-    }, error = function(e) {
-      warning("ai_merge_levels: JSON parse error: ", conditionMessage(e))
-    })
+    res <- .parse_var_object_chunk(txt)
+    if (length(res$map) == 0L) {
+      warning("ai_merge_levels: a chunk produced no parseable variables.", call. = FALSE)
+      next
+    }
+    if (res$recovered)
+      warning("ai_merge_levels: chunk JSON malformed; recovered ",
+              length(res$map), " variable(s) individually.", call. = FALSE)
+    parsed <- c(parsed, res$map)
   }
 
   if (length(parsed) == 0L) {
@@ -4264,6 +4403,11 @@ ai_merge_levels <- function(
 #'   auto-scales with max_levels, staying under the 128K ceiling.
 #' @param use_batch    Logical. Use the Anthropic Message Batch API (cheaper,
 #'                     async).  Default FALSE.
+#' @param resume_batch_id Optional batch ID (msgbatch_...) of a previously
+#'                     submitted batch. If set, retrieve + re-parse those results
+#'                     instead of submitting a new batch (recovers an already-paid
+#'                     run at no extra cost). Implies use_batch = TRUE. Call with
+#'                     the same meta_json used to submit it.
 #' @param dry_run      If TRUE, print the prompt(s) that would be sent and
 #'                     return invisibly without calling the API.  Default FALSE.
 #' @param api_key      ANTHROPIC_API_KEY env var by default.
@@ -4277,11 +4421,15 @@ ai_suggest_labels <- function(
     max_levels               = 400L,   # Sonnet 5 (1M context): ~2.7x Haiku-era 150L
     max_levels_in_single_var = 30L,
     replace_existing_new_labels = FALSE,
-    use_batch     = FALSE,
+    use_batch       = FALSE,
+    resume_batch_id = NULL,
     dry_run       = FALSE,
     api_key       = Sys.getenv("ANTHROPIC_API_KEY"),
     model         = .DEFAULT_AI_MODEL
 ) {
+  # Resuming an existing batch implies batch mode (retrieve-only, no re-submit).
+  if (!is.null(resume_batch_id)) use_batch <- TRUE
+
   json_path <- .resolve_json_path(meta_json)
   loaded    <- .load_meta(json_path)
   metadata  <- loaded$meta
@@ -4293,6 +4441,21 @@ ai_suggest_labels <- function(
   if (!is.null(vars)) target <- dplyr::filter(target, var_name %in% vars)
   if (nrow(target) == 0) {
     message("ai_suggest_labels: No factor variables to process.")
+    return(invisible(.survey_meta_from_json(json_path, loaded$json)))
+  }
+
+  # Do NOT send observed-but-unlabelled levels (empty label, added by
+  # metadata_add_level_stats for review) — there is nothing to shorten. The
+  # write-back maps by the code the AI returns, so dropping them here is safe.
+  target <- target |>
+    dplyr::mutate(levels = purrr::map(levels, function(lvls) {
+      keep <- purrr::map_lgl(lvls, ~ isTRUE(.x$missing) || nzchar(.x$label %||% ""))
+      lvls[keep]
+    }))
+  target <- dplyr::filter(target,
+    purrr::map_lgl(levels, ~ any(!purrr::map_lgl(.x, function(l) isTRUE(l$missing)))))
+  if (nrow(target) == 0) {
+    message("ai_suggest_labels: No labelled factor levels to process.")
     return(invisible(.survey_meta_from_json(json_path, loaded$json)))
   }
 
@@ -4581,6 +4744,11 @@ ai_suggest_labels <- function(
                              system = system_prompt_cached)
       .ai_extract_text(resp)
     })
+  } else if (!is.null(resume_batch_id)) {
+    message("ai_suggest_labels: resuming existing batch ", resume_batch_id,
+            " (retrieve + re-parse, no re-submit)")
+    raw          <- ai_batch_retrieve(resume_batch_id, api_key = api_key)
+    results_text <- purrr::map(purrr::set_names(names(raw)), ~ raw[[.x]])
   } else {
     message("ai_suggest_labels: batch mode (", nrow(target), " vars)")
     requests <- purrr::imap(prompts, ~ list(custom_id = paste0("labels_", .y),
@@ -4593,6 +4761,7 @@ ai_suggest_labels <- function(
   }
 
   # ---------- parse + write to disk -----------------------------------------
+  .cache_ai_raw(results_text, "labels_cache")
   parsed_map <- .parse_labels_json_responses(results_text, target)
 
   if (length(parsed_map) == 0) {
@@ -4730,6 +4899,107 @@ ai_suggest_labels <- function(
   writeLines(enc2utf8(json_str), con = path, useBytes = TRUE)
 }
 
+# --- Robust JSON recovery for var-object responses (labels + merge) ----------
+# The AI returns {"VAR": {...}, ...}. On large chunks a model can occasionally
+# emit a stray brace, which makes a single whole-object parse fail and discard
+# EVERY variable in the chunk. These helpers recover each "VAR": {...}/[...]
+# entry independently so one malformed spot costs at most one variable.
+
+# Balance-match the delimiter opened at chars[[open_pos]] ("{" or "["), returning
+# the index of its matching close (or -1 if unbalanced). String/escape-aware so
+# brackets inside JSON string values are ignored.
+.match_json_delim <- function(chars, open_pos) {
+  open_ch  <- chars[[open_pos]]
+  close_ch <- if (open_ch == "{") "}" else "]"
+  depth <- 0L; in_str <- FALSE; esc <- FALSE
+  for (i in seq.int(open_pos, length(chars))) {
+    ch <- chars[[i]]
+    if (in_str) {
+      if (esc)             esc    <- FALSE
+      else if (ch == "\\") esc    <- TRUE
+      else if (ch == '"')  in_str <- FALSE
+    } else if (ch == '"') {
+      in_str <- TRUE
+    } else if (ch == open_ch) {
+      depth <- depth + 1L
+    } else if (ch == close_ch) {
+      depth <- depth - 1L
+      if (depth == 0L) return(i)
+    }
+  }
+  -1L
+}
+
+# Extract each top-level "VARNAME": {...}/[...] entry from possibly-malformed
+# text. Returns a named list var_name -> the JSON substring of its value. Only
+# keys whose value is an object/array are matched (inner "code": "label" string
+# entries are skipped), so level codes are never mistaken for variables.
+.extract_var_objects <- function(txt) {
+  chars <- strsplit(txt, "", fixed = TRUE)[[1]]
+  m <- gregexpr('"([A-Za-z_][A-Za-z0-9_.]*)"\\s*:\\s*[{\\[]', txt, perl = TRUE)[[1]]
+  if (length(m) == 0L || m[[1]] == -1L) return(list())
+  lens <- attr(m, "match.length")
+  out <- list()
+  for (i in seq_along(m)) {
+    match_str <- substr(txt, m[[i]], m[[i]] + lens[[i]] - 1L)
+    key       <- sub('^"([A-Za-z_][A-Za-z0-9_.]*)".*$', "\\1", match_str, perl = TRUE)
+    open_pos  <- m[[i]] + lens[[i]] - 1L            # index of the { or [
+    close_pos <- .match_json_delim(chars, open_pos)
+    if (close_pos > open_pos && !key %in% names(out))
+      out[[key]] <- substr(txt, open_pos, close_pos)
+  }
+  out
+}
+
+# Parse one chunk that maps variable names to values (objects/arrays). Strategy 1:
+# parse the whole {...}. Strategy 2 (on failure): per-variable recovery via
+# .extract_var_objects. Returns list(map = named list var -> parsed value,
+# recovered = TRUE if the fallback was used).
+.parse_var_object_chunk <- function(txt) {
+  ok <- FALSE; out <- list()
+  tryCatch({
+    json_str <- stringr::str_extract(txt, "(?s)\\{.+\\}")
+    if (!is.na(json_str)) {
+      parsed <- jsonlite::fromJSON(json_str, simplifyVector = FALSE)
+      if (length(parsed) > 0L && !is.null(names(parsed))) { out <- parsed; ok <- TRUE }
+    }
+  }, error = function(e) NULL)
+  if (ok) return(list(map = out, recovered = FALSE))
+
+  entries <- .extract_var_objects(txt)
+  for (vname in names(entries)) {
+    val <- tryCatch(jsonlite::fromJSON(entries[[vname]], simplifyVector = FALSE),
+                    error = function(e) NULL)
+    if (!is.null(val)) out[[vname]] <- val
+  }
+  list(map = out, recovered = length(out) > 0L)
+}
+
+# Convert one AI label value into the raw_map form: keyed object -> named char
+# list, positional array -> char vector, otherwise NULL (skip).
+.convert_label_val <- function(val) {
+  if (is.list(val) && !is.null(names(val))) {
+    as.list(purrr::map_chr(val, as.character))
+  } else if (is.character(val) ||
+             (is.list(val) && all(purrr::map_lgl(val, is.character)))) {
+    unlist(val)
+  } else {
+    NULL
+  }
+}
+
+# Cache raw AI chunk responses to tempdir for offline diagnosis / re-parsing.
+.cache_ai_raw <- function(results_text, subdir) {
+  cache_dir <- file.path(tempdir(), subdir)
+  dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
+  purrr::iwalk(results_text, function(txt, nm) {
+    f <- file.path(cache_dir, paste0("chunk_", nm, "_raw.txt"))
+    writeLines(enc2utf8(if (is.null(txt)) "" else as.character(txt)), f, useBytes = TRUE)
+  })
+  message("  Raw responses cached to: ", cache_dir)
+  invisible(cache_dir)
+}
+
 # ---------------------------------------------------------------------------
 # Parse JSON responses from ai_suggest_labels() into a var_name -> labels map.
 # Returns a named list suitable for jsonlite::write_json().
@@ -4740,25 +5010,19 @@ ai_suggest_labels <- function(
   raw_map <- list()
   for (txt in results_text) {
     if (is.null(txt) || !nzchar(txt)) next
-    tryCatch({
-      # Broad regex: grab the outermost {...} including nested objects.
-      json_str <- stringr::str_extract(txt, "(?s)\\{.+\\}")
-      if (is.na(json_str)) stop("No JSON object found")
-      parsed <- jsonlite::fromJSON(json_str, simplifyVector = FALSE)
-      for (vname in names(parsed)) {
-        val <- parsed[[vname]]
-        if (is.list(val) && !is.null(names(val))) {
-          # New keyed format: {"value_code": "new_label", ...}
-          raw_map[[vname]] <- as.list(purrr::map_chr(val, as.character))
-        } else if (is.character(val) ||
-                   (is.list(val) && all(purrr::map_lgl(val, is.character)))) {
-          # Legacy positional array format
-          raw_map[[vname]] <- unlist(val)
-        }
-      }
-    }, error = function(e) {
-      warning("ai_suggest_labels: parse error: ", conditionMessage(e))
-    })
+    res <- .parse_var_object_chunk(txt)
+    if (length(res$map) == 0L) {
+      warning("ai_suggest_labels: a chunk produced no parseable variables.", call. = FALSE)
+      next
+    }
+    if (res$recovered)
+      warning("ai_suggest_labels: chunk JSON malformed; recovered ",
+              length(res$map), " variable(s) individually (one bad spot no longer ",
+              "discards the whole chunk).", call. = FALSE)
+    for (vname in names(res$map)) {
+      cv <- .convert_label_val(res$map[[vname]])
+      if (!is.null(cv)) raw_map[[vname]] <- cv
+    }
   }
 
   if (length(raw_map) == 0) return(list())
@@ -5434,18 +5698,40 @@ ai_suggest_varnames <- function(
 }
 
 
+# Build the displayed level label ("1-Natation") for a normalized non-missing
+# level (from .gfs_build_entries). Shared by the format script (fct_recode LHS)
+# and generate_codebook() so both are byte-identical.
+.gfs_level_label <- function(lv, max_order) {
+  paste0(.gfs_numeric_prefix(lv$order, max_order), lv$display_label)
+}
+
+
+# Return the first argument that is a length-1, non-NA, non-empty string ("" fallback).
+.first_nzchar <- function(...) {
+  for (x in list(...)) {
+    if (!is.null(x) && length(x) == 1L && !is.na(x) && nzchar(as.character(x)))
+      return(as.character(x))
+  }
+  ""
+}
+
+
 #' Compute summary statistics for a numeric column, excluding missing codes.
 #'
 #' @param col          A vector (possibly haven_labelled).
 #' @param missing_codes Character vector of value codes marked as missing in JSON.
-#' @return Named list (min, max, mean, sd, q1, median, q3) or NULL if all NA.
+#' @return Named list (min, max, mean, sd, q1, median, q3, na_n, na_pct) or NULL
+#'   if all values are missing. \code{na_n}/\code{na_pct} count NA + missing-coded
+#'   values over the full column length.
 .gfs_compute_numeric_stats <- function(col, missing_codes) {
+  n_total <- length(col)
   x <- suppressWarnings(as.numeric(as.character(col)))
   # Remove values matching missing codes (as numeric)
   miss_num <- suppressWarnings(as.numeric(missing_codes))
   miss_num <- miss_num[!is.na(miss_num)]
   if (length(miss_num) > 0) x[x %in% miss_num] <- NA
   x <- x[!is.na(x)]
+  na_n <- n_total - length(x)
   if (length(x) == 0) return(NULL)
   qs <- quantile(x, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
   list(
@@ -5455,7 +5741,9 @@ ai_suggest_varnames <- function(
     sd     = sd(x),
     q1     = unname(qs[1]),
     median = unname(qs[2]),
-    q3     = unname(qs[3])
+    q3     = unname(qs[3]),
+    na_n   = na_n,
+    na_pct = if (n_total > 0) na_n / n_total * 100 else 0
   )
 }
 
@@ -5499,7 +5787,9 @@ ai_suggest_varnames <- function(
             orig_label = lv$label %||% ""
           )
         } else {
-          display <- lv$new_label %||% lv$label %||% code
+          # First non-empty of new_label / label / code (empty labels come from
+          # metadata_add_level_stats() observed-but-unlabelled levels awaiting review).
+          display <- .first_nzchar(lv$new_label, lv$label, code)
           non_missing[[length(non_missing) + 1]] <- list(
             code          = code,
             order         = lv$order %||% NA_integer_,
@@ -5550,137 +5840,6 @@ ai_suggest_varnames <- function(
 }
 
 
-#' Generate the codebook section (Part 1: variable list).
-#'
-#' Produces a character vector of R code lines forming the c(...) block.
-#' See plan for per-role formatting rules.
-#'
-#' @param entries   List from .gfs_build_entries().
-#' @param stats     Named list of numeric stats (keyed by orig_name), or NULL.
-#' @return Character vector of lines.
-.gfs_codebook_lines <- function(entries, stats = NULL) {
-  if (length(entries) == 0) return(character(0))
-
-  # --- compute global padding width for variable name column ---
-  # Width = max of '  "NEW_NAME",' across all entries
-  name_widths <- sapply(entries, function(e) nchar(paste0('  "', e$new_name, '",')))
-  w_name <- max(name_widths)
-
-  # --- for binary factors: compute padding for first level display ---
-  # Collect first-level display strings for consecutive binary alignment
-  # (We'll compute these per-entry below)
-
-  lines <- character(0)
-  n_entries <- length(entries)
-
-  for (idx in seq_len(n_entries)) {
-    e <- entries[[idx]]
-    is_last <- (idx == n_entries)
-
-    # Name column: with or without trailing comma
-    # Always pad to w_name so the # comment aligns across all entries
-    if (is_last) {
-      name_str <- paste0('  "', e$new_name, '"')
-      name_str <- .gfs_rpad(name_str, w_name)
-    } else {
-      name_str <- paste0('  "', e$new_name, '",')
-      name_str <- .gfs_rpad(name_str, w_name)
-    }
-
-    # Build prefixed labels for this variable (reused in codebook + formatting)
-    prefixed <- character(0)
-    if (e$n_non_missing > 0) {
-      prefixed <- sapply(e$levels_sorted, function(lv) {
-        paste0(.gfs_numeric_prefix(lv$order, e$max_order), lv$display_label)
-      })
-    }
-
-    # Orig name suffix (omit if same as new_name)
-    orig_suffix <- if (e$orig_name != e$new_name) paste0(" ", e$orig_name) else ""
-
-    # Missing labels
-    miss_str <- ""
-    if (length(e$missing_levels) > 0) {
-      miss_labels <- sapply(e$missing_levels, function(m) paste0('"', m$orig_label, '"'))
-      miss_str <- paste0(", missing: ", paste(miss_labels, collapse = ","))
-    }
-
-    is_factor <- grepl("^factor_", e$role)
-
-    if (is_factor && e$role != "factor_binary" && e$n_non_missing > 0) {
-      # --- ordinal / nominal / unique_value : 2 lines ---
-      # Line 1: var_label, orig_name, missing
-      comment1 <- paste0('"', e$var_label, '"', orig_suffix, miss_str)
-      line1 <- paste0(name_str, " # ", comment1)
-
-      # Line 2: continuation with prefixed levels
-      cont_prefix <- .gfs_rpad("  #", w_name)
-      level_parts <- sapply(seq_along(prefixed), function(li) {
-        lv <- e$levels_sorted[[li]]
-        n_str <- if (!is.null(lv$n)) paste0(" n=", lv$n) else ""
-        p_str <- if (!is.null(lv$pct)) paste0(" ", lv$pct, "%") else ""
-        paste0('"', prefixed[li], '"', n_str, p_str)
-      })
-      line2 <- paste0(cont_prefix, " # ", paste(level_parts, collapse = ", "))
-      lines <- c(lines, line1, line2)
-
-    } else if (is_factor && e$role == "factor_binary" && e$n_non_missing > 0) {
-      # --- binary : 1 line ---
-      # Show first level (order=1) prominently, then second, then var_label
-      lv1 <- e$levels_sorted[[1]]
-      lv2 <- if (e$n_non_missing >= 2) e$levels_sorted[[2]] else NULL
-
-      lv1_str <- paste0('"', prefixed[1], '"')
-      n1_str <- if (!is.null(lv1$n)) paste0(" n=", lv1$n) else ""
-      p1_str <- if (!is.null(lv1$pct)) paste0(" ", lv1$pct, "%") else ""
-
-      lv2_part <- ""
-      if (!is.null(lv2)) {
-        n2_str <- if (!is.null(lv2$n)) paste0(" n=", lv2$n) else ""
-        p2_str <- if (!is.null(lv2$pct)) paste0(" ", lv2$pct, "%") else ""
-        lv2_part <- paste0(', "', prefixed[2], '"', n2_str, p2_str)
-      }
-
-      comment <- paste0(
-        lv1_str, n1_str, p1_str, " ",
-        '"', e$var_label, '"',
-        lv2_part,
-        orig_suffix, miss_str
-      )
-      line1 <- paste0(name_str, " # ", comment)
-      lines <- c(lines, line1)
-
-    } else if (e$role %in% c("integer_count", "integer_scale", "double")) {
-      # --- numeric : 1 line with optional stats ---
-      st <- stats[[e$orig_name]]
-      if (!is.null(st)) {
-        # Determine rounding: integers get round(1), doubles get round(1)
-        stats_str <- paste0(
-          round(st$min, 1), "-", round(st$max, 1),
-          " mean ", round(st$mean, 1),
-          " \u03c3", round(st$sd, 1),
-          ", median ", round(st$median, 1)
-        )
-        comment <- paste0(stats_str, ', "', e$var_label, '"', orig_suffix)
-      } else {
-        comment <- paste0(e$role, ' "', e$var_label, '"', orig_suffix)
-      }
-      line1 <- paste0(name_str, " # ", comment)
-      lines <- c(lines, line1)
-
-    } else {
-      # --- identifier / other / factor with no levels ---
-      comment <- paste0(e$role, ' "', e$var_label, '"', orig_suffix)
-      line1 <- paste0(name_str, " # ", comment)
-      lines <- c(lines, line1)
-    }
-  }
-
-  # Wrap in var_list <- c(...)
-  c("var_list <- c(", lines, ")")
-}
-
-
 #' Generate formatting code blocks (Part 2).
 #'
 #' Produces a character vector of R code lines for rename + per-variable blocks.
@@ -5724,29 +5883,33 @@ ai_suggest_varnames <- function(
   # --- Step 2: Per-variable formatting blocks ---
   lines <- c(lines, "", "## Format variables")
 
-  for (e in entries) {
-    # Orig name suffix for comment header
-    orig_suffix <- if (e$orig_name != e$new_name) paste0(" ", e$orig_name) else ""
-    # Short role label for comment
-    role_short <- sub("^factor_", "", e$role)
-    var_expr <- paste0(df_name, "$", e$new_name)
+  # `"<label>" -> varlab` line (escaped), or NULL when the variable has no label.
+  # The label is then applied to the *final* converted object via
+  # `... |> `attr<-`("label", varlab)` so it survives the class conversion.
+  .label_assign <- function(vl) {
+    if (is.null(vl) || nchar(vl) == 0) return(NULL)
+    paste0('"', gsub('"', '\\\\"', vl), '" -> varlab')
+  }
 
-    is_factor <- grepl("^factor_", e$role)
+  for (e in entries) {
+    renamed_suffix <- if (e$orig_name != e$new_name) paste0(" (", e$orig_name, ")") else ""
+    role_short  <- sub("^factor_", "", e$role)
+    var_expr    <- paste0(df_name, "$", e$new_name)
+    is_factor   <- grepl("^factor_", e$role)
+    has_label   <- nchar(e$var_label) > 0
+    attr_suffix <- if (has_label) ' |> `attr<-`("label", varlab)' else ""
 
     if (is_factor && e$n_non_missing > 0) {
       # --- Factor formatting block ---
       lines <- c(lines, "",
-        paste0("# ", e$new_name, " ", role_short, " \"", e$var_label, "\"", orig_suffix))
+        paste0('# "', e$new_name, '" ', role_short, renamed_suffix),
+        .label_assign(e$var_label))
 
       # Build all recode lines (non-missing + missing)
       recode_entries <- list()
-
-      # Non-missing levels (sorted by order)
       for (lv in e$levels_sorted) {
-        prefix <- .gfs_numeric_prefix(lv$order, e$max_order)
-        new_lbl <- paste0(prefix, lv$display_label)
         recode_entries[[length(recode_entries) + 1]] <- list(
-          new_label  = paste0('"', new_lbl, '"'),
+          new_label  = paste0('"', .gfs_level_label(lv, e$max_order), '"'),
           code       = paste0('"', lv$code, '"'),
           pct        = lv$pct,
           n          = lv$n,
@@ -5754,8 +5917,6 @@ ai_suggest_varnames <- function(
           is_missing = FALSE
         )
       }
-
-      # Missing levels (at the end, recoded to NULL)
       for (ml in e$missing_levels) {
         recode_entries[[length(recode_entries) + 1]] <- list(
           new_label  = "NULL",
@@ -5770,8 +5931,6 @@ ai_suggest_varnames <- function(
       # Compute padding widths within fct_recode
       w_lbl  <- max(sapply(recode_entries, function(x) nchar(x$new_label)))
       w_code <- max(sapply(recode_entries, function(x) nchar(x$code)))
-
-      # Compute pct+n strings for alignment
       pct_n_strs <- sapply(recode_entries, function(x) {
         if (x$is_missing) return("")
         p_str <- if (!is.null(x$pct)) paste0(x$pct, "%") else ""
@@ -5780,50 +5939,29 @@ ai_suggest_varnames <- function(
       })
       w_pct_n <- max(nchar(pct_n_strs))
 
-      # First line: assignment with fct_recode(factor(as.character(...)),
-      # Always use factor(as.character()) for safety against haven_labelled
       lines <- c(lines,
         paste0(var_expr, " <- fct_recode(factor(as.character(", var_expr, ')), # "new" = "old"'))
-
-      # Recode lines
       for (ri in seq_along(recode_entries)) {
         re <- recode_entries[[ri]]
-        lbl_pad  <- .gfs_rpad(re$new_label, w_lbl)
-        code_pad <- .gfs_rpad(re$code, w_code)
-        pct_pad  <- .gfs_rpad(pct_n_strs[ri], w_pct_n)
-
-        # Trailing comma: always (fct_recode tolerates it)
-        rline <- paste0("  ", lbl_pad, " = ", code_pad, ",  # ",
-                         pct_pad, "    # \"", re$orig_label, '"')
+        rline <- paste0("  ", .gfs_rpad(re$new_label, w_lbl), " = ",
+                        .gfs_rpad(re$code, w_code), ",  # ",
+                        .gfs_rpad(pct_n_strs[ri], w_pct_n), "    # \"", re$orig_label, '"')
         lines <- c(lines, rline)
       }
 
-      # Closing: ) |> fct_relevel(sort) [|> as.ordered()]
+      # Closing: ) |> fct_relevel(sort) [|> as.ordered()] [|> `attr<-`("label", varlab)]
       close <- ") |> fct_relevel(sort)"
       if (e$role == "factor_ordinal") close <- paste0(close, " |> as.ordered()")
-      lines <- c(lines, close)
+      lines <- c(lines, paste0(close, attr_suffix))
 
-    } else if (e$role %in% c("integer_count", "integer_scale")) {
+    } else if (e$role %in% c("integer_count", "integer_scale", "integer")) {
       # --- Integer formatting block ---
       lines <- c(lines, "",
-        paste0("# ", e$new_name, " ", e$role, " \"", e$var_label, "\"", orig_suffix))
+        paste0('# "', e$new_name, '" ', e$role, renamed_suffix),
+        .label_assign(e$var_label),
+        paste0(var_expr, " <- as.integer(as.character(", var_expr, "))", attr_suffix))
 
-      # Stats comment line (if available)
-      st <- stats[[e$orig_name]]
-      if (!is.null(st)) {
-        lines <- c(lines,
-          paste0("# range: ", round(st$min, 1), "-", round(st$max, 1),
-                 ", mean ", round(st$mean, 1), " \u03c3", round(st$sd, 1),
-                 ", Q1=", round(st$q1, 0),
-                 " median=", round(st$median, 0),
-                 " Q3=", round(st$q3, 0)))
-      }
-
-      # Conversion: always as.integer(as.character()) for safety
-      lines <- c(lines,
-        paste0(var_expr, " <- as.integer(as.character(", var_expr, "))"))
-
-      # Missing codes from JSON levels
+      # Missing codes from JSON levels (subset-assign preserves the label attr)
       miss_codes <- sapply(e$missing_levels, function(m) m$code)
       if (length(miss_codes) > 0) {
         miss_nums <- suppressWarnings(as.integer(miss_codes))
@@ -5835,36 +5973,23 @@ ai_suggest_varnames <- function(
         }
       }
 
+      lines <- c(lines, .gfs_num_stats_comment(stats[[e$orig_name]], digits = 0L))
+
       # Show non-missing value labels as comments (if any exist for an integer var)
       if (e$n_non_missing > 0) {
         val_comments <- sapply(e$levels_sorted, function(lv) {
           paste0('"', lv$code, '"="', lv$orig_label, '"')
         })
-        lines <- c(lines,
-          paste0("# Values: ", paste(val_comments, collapse = ", ")))
+        lines <- c(lines, paste0("# Values: ", paste(val_comments, collapse = ", ")))
       }
 
     } else if (e$role == "double") {
       # --- Double formatting block ---
       lines <- c(lines, "",
-        paste0("# ", e$new_name, " ", e$role, " \"", e$var_label, "\"", orig_suffix))
+        paste0('# "', e$new_name, '" ', e$role, renamed_suffix),
+        .label_assign(e$var_label),
+        paste0(var_expr, " <- as.double(as.character(", var_expr, "))", attr_suffix))
 
-      # Stats comment line
-      st <- stats[[e$orig_name]]
-      if (!is.null(st)) {
-        lines <- c(lines,
-          paste0("# range: ", round(st$min, 1), "-", round(st$max, 1),
-                 ", mean ", round(st$mean, 1), " \u03c3", round(st$sd, 1),
-                 ", Q1=", round(st$q1, 1),
-                 " median=", round(st$median, 1),
-                 " Q3=", round(st$q3, 1)))
-      }
-
-      # Conversion: always as.double(as.character()) for safety
-      lines <- c(lines,
-        paste0(var_expr, " <- as.double(as.character(", var_expr, "))"))
-
-      # Missing codes
       miss_codes <- sapply(e$missing_levels, function(m) m$code)
       if (length(miss_codes) > 0) {
         miss_nums <- suppressWarnings(as.numeric(miss_codes))
@@ -5876,10 +6001,16 @@ ai_suggest_varnames <- function(
         }
       }
 
+      lines <- c(lines, .gfs_num_stats_comment(stats[[e$orig_name]], digits = 1L))
+
     } else {
-      # --- identifier / other / factor with 0 levels ---
+      # --- identifier / other / factor with 0 levels (column left untouched) ---
       lines <- c(lines, "",
-        paste0("# ", e$new_name, " ", e$role, " \"", e$var_label, "\"", orig_suffix))
+        paste0('# "', e$new_name, '" ', e$role, renamed_suffix))
+      if (has_label) {
+        lines <- c(lines, .label_assign(e$var_label),
+          paste0('attr(', var_expr, ', "label") <- varlab'))
+      }
     }
   }
 
@@ -5887,17 +6018,32 @@ ai_suggest_varnames <- function(
 }
 
 
+# Format the one-line numeric summary comment used in the format script, e.g.
+# "# min=120 Q1=163 median=170 Q3=176 max=206 ; mean 169.9 \u03c39.4".
+# digits = quantile rounding (0 for integer roles, 1 for double); mean/sd always 1.
+.gfs_num_stats_comment <- function(st, digits = 1L) {
+  if (is.null(st)) return(NULL)
+  q <- function(v) format(round(v, digits), nsmall = digits, trim = TRUE, scientific = FALSE)
+  m <- function(v) format(round(v, 1),      nsmall = 1L,     trim = TRUE, scientific = FALSE)
+  paste0("# min=", q(st$min), " Q1=", q(st$q1), " median=", q(st$median),
+         " Q3=", q(st$q3), " max=", q(st$max),
+         " ; mean ", m(st$mean), " \u03c3", m(st$sd))
+}
+
+
 #' Generate a standalone, human-readable R formatting script.
 #'
-#' Reads the unified .survey_meta.json and the metadata tibble to produce
-#' a self-contained R script that formats a raw dataset. The generated script
-#' depends only on haven (for import), dplyr, and forcats — no dependency on
-#' data_formatting_pipeline.R.
+#' Reads the unified .survey_meta.json to produce a self-contained R script that
+#' formats a raw dataset. The generated script depends only on haven (for
+#' import), dplyr, and forcats — no dependency on data_formatting_pipeline.R.
+#' Each variable block applies its variable label inline via
+#' \code{... |> `attr<-`("label", varlab)} so it survives the class conversion.
+#' The human-readable codebook now lives in \code{generate_codebook()}.
 #'
-#' @param metadata     Metadata tibble from extract_survey_metadata().
-#' @param meta_json    Path to the unified .survey_meta.json file.
-#' @param df           Optional: the raw data frame (for computing numeric
-#'                     summary statistics in codebook and comments).
+#' @param meta_json    Path to the unified .survey_meta.json file (or a
+#'                     \code{survey_meta} object). Run
+#'                     \code{metadata_add_level_stats()} first for numeric
+#'                     summary comments.
 #' @param df_name      Character: name of the data frame variable in the
 #'                     generated script (default: "data"). Used in all
 #'                     fct_recode(), rename(), and assignment calls.
@@ -5908,8 +6054,8 @@ ai_suggest_varnames <- function(
 #'
 #' @examples
 #' \dontrun{
-#'   meta <- extract_survey_metadata(df, meta_json = "virage.survey_meta.json")
-#'   generate_format_script(meta, "virage.survey_meta.json", df = df)
+#'   extract_survey_metadata(df, meta_json = "virage.survey_meta.json")
+#'   generate_format_script("virage.survey_meta.json", df_name = "virage")
 #' }
 generate_format_script <- function(meta_json,
                                    df_name     = "data",
@@ -5960,9 +6106,6 @@ generate_format_script <- function(meta_json,
     "#",
     '# Usage:',
     '#   source("this_script.R")',
-    "#",
-    "# The variable list below can be used to select variables:",
-    paste0("#   ", df_name, " <- dplyr::select(", df_name, ", dplyr::all_of(var_list))"),
     "",
     "library(haven)",
     "library(dplyr)",
@@ -5973,39 +6116,574 @@ generate_format_script <- function(meta_json,
     # ""
   )
 
-  # Part 1: Codebook
-  codebook_header <- c("## Variable list (codebook)")
-  codebook <- .gfs_codebook_lines(entries, stats = num_stats)
-
-  # Part 2: Formatting
+  # Formatting (variable labels applied inline, next to each block). The full,
+  # human-readable codebook now lives in generate_codebook().
   formatting <- .gfs_format_blocks(entries, df_name, stats = num_stats)
 
-  # Part 3: Variable labels (reapply after transformations)
-  label_lines <- c("", "", "## Variable labels",
-    "# Reapply variable labels (lost during class conversions / fct_recode)")
-  for (e in entries) {
-    if (nchar(e$var_label) > 0) {
-      # Escape any quotes in the label
-      escaped <- gsub('"', '\\\\"', e$var_label)
-      label_lines <- c(label_lines,
-        paste0('attr(', df_name, '$', e$new_name, ', "label") <- "', escaped, '"'))
-    }
-  }
-
-  # Footer
-  footer <- c("",
-    "# Select and reorder variables",
-    paste0("# ", df_name, " <- dplyr::select(", df_name, ", dplyr::all_of(var_list))"),
-    ""
-  )
-
   # --- Assemble and write ---
-  all_lines <- c(header, codebook_header, codebook, formatting, label_lines, footer)
+  all_lines <- c(header, formatting)
 
   writeLines(all_lines, output_path, useBytes = TRUE)
   n_vars <- length(entries)
   message(sprintf("Format script written to %s (%d variables)", output_path, n_vars))
   invisible(output_path)
+}
+
+
+# ============================================================
+# 9b. generate_codebook() — human-readable Excel codebook
+# ============================================================
+# PURPOSE: Turn a *.survey_meta.json (AI-enriched OR plain, after
+#   metadata_add_level_stats()) into a professional, beginner-readable .xlsx
+#   codebook via openxlsx2. Value labels/order reuse .gfs_build_entries() +
+#   .gfs_level_label() so they are byte-identical to generate_format_script().
+# See: CLAUDE.md § Pipeline Architecture.
+
+# --- Translation maps (FR default, EN via lang = "en") --------------------
+
+# role -> functional-role label (does not repeat the R class shown in `type`)
+.cb_role_label <- function(role, lang = "fr") {
+  m <- if (identical(lang, "en")) c(
+    factor_binary = "binary", factor_ordinal = "ordinal", factor_nominal = "nominal",
+    integer_count = "count", integer = "discrete", integer_scale = "scale",
+    double = "continuous", identifier = "id", other = "", unclear = ""
+  ) else c(
+    factor_binary = "binaire", factor_ordinal = "ordinale", factor_nominal = "nominale",
+    integer_count = "discret", integer = "discret", integer_scale = "échelle",
+    double = "continue", identifier = "id", other = "", unclear = ""
+  )
+  unname(m[role]) %||% ""
+}
+
+# role (+ r_class for identifier/other) -> R class after generate_format_script()
+.cb_type_label <- function(role, r_class, lang = "fr") {
+  base <- if (grepl("^factor_", role)) "factor"
+    else if (role %in% c("integer", "integer_count", "integer_scale")) "integer"
+    else if (role == "double") "double"
+    else {
+      rc <- r_class %||% ""
+      if (rc %in% c("numeric", "double")) "double"
+      else if (rc == "integer") "integer"
+      else if (rc == "logical") "logical"
+      else if (rc %in% c("Date", "POSIXct", "POSIXt")) "date"
+      else if (rc == "factor") "factor"
+      else "character"
+    }
+  m <- if (identical(lang, "en")) c(
+    factor = "factor", integer = "integer", double = "double",
+    character = "chr", logical = "logical", date = "date"
+  ) else c(
+    factor = "catégorielle", integer = "entier", double = "décimal",
+    character = "texte", logical = "booléenne", date = "date"
+  )
+  unname(m[base])
+}
+
+# Names of the six numeric summary rows, in display order (max -> mean).
+.cb_stat_labels <- function(lang = "fr") {
+  if (identical(lang, "en"))
+    c(max = "max", q3 = "Q3", median = "median", q1 = "Q1", min = "min",
+      mean = "mean + sd")
+  else
+    c(max = "max", q3 = "Q3", median = "médiane", q1 = "Q1", min = "min",
+      mean = "moyenne + écart-type")
+}
+
+# Column header labels.
+.cb_headers <- function(lang = "fr") {
+  if (identical(lang, "en"))
+    c(h = "", variable = "variable", type = "type", role = "role",
+      description = "description", na = "NA", val = "value", n = "n", pct = "%",
+      orig_val = "orig. label", orig_code = "orig. code")
+  else
+    c(h = "", variable = "variable", type = "type", role = "rôle",
+      description = "description", na = "NA", val = "valeur", n = "n", pct = "%",
+      orig_val = "libellé d'origine", orig_code = "code")
+}
+
+# Compose the NA cell string "46 (0%)" (0-decimal freq); "" when not computable.
+.cb_na_string <- function(na_n, na_pct) {
+  if (is.null(na_n) || length(na_n) != 1L || is.na(na_n)) return("")
+  paste0(format(round(na_n), trim = TRUE, scientific = FALSE),
+         " (", round(na_pct %||% 0), "%)")
+}
+
+# One empty codebook row (all fields blank / typed NA).
+.cb_row <- function(...) {
+  base <- list(
+    .row_type = "value", .h_level = NA_integer_, .block_id = NA_integer_,
+    .block_kind = NA_character_, .is_double = FALSE, .stat_rule = FALSE,
+    .is_first = FALSE, .is_block_last = FALSE,
+    h = NA_character_, variable = NA_character_, type = NA_character_,
+    role = NA_character_, description = NA_character_, na = NA_character_,
+    val = NA_character_, n = NA_real_, pct = NA_real_,
+    orig_val = NA_character_, orig_code = NA_character_
+  )
+  utils::modifyList(base, list(...))
+}
+
+# Which battery prefix (if any) a binary variable belongs to; NA otherwise.
+.cb_battery_of <- function(e, prefixes) {
+  if (length(prefixes) == 0 || e$role != "factor_binary") return(NA_character_)
+  for (p in prefixes) {
+    if (startsWith(e$new_name, p) || startsWith(e$orig_name, p)) return(p)
+  }
+  NA_character_
+}
+
+#' Build the long codebook tibble (internal).
+#'
+#' @return A tibble with display columns + internal (dot-prefixed) columns used
+#'   by \code{.cb_write_xlsx()}. Carries attribute \code{"any_new_label"}.
+.cb_build_tibble <- function(json_data, lang = "fr", titles = NULL,
+                             binary_batteries = NULL, natural_order = FALSE) {
+  entries   <- .gfs_build_entries(json_data$variables)
+  json_vars <- json_data$variables
+  config    <- json_data$config
+  n_ind     <- suppressWarnings(as.numeric(config$n_individuals %||% NA_real_))
+  stat_lbl  <- .cb_stat_labels(lang)
+  word_uniq <- if (identical(lang, "en")) "unique values" else "valeurs uniques"
+  word_dist <- if (identical(lang, "en")) "distinct values" else "valeurs distinctes"
+  word_nost <- if (identical(lang, "en")) "(run metadata_add_level_stats())"
+                                     else "(exécuter metadata_add_level_stats())"
+
+  # Which battery each entry belongs to (for run-boundary spacers).
+  prefixes <- as.character(binary_batteries %||% character(0))
+  batt <- vapply(entries, .cb_battery_of, character(1), prefixes = prefixes)
+
+  # Track titles consumed (to warn on titles targeting an absent variable).
+  titles_used <- rep(FALSE, length(titles))
+  title_targets <- unname(titles)
+
+  rows <- list()
+  block_id <- 0L
+  any_new_label <- FALSE
+  binary_anomalies <- character(0)
+
+  push <- function(r) rows[[length(rows) + 1L]] <<- r
+
+  for (i in seq_along(entries)) {
+    e  <- entries[[i]]
+    jv <- json_vars[[e$orig_name]]
+
+    # --- Section titles before this variable ------------------------------
+    title_inserted <- FALSE
+    if (length(titles) > 0) {
+      hit <- which(!titles_used &
+                   (title_targets == e$orig_name | title_targets == e$new_name))
+      for (ti in hit) {
+        raw <- names(titles)[ti]
+        lvl <- attr(regexpr("^#+", raw), "match.length")
+        lvl <- if (lvl < 0) 2L else min(max(lvl, 2L), 4L)
+        push(.cb_row(.row_type = "title", .h_level = as.integer(lvl), h = raw))
+        titles_used[ti] <- TRUE
+        title_inserted <- TRUE
+      }
+    }
+
+    # --- Battery spacer before a run start (skip if a title already broke) -
+    starts_batt <- !is.na(batt[i]) && (i == 1L || is.na(batt[i - 1L]) || batt[i - 1L] != batt[i])
+    if (starts_batt && !title_inserted) push(.cb_row(.row_type = "spacer"))
+
+    # --- Variable-level fields (repeated on every row of the block) --------
+    block_id <- block_id + 1L
+    var_disp <- e$new_name
+    type_lab <- .cb_type_label(e$role, e$r_class, lang)
+    role_lab <- .cb_role_label(e$role, lang)
+
+    is_factor <- grepl("^factor_", e$role) && e$n_non_missing > 0
+    is_num    <- e$role %in% c("integer", "integer_count", "integer_scale", "double")
+    is_double <- e$role == "double"
+
+    # NA cell: prefer stored top-level na_n/na_pct; else derive per type ----
+    na_n_stored   <- suppressWarnings(as.numeric(jv$na_n %||% NA_real_))
+    na_pct_stored <- suppressWarnings(as.numeric(jv$na_pct %||% NA_real_))
+    na_str <- ""
+    if (!is.na(na_n_stored)) {
+      na_str <- .cb_na_string(na_n_stored, na_pct_stored)
+    } else if (is_factor) {
+      ns <- vapply(e$levels_sorted,
+                   function(lv) if (is.null(lv$n)) NA_real_ else as.numeric(lv$n),
+                   numeric(1))
+      if (!anyNA(ns) && !is.na(n_ind)) {
+        na_n   <- n_ind - sum(ns)
+        na_str <- .cb_na_string(na_n, na_n / n_ind * 100)
+      }
+    } else if (is_num) {
+      na_str <- .cb_na_string(jv$num_stats$na_n, jv$num_stats$na_pct)
+    }
+    # Append the original labels of the levels recoded to NA (factors), so the
+    # reader sees WHICH values were treated as missing.
+    if (is_factor && length(e$missing_levels) > 0 && nzchar(na_str)) {
+      miss_lbls <- vapply(e$missing_levels,
+                          function(ml) ml$orig_label %||% "", character(1))
+      miss_lbls <- miss_lbls[nzchar(miss_lbls)]
+      if (length(miss_lbls) > 0)
+        na_str <- paste0(na_str, " (", paste(miss_lbls, collapse = " ; "), ")")
+    }
+
+    block_kind <- if (is_factor) "factor" else if (is_num) "numeric" else "char"
+    mk <- function(...) .cb_row(
+      .block_id = block_id, .block_kind = block_kind, .is_double = is_double,
+      variable = var_disp, type = type_lab, role = role_lab,
+      description = e$var_label, na = na_str, ...)
+
+    # --- Value rows ------------------------------------------------------
+    block_rows <- list()
+    if (natural_order && is_factor) {
+      # "As-is" mode (df-first, no AI): every non-missing level, sorted by
+      # numeric code, labels shown exactly as stored (no numeric prefix).
+      lv_list   <- e$levels_sorted
+      codes_num <- suppressWarnings(as.numeric(
+                     vapply(lv_list, function(lv) lv$code %||% "", character(1))))
+      ord     <- if (!anyNA(codes_num)) order(codes_num) else seq_along(lv_list)
+      lv_list <- lv_list[ord]
+      block_rows <- lapply(lv_list, function(lv) {
+        if (!identical(lv$display_label, lv$orig_label)) any_new_label <<- TRUE
+        mk(val = lv$display_label,
+           n   = if (is.null(lv$n))   NA_real_ else as.numeric(lv$n),
+           pct = if (is.null(lv$pct)) NA_real_ else as.numeric(lv$pct),
+           orig_val = lv$orig_label, orig_code = lv$code)
+      })
+
+    } else if (is_factor && e$role == "factor_binary" && e$n_non_missing == 2L) {
+      lv <- e$levels_sorted[[1]]                       # positive level (order 1)
+      disp <- .gfs_level_label(lv, e$max_order)
+      if (!identical(lv$display_label, lv$orig_label)) any_new_label <- TRUE
+      block_rows <- list(mk(
+        val = disp, n = if (is.null(lv$n)) NA_real_ else as.numeric(lv$n),
+        pct = if (is.null(lv$pct)) NA_real_ else as.numeric(lv$pct),
+        orig_val = lv$orig_label, orig_code = lv$code))
+
+    } else if (is_factor) {
+      # A factor_binary with != 2 non-missing levels is a data-quality anomaly:
+      # fall back to showing every level (like nominal), and flag it.
+      if (e$role == "factor_binary") binary_anomalies <- c(binary_anomalies, e$orig_name)
+      block_rows <- lapply(e$levels_sorted, function(lv) {
+        if (!identical(lv$display_label, lv$orig_label)) any_new_label <<- TRUE
+        mk(val = .gfs_level_label(lv, e$max_order),
+           n   = if (is.null(lv$n))   NA_real_ else as.numeric(lv$n),
+           pct = if (is.null(lv$pct)) NA_real_ else as.numeric(lv$pct),
+           orig_val = lv$orig_label, orig_code = lv$code)
+      })
+
+    } else if (is_num) {
+      st <- jv$num_stats
+      if (is.null(st)) {
+        block_rows <- list(mk(val = word_nost))
+      } else {
+        spec <- list(
+          list(k = "max",    v = st$max),
+          list(k = "q3",     v = st$q3),
+          list(k = "median", v = st$median),
+          list(k = "q1",     v = st$q1),
+          list(k = "min",    v = st$min),
+          list(k = "mean",   v = st$mean, sd = st$sd))
+        block_rows <- lapply(spec, function(s) {
+          mk(val = unname(stat_lbl[s$k]),
+             n   = if (is.null(s$v)) NA_real_ else as.numeric(s$v),
+             pct = if (identical(s$k, "mean") && !is.null(s$sd)) as.numeric(s$sd) else NA_real_,
+             .stat_rule = identical(s$k, "mean"))
+        })
+      }
+
+    } else {
+      # identifier / other / date / factor-with-0-levels
+      n_dist <- jv$n_distinct_data %||% NA
+      ex     <- jv$examples
+      if (e$role == "identifier") {
+        val <- if (!is.na(n_dist)) paste0(n_dist, " ", word_uniq) else word_uniq
+      } else if (!is.null(ex) && length(ex) > 0) {
+        val <- paste(utils::head(as.character(ex), 5L), collapse = "; ")
+        if (length(ex) > 5L) val <- paste0(val, "; …")
+      } else {
+        val <- if (!is.na(n_dist)) paste0(n_dist, " ", word_dist) else ""
+      }
+      block_rows <- list(mk(val = val))
+    }
+
+    # First / last markers on the block.
+    block_rows[[1]]$.is_first <- TRUE
+    block_rows[[length(block_rows)]]$.is_block_last <- TRUE
+    for (r in block_rows) push(r)
+
+    # --- Battery spacer after a run end -----------------------------------
+    ends_batt <- !is.na(batt[i]) && (i == length(entries) || is.na(batt[i + 1L]) || batt[i + 1L] != batt[i])
+    if (ends_batt) push(.cb_row(.row_type = "spacer"))
+  }
+
+  # Warn about unmatched titles / anomalous binaries.
+  if (length(titles) > 0 && any(!titles_used)) {
+    message("generate_codebook: ", sum(!titles_used),
+            " title(s) target a variable not found: ",
+            paste(unique(title_targets[!titles_used]), collapse = ", "))
+  }
+  if (length(binary_anomalies) > 0) {
+    message("generate_codebook: ", length(binary_anomalies),
+            " variable(s) tagged factor_binary do not have exactly 2 non-missing ",
+            "levels; all their levels are shown (consider reclassifying as ",
+            "factor_nominal/ordinal): ", paste(binary_anomalies, collapse = ", "))
+  }
+
+  # Drop leading/duplicate spacer rows (a spacer after a title/spacer or first).
+  keep <- rep(TRUE, length(rows))
+  for (i in seq_along(rows)) {
+    if (rows[[i]]$.row_type != "spacer") next
+    if (i == 1L) { keep[i] <- FALSE; next }
+    prev <- rows[[i - 1L]]$.row_type
+    if (prev %in% c("spacer", "title")) keep[i] <- FALSE
+  }
+  rows <- rows[keep]
+  # Drop a trailing spacer.
+  if (length(rows) > 0 && rows[[length(rows)]]$.row_type == "spacer")
+    rows <- rows[-length(rows)]
+
+  cb <- tibble::as_tibble(data.table::rbindlist(rows, fill = TRUE))
+  attr(cb, "any_new_label") <- any_new_label
+  cb
+}
+
+#' Write the styled Excel codebook (internal, openxlsx2).
+.cb_write_xlsx <- function(cb, path, lang = "fr", orig_val_kept = TRUE) {
+  if (!requireNamespace("openxlsx2", quietly = TRUE))
+    stop("generate_codebook() needs the 'openxlsx2' package.", call. = FALSE)
+  cm_to_pt <- function(cm) cm * 28.3465
+  RED <- "FFA10D2E"
+
+  disp_cols <- c("h", "variable", "type", "role", "description", "na",
+                 "val", "n", "pct",
+                 if (orig_val_kept) "orig_val", "orig_code")
+  ci   <- setNames(seq_along(disp_cols), disp_cols)
+  K    <- length(disp_cols)
+  hdr  <- .cb_headers(lang)[disp_cols]
+  n_row <- nrow(cb)
+  xr   <- function(i) i + 1L                       # tibble row -> Excel row
+
+  # --- data frame to write: blank var-level cols on non-first block rows --
+  dat <- as.data.frame(cb[disp_cols], stringsAsFactors = FALSE)
+  var_lvl <- intersect(c("variable", "type", "role", "description", "na"), disp_cols)
+  non_first <- !(cb$.is_first %in% TRUE)
+  for (cc in var_lvl) dat[non_first, cc] <- NA
+  # title text lives in `h`; blank it elsewhere already (only title rows set h)
+
+  wb <- openxlsx2::wb_workbook()
+  wb <- openxlsx2::wb_add_worksheet(wb, "Codebook", grid_lines = FALSE)
+  # header (row 1) then data (rows 2+)
+  wb <- openxlsx2::wb_add_data(wb, "Codebook", x = dat, col_names = TRUE, na = "")
+  hdr_df <- as.data.frame(matrix(hdr, nrow = 1), stringsAsFactors = FALSE)
+  wb <- openxlsx2::wb_add_data(wb, "Codebook", x = hdr_df, dims = "A1", col_names = FALSE, na = "")
+
+  all_dims <- openxlsx2::wb_dims(rows = seq_len(n_row + 1L), cols = seq_len(K))
+  wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = all_dims, name = "DejaVu Sans", size = 10)
+
+  # Header styling: bold, light fill, bottom rule, bottom-aligned.
+  hdr_dims <- openxlsx2::wb_dims(rows = 1, cols = seq_len(K))
+  wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = hdr_dims, name = "DejaVu Sans",
+                               size = 10, bold = TRUE)
+  wb <- openxlsx2::wb_add_fill(wb, "Codebook", dims = hdr_dims,
+                               color = openxlsx2::wb_color(hex = "FFF2F2F2"))
+  wb <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = hdr_dims,
+                                     horizontal = "left", vertical = "bottom", wrap_text = TRUE)
+  wb <- openxlsx2::wb_add_border(wb, "Codebook", dims = hdr_dims,
+                                 top_border = NULL, left_border = NULL, right_border = NULL,
+                                 bottom_border = "medium",
+                                 bottom_color = openxlsx2::wb_color("black"))
+
+  # Column-wide alignment for data rows.
+  data_rows <- 2:(n_row + 1L)
+  align <- function(cols, h, v = "top") {
+    if (length(cols) == 0) return(invisible())
+    d <- openxlsx2::wb_dims(rows = data_rows, cols = unname(ci[cols]))
+    wb <<- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
+                                        horizontal = h, vertical = v, wrap_text = TRUE)
+  }
+  align(intersect(c("variable", "type", "role", "description", "na"), disp_cols), "left")
+  align(intersect(c("val", "orig_val", "orig_code"), disp_cols), "left")
+  align(intersect(c("n", "pct"), disp_cols), "right")
+
+  # Per-block styling: merges, borders, number formats.
+  blocks <- split(seq_len(n_row), cb$.block_id)
+  for (b in blocks) {
+    if (length(b) == 0) next
+    kind      <- cb$.block_kind[b[1]]
+    is_double <- isTRUE(cb$.is_double[b[1]])
+    ex        <- xr(b)                      # Excel rows of this block
+    r1 <- min(ex); r2 <- max(ex)
+
+    # merge repeated variable-level cells (top-aligned) when >1 row
+    if (length(ex) > 1) for (cc in var_lvl)
+      wb <- openxlsx2::wb_merge_cells(wb, "Codebook",
+              dims = openxlsx2::wb_dims(rows = r1:r2, cols = ci[[cc]]))
+
+    # vertical separators (var|value, and inside the freq/stat block)
+    vline <- function(col, w) {
+      if (!col %in% disp_cols) return(invisible())
+      wb <<- openxlsx2::wb_add_border(wb, "Codebook",
+               dims = openxlsx2::wb_dims(rows = r1:r2, cols = ci[[col]]),
+               left_border = w, left_color = openxlsx2::wb_color("gray50"),
+               top_border = NULL, right_border = NULL, bottom_border = NULL,
+               update = TRUE)
+    }
+    vline("val", "medium"); vline("n", "thin"); vline("pct", "thin")
+    if (orig_val_kept) vline("orig_val", "medium")
+    vline("orig_code", "thin")
+
+    # numeric median|mean rule (top border on the mean row)
+    mean_rows <- ex[cb$.stat_rule[b] %in% TRUE]
+    if (length(mean_rows) > 0)
+      wb <- openxlsx2::wb_add_border(wb, "Codebook",
+              dims = openxlsx2::wb_dims(rows = mean_rows,
+                       cols = unname(ci[intersect(c("val", "n", "pct"), disp_cols)])),
+              top_border = "thin", top_color = openxlsx2::wb_color("gray50"),
+              left_border = NULL, right_border = NULL, bottom_border = NULL, update = TRUE)
+
+    # number formats
+    numfmt <- function(rows, col, fmt) {
+      if (length(rows) == 0 || !col %in% disp_cols) return(invisible())
+      wb <<- openxlsx2::wb_add_numfmt(wb, "Codebook",
+               dims = openxlsx2::wb_dims(rows = rows, cols = ci[[col]]), numfmt = fmt)
+    }
+    if (kind == "factor") {
+      numfmt(ex, "n", "#,##0"); numfmt(ex, "pct", "0\"%\"")
+    } else if (kind == "numeric") {
+      q_rows <- ex[!(cb$.stat_rule[b] %in% TRUE)]
+      numfmt(q_rows, "n", if (is_double) "0.0" else "0")
+      numfmt(mean_rows, "n", "0.0")
+      numfmt(mean_rows, "pct", "\"σ\"0.0")
+    }
+
+    # block separator: medium bottom rule under the last row, full width
+    wb <- openxlsx2::wb_add_border(wb, "Codebook",
+            dims = openxlsx2::wb_dims(rows = r2, cols = seq_len(K)),
+            bottom_border = "medium", bottom_color = openxlsx2::wb_color("gray70"),
+            top_border = NULL, left_border = NULL, right_border = NULL, update = TRUE)
+  }
+
+  # Title rows: colored/underlined heading text + tall rows.
+  title_idx <- which(cb$.row_type == "title")
+  for (i in title_idx) {
+    lvl  <- cb$.h_level[i]
+    size <- c(`2` = 16, `3` = 14, `4` = 12)[[as.character(lvl)]]
+    hcm  <- c(`2` = 5,  `3` = 2,  `4` = 1)[[as.character(lvl)]]
+    d <- openxlsx2::wb_dims(rows = xr(i), cols = ci[["h"]])
+    wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = d, name = "DejaVu Sans",
+            size = size, bold = TRUE, underline = "single",
+            color = openxlsx2::wb_color(hex = RED))
+    wb <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
+            horizontal = "left", vertical = "bottom", wrap_text = FALSE)
+    wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i), heights = cm_to_pt(hcm))
+  }
+
+  # Column widths.
+  widths <- c(h = 2.5, variable = 18, type = 12, role = 11, description = 48,
+              na = 12, val = 26, n = 9, pct = 7, orig_val = 28, orig_code = 10)
+  wb <- openxlsx2::wb_set_col_widths(wb, "Codebook", cols = seq_len(K),
+                                     widths = unname(widths[disp_cols]))
+
+  # Freeze the h + variable columns and the header row.
+  wb <- openxlsx2::wb_freeze_pane(wb, "Codebook", first_active_row = 2, first_active_col = 3)
+
+  openxlsx2::wb_save(wb, path, overwrite = TRUE)
+  invisible(path)
+}
+
+#' Generate a human-readable Excel codebook from the survey metadata JSON.
+#'
+#' Reads a \code{*.survey_meta.json} (AI-enriched or plain — after
+#' \code{metadata_add_level_stats()}) and writes a styled \code{.xlsx} codebook:
+#' one row per factor level / numeric summary statistic, variable-level
+#' information merged over those rows, with section titles, frozen panes and
+#' selective borders. Value labels and their order are identical to
+#' \code{generate_format_script()} (shared helpers).
+#'
+#' @param meta_json    Path to the unified JSON (or a \code{survey_meta} object),
+#'                     OR a data frame. When a data frame is passed, the whole
+#'                     non-AI pipeline runs silently on a temporary JSON
+#'                     (\code{extract_survey_metadata()} +
+#'                     \code{metadata_add_level_stats()}), levels are kept exactly
+#'                     as-is (see \code{keep_original}), and the codebook is built
+#'                     from it. \code{...} is forwarded to
+#'                     \code{extract_survey_metadata()} (e.g. \code{missing_num}).
+#' @param output_path  Output \code{.xlsx} path. Default: JSON stem +
+#'                     \code{_codebook.xlsx} (or \code{<df>_codebook.xlsx} in
+#'                     df-first mode).
+#' @param lang         \code{"fr"} (default) or \code{"en"} for column headers,
+#'                     type/role and summary-statistic labels.
+#' @param titles       Optional named character vector to insert section titles.
+#'                     Names carry markdown \code{##}/\code{###}/\code{####};
+#'                     values are the variable before which to insert the title.
+#'                     Vector order = insertion order; the same value repeated
+#'                     stacks several title levels before that variable.
+#' @param binary_batteries Optional character vector of variable-name prefixes.
+#'                     Consecutive \code{factor_binary} variables sharing a
+#'                     listed prefix are separated by a blank row before and
+#'                     after the run (readable frequency batteries).
+#' @param keep_original Logical. When \code{TRUE}, factor value labels are shown
+#'                     exactly as stored, sorted by original code, with no numeric
+#'                     ordering prefix (and no binary 1-row collapse). Forced
+#'                     \code{TRUE} in df-first mode. Default \code{FALSE}.
+#' @param ...          In df-first mode, extra arguments forwarded to
+#'                     \code{extract_survey_metadata()} (ignored otherwise).
+#'
+#' @return The codebook tibble (invisibly). The \code{.xlsx} is written as a side
+#'   effect.
+#' @examples
+#' \dontrun{
+#'   # From an enriched JSON:
+#'   metadata_add_level_stats("pps20_meta.json", df)
+#'   generate_codebook("pps20_meta.json",
+#'     titles = c("## Pratiques" = "STATUT_PRAT"),
+#'     binary_batteries = c("FAM_", "PROJ_"))
+#'   # Straight from a data frame (silent, no AI):
+#'   generate_codebook(pps20)
+#' }
+generate_codebook <- function(meta_json,
+                              output_path      = NULL,
+                              lang             = "fr",
+                              titles           = NULL,
+                              binary_batteries = NULL,
+                              keep_original    = FALSE,
+                              ...) {
+  lang <- match.arg(lang, c("fr", "en"))
+
+  # --- df-first mode: build a temporary JSON silently (no AI) ---------------
+  if (is.data.frame(meta_json)) {
+    df0   <- meta_json
+    df_nm <- deparse(substitute(meta_json))
+    if (length(df_nm) != 1L || !grepl("^[A-Za-z.][A-Za-z0-9._]*$", df_nm))
+      df_nm <- "codebook"
+    tmp_json <- tempfile(pattern = paste0(df_nm, "_"), fileext = ".survey_meta.json")
+    suppressMessages(extract_survey_metadata(df0, meta_json = tmp_json, ...))
+    suppressMessages(metadata_add_level_stats(tmp_json, df = df0))
+    if (is.null(output_path)) output_path <- paste0(df_nm, "_codebook.xlsx")
+    keep_original <- TRUE
+    message("generate_codebook: temporary metadata written to ", tmp_json)
+    meta_json <- tmp_json
+  }
+
+  json_path <- .resolve_json_path(meta_json)
+  stopifnot(file.exists(json_path))
+
+  if (is.null(output_path)) {
+    output_path <- sub("\\.survey_meta\\.json$", "_codebook.xlsx", json_path)
+    if (output_path == json_path)
+      output_path <- paste0(tools::file_path_sans_ext(json_path), "_codebook.xlsx")
+  }
+
+  json_data <- .read_meta_json(json_path)
+  cb <- .cb_build_tibble(json_data, lang = lang, titles = titles,
+                         binary_batteries = binary_batteries,
+                         natural_order = isTRUE(keep_original))
+
+  orig_val_kept <- isTRUE(attr(cb, "any_new_label"))
+  if (!orig_val_kept) cb$orig_val <- NULL
+
+  .cb_write_xlsx(cb, output_path, lang = lang, orig_val_kept = orig_val_kept)
+  message(sprintf("Codebook written to %s (%d variables, %d rows)",
+                  output_path, length(unique(stats::na.omit(cb$.block_id))), nrow(cb)))
+
+  # Return the display tibble (drop internal dot-columns).
+  invisible(cb[, !grepl("^\\.", names(cb)), drop = FALSE])
 }
 
 

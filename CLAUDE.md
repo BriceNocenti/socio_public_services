@@ -24,7 +24,11 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
    → AI disambiguates ordinal vs nominal, writes role + desc + order to JSON
 
 3. metadata_add_level_stats(meta_json, df)
-   → Adds n/pct counts per level to JSON (required before ai_suggest_labels)
+   → Adds n/pct per level + num_stats + config.n_individuals
+   → Top-level na_n/na_pct for EVERY var (NA + missing-coded, post-format); text/other
+     vars also get an `examples` array (first 5 distinct raw values)
+   → For factors, adds df-observed codes absent from the value labels (empty label,
+     flagged for review); required before ai_suggest_labels / generate_codebook
 
 4. ai_suggest_labels(meta_json, ...)
    → AI suggests short display labels, writes new_label to JSON levels
@@ -35,6 +39,21 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
 6. generate_format_script(meta_json, output_path = NULL)
    → Generates executable R script that applies all formatting
    → Reads numeric stats from JSON (run metadata_add_level_stats() first)
+   → Simplified: no codebook / no "## Variable list" / no "# Select and reorder" sections;
+     each block applies its var label inline via
+     "label" -> varlab  then  ... |> `attr<-`("label", varlab)  (survives conversion)
+
+7. generate_codebook(meta_json, output_path = NULL, lang = "fr", titles = NULL,
+                      binary_batteries = NULL, keep_original = FALSE, ...)
+   → Styled .xlsx codebook (openxlsx2): one row per level / numeric stat, variable
+     info merged over rows, section titles, frozen panes, selective borders.
+   → Reads JSON only — NO df param (examples/NA now stored in the JSON by
+     metadata_add_level_stats). NA cell lists the original labels of missing-recoded levels.
+   → meta_json may be a DATA FRAME: runs extract + metadata_add_level_stats silently on a
+     temp JSON (tempdir), keep_original forced TRUE (raw labels, code order, no prefix);
+     `...` forwarded to extract_survey_metadata.
+   → val labels/order reuse .gfs_build_entries()/.gfs_level_label() → identical to
+     generate_format_script(). Run metadata_add_level_stats() first for n/pct/NA.
 ```
 
 All functions take `meta_json` (path string or `survey_meta` object) as their first argument.
@@ -51,6 +70,13 @@ Users can (and do) manually edit the JSON between AI steps. Key fields per varia
 - `levels.{code}.new_label`: short display label suggested by AI
 - `levels.{code}.missing`: TRUE for missing-value levels (old `null_coded` field renamed)
 - `levels.{code}.order`: integer for ordinal level ordering
+- `config.n_individuals`: total row count (written by extract_survey_metadata / backfilled by
+  metadata_add_level_stats).
+- `na_n` / `na_pct` (top-level, per variable, ALL types): count/percent of individuals NA after
+  formatting = NA + missing-coded. Written by metadata_add_level_stats. Codebook prefers these;
+  falls back to n_individuals − Σ(non-missing level n) for factors on older JSONs.
+- `examples` (top-level, text/"other" vars only): first 5 distinct raw values, for the codebook.
+- `num_stats`: min/max/mean/sd/q1/median/q3 (numeric vars). NA moved OUT to top-level na_n/na_pct.
 
 ### SAS Format File Support
 
@@ -74,6 +100,45 @@ an all-upper-case df. Parsing is factored into `.parse_sas_value_blocks()` /
 `.parse_sas_format_mapping()` / `.parse_sas_var_labels()`, shared by `parse_sas_formats()`
 and `apply_sas_value_labels()`; resolution helpers are `.match_df_col()` /
 `.resolve_sas_name_to_col()`.
+
+**Key Design Decision** — `generate_codebook()` (section 9b in the source) builds a long
+tibble (`.cb_build_tibble()`) then styles an xlsx (`.cb_write_xlsx()`, openxlsx2). It shares
+`.gfs_build_entries()` + `.gfs_level_label()` with `generate_format_script()` so the `val`
+column is byte-identical to the fct_recode LHS. Numeric summary values are written as exact
+numbers with per-range Excel number formats (`0.0`, `#,##0`, `0"%"`, `"σ"0.0`) — not
+pre-rounded text — so precision is preserved. `type`/`role` labels come from
+`.cb_type_label()` / `.cb_role_label()` (FR default, `lang="en"` option); `type` is derived
+from `role` (+`r_class` only for identifier/other). A `factor_binary` with exactly 2
+non-missing levels renders one row (positive/order-1 level); if it has ≠2 levels it falls back
+to showing all levels and is flagged (data-quality anomaly). The generated **format script**
+label form (`"label" -> varlab` … `|> \`attr<-\`("label", varlab)`) applies the label to the
+final converted object so it survives `factor(as.character())` / `as.integer(...)`.
+No `df` param: text example values + NA come from the JSON (stored by
+`metadata_add_level_stats`), so the codebook is fully JSON-driven. The NA cell appends the
+original labels of the missing-recoded levels, e.g. `46 (0%) (Réponse Guyane… ; Code commune…)`.
+`keep_original = TRUE` (forced in df-first mode) shows factor labels as-is, sorted by numeric
+code, no ordering prefix and no binary 1-row collapse — via the `natural_order` path in
+`.cb_build_tibble()`. Passing a **data frame** as the first arg builds a temp JSON silently
+(extract + metadata_add_level_stats, `...` → extract) and sets `keep_original`.
+
+**Key Design Decision** — Missing-value flagging in `extract_survey_metadata()` is **exact** by design:
+a level is flagged `missing` only when its (normalized) label is literally in `config.missing_chr` OR
+matches the conservative `missing_lbl_pattern` regex (NSP/NR/REFUS/ne sait pas/non répondu/sans réponse).
+Tolerant/fuzzy matching was deliberately rejected — it risks flagging real response levels as NA. So a
+label variant like `"Non concerné(e)"` must be added to `missing_chr` explicitly (or marked `missing` in
+the JSON). Separately, `ai_classify_roles()` never writes `factor_binary` for a variable without exactly
+2 non-missing levels (mapped to `factor_nominal` instead), so the AI cannot create a role↔levels
+inconsistency — this is the single "born-consistent" guard (there is no extract-time auto-demotion).
+
+**Key Design Decision** — `metadata_add_level_stats(meta_json, df, add_observed_levels = TRUE,
+max_new_levels = 50L)` adds, for **factor** variables, value codes present in `df` but absent from the
+JSON value labels (e.g. a level missing from the SAS format script). They get an empty `label` (flagged
+for manual review — fill it or mark `missing`), a provisional `order` after the current max, and are
+counted in `n`/`pct` as ordinary non-missing levels; a per-variable count above `max_new_levels` is
+reported but not added (likely a nomenclature). Done here (post role-classification) so numeric vars
+mis-detected as factors don't accumulate spurious levels. Empty-label levels are skipped by
+`ai_suggest_labels()`, and `.gfs_build_entries()` falls back to the code (via `.first_nzchar()`) for
+display so `generate_format_script()`/`generate_codebook()` stay clean until the label is filled.
 
 ---
 
@@ -130,7 +195,8 @@ Each dummy has matching configs:
 | `test-ai-classify-roles.R`      | A/AC   | `ai_classify_roles()` logic + auto-classification         |
 | `test-ai-suggest-labels.R`      | L/B    | `ai_suggest_labels()` prompt building + JSON writing      |
 | `test-ai-merge-levels.R`        | M      | `ai_merge_levels()` logic                                 |
-| `test-generate-format-script.R` | G      | `generate_format_script()` code generation                |
+| `test-generate-format-script.R` | G/CV/H | `generate_format_script()` + level-label / stats-comment  |
+| `test-generate-codebook.R`      | C      | `generate_codebook()` tibble build + xlsx write           |
 | `test-json-roundtrip.R`         | J/K    | JSON read/write roundtrip, backup, migration helpers      |
 | `test-nomenclatures-insee.R`    | O      | INSEE nomenclature helpers                                |
 
@@ -148,10 +214,12 @@ assign("ai_call_claude", mock_ai(response_text), envir = globalenv())
 
 - `\uXXXX` unicode escapes do NOT work inside backtick-quoted R names — use double-quoted names
 - `metadata_add_level_stats()` must run before `ai_suggest_labels()` (needs n/pct)
-- `metadata_add_level_stats()` must run before `generate_format_script()` for numeric stats
+- `metadata_add_level_stats()` must run before `generate_format_script()` / `generate_codebook()`
+  for numeric stats, factor NA rates (`config.n_individuals`) and `num_stats.na_n/na_pct`
+- `generate_codebook()` reads the JSON only; pass `df` to list example values for text/other vars
 - Do NOT construct metadata tibbles in tests — use JSON write + `.load_meta()` roundtrip pattern
 - SAS inline format string `.sas_emploi_inline` is shared — don't redefine in test files
-- Pre-existing P5 test failure: prompt file `instructions/classify_roles_prompt.md` is missing
+- Adding a new `config.*` scalar requires updating the `cfg_fields` allow-list in `.write_meta_json()`
 
 ---
 
@@ -182,6 +250,11 @@ assign("ai_call_claude", mock_ai(response_text), envir = globalenv())
   chunk budget (labels/varnames no longer fixed), clamped to 128K.
 - All four AI functions cache their system prompt via `cache_control` (labels/varnames were
   previously uncached).
+- Labels + merge parse chunks via `.parse_var_object_chunk()`: whole-object parse, then a
+  per-variable recovery fallback (`.extract_var_objects()` + `.match_json_delim()`) so one stray
+  brace on a large chunk no longer discards every variable in it (varnames already had this).
+  `ai_suggest_labels(..., resume_batch_id="msgbatch_...")` re-parses an existing batch (free
+  recovery); raw chunk responses cached to `tempdir()/labels_cache` via `.cache_ai_raw()`.
 - AI prompts are built by `build_*_prompt()` functions, sent in chunks
 - `dry_run = TRUE` returns prompts without calling API (useful for debugging)
 - NEVER use AI API calls in tests to avoid costs (mock them instead)

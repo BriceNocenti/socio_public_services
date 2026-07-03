@@ -191,6 +191,10 @@ test_that("INT2: Emploi dummy full pipeline with SAS format file", {
   expect_true(all(c("min", "max", "mean", "sd", "q1", "median", "q3") %in%
                     names(json_data$variables$HCONT$num_stats)),
               label = "INT2: HCONT num_stats must contain all 7 fields")
+  expect_false("na_n" %in% names(json_data$variables$HCONT$num_stats),
+               label = "INT2: na_n moved out of num_stats to the variable level")
+  expect_false(is.null(json_data$variables$HCONT$na_n),
+               label = "INT2: HCONT carries top-level na_n after metadata_add_level_stats")
   expect_false(is.null(json_data$variables$NAIA$num_stats),
                label = "INT2: NAIA should have num_stats after metadata_add_level_stats")
   expect_true(all(c("min", "max", "mean", "sd", "q1", "median", "q3") %in%

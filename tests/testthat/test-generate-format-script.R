@@ -1,7 +1,7 @@
 # Tests for generate_format_script() and its internal helpers.
 # Functions under test: .gfs_numeric_prefix, .gfs_compute_numeric_stats,
-#   .gfs_build_entries, .gfs_codebook_lines, .gfs_format_blocks,
-#   generate_format_script
+#   .gfs_build_entries, .gfs_level_label, .gfs_num_stats_comment,
+#   .gfs_format_blocks, generate_format_script
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +42,13 @@ test_that("numeric stats: basic computation", {
   expect_false(is.null(st$sd))
   expect_false(is.null(st$q1))
   expect_false(is.null(st$q3))
+})
+
+test_that("numeric stats: na_n / na_pct count NA + missing-coded values", {
+  col <- c(10, 20, 30, 40, 50, 99, NA)   # 99 = missing code, plus one NA
+  st <- .gfs_compute_numeric_stats(col, missing_codes = "99")
+  expect_equal(st$na_n, 2L)                       # the 99 and the NA
+  expect_equal(round(st$na_pct, 2), round(2 / 7 * 100, 2))
 })
 
 test_that("numeric stats: all missing returns NULL", {
@@ -95,141 +102,6 @@ test_that("build_entries: ordinal with missing, sorted by order", {
   # Missing
   expect_length(e$missing_levels, 1)
   expect_equal(e$missing_levels[[1]]$code, "99")
-})
-
-
-# ---------------------------------------------------------------------------
-# D. Codebook lines
-# ---------------------------------------------------------------------------
-
-test_that("codebook: ordinal/nominal uses 2 lines", {
-  vars <- list(
-    Q1 = list(
-      var_label = "Group age", role = "factor_ordinal", new_name = "AGE_GRP",
-      levels = list(
-        "1" = list(order = 1L, label = "Young", new_label = "Jeune", n = 100L, pct = 50L),
-        "2" = list(order = 2L, label = "Old",   new_label = "Vieux", n = 100L, pct = 50L),
-        "9" = list(missing = TRUE, label = "NSP")
-      )
-    )
-  )
-  entries <- .gfs_build_entries(vars)
-  cb <- .gfs_codebook_lines(entries)
-
-  # Should have: var_list <- c( + 2 content lines + )
-  content_lines <- cb[!grepl("^(var_list|\\))", cb)]
-  expect_length(content_lines, 2)
-
-  # Line 1: variable name + var_label
-  expect_match(content_lines[1], '"AGE_GRP"')
-  expect_match(content_lines[1], "Group age")
-
-  # Line 2: continuation with levels
-  expect_match(content_lines[2], "^\\s+#")
-  expect_match(content_lines[2], "1-Jeune")
-  expect_match(content_lines[2], "2-Vieux")
-})
-
-test_that("codebook: binary uses 1 line", {
-  vars <- list(
-    Q_BIN = list(
-      var_label = "Married?", role = "factor_binary", new_name = "MARRIED",
-      levels = list(
-        "1" = list(order = 1L, label = "Yes", new_label = "Oui", n = 300L, pct = 60L),
-        "2" = list(order = 2L, label = "No",  new_label = "Non", n = 200L, pct = 40L),
-        "9" = list(missing = TRUE, label = "NSP")
-      )
-    )
-  )
-  entries <- .gfs_build_entries(vars)
-  cb <- .gfs_codebook_lines(entries)
-
-  content_lines <- cb[!grepl("^(var_list|\\))", cb)]
-  expect_length(content_lines, 1)
-  expect_match(content_lines[1], '"MARRIED"')
-  expect_match(content_lines[1], "1-Oui")
-  expect_match(content_lines[1], "2-Non")
-})
-
-test_that("codebook: numeric variable uses 1 line", {
-  vars <- list(
-    AGE = list(
-      var_label = "Age in years", role = "integer_count", new_name = "AGE_P1",
-      levels = list()
-    )
-  )
-  entries <- .gfs_build_entries(vars)
-  cb <- .gfs_codebook_lines(entries)
-
-  content_lines <- cb[!grepl("^(var_list|\\))", cb)]
-  expect_length(content_lines, 1)
-  expect_match(content_lines[1], '"AGE_P1"')
-  expect_match(content_lines[1], "Age in years")
-})
-
-test_that("codebook: identifier uses 1 line with role keyword", {
-  vars <- list(
-    ID = list(
-      var_label = "Identifier", role = "identifier", new_name = "ID",
-      levels = list()
-    )
-  )
-  entries <- .gfs_build_entries(vars)
-  cb <- .gfs_codebook_lines(entries)
-
-  content_lines <- cb[!grepl("^(var_list|\\))", cb)]
-  expect_length(content_lines, 1)
-  expect_match(content_lines[1], "identifier")
-  expect_match(content_lines[1], "Identifier")
-})
-
-test_that("codebook: no trailing comma on last entry", {
-  vars <- list(
-    Q1 = list(var_label = "Q1", role = "identifier", new_name = "V1", levels = list()),
-    Q2 = list(var_label = "Q2", role = "identifier", new_name = "V2", levels = list())
-  )
-  entries <- .gfs_build_entries(vars)
-  cb <- .gfs_codebook_lines(entries)
-
-  # Last content line (before closing paren) should not have comma after the quoted name
-  content_lines <- cb[!grepl("^(var_list|\\))", cb)]
-  last_line <- content_lines[length(content_lines)]
-  # Should have "V2" followed by space then # (no comma)
-  expect_false(grepl('"V2",', last_line, fixed = TRUE))
-  expect_true(grepl('"V2"\\s', last_line))
-})
-
-test_that("codebook: orig name hidden when same as new_name", {
-  vars <- list(
-    SAME = list(var_label = "Same name var", role = "identifier", new_name = "SAME",
-                levels = list())
-  )
-  entries <- .gfs_build_entries(vars)
-  cb <- .gfs_codebook_lines(entries)
-
-  content <- paste(cb, collapse = "\n")
-  # The orig name "SAME" should NOT appear as a second mention after the label
-  # It appears in "SAME" as the var name, but not again in the comment
-  comment_part <- sub('.*# ', '', cb[grepl('"SAME"', cb)])
-  # The comment should have 'identifier "Same name var"' without trailing SAME
-  expect_false(grepl('Same name var"\\s+SAME', comment_part))
-})
-
-test_that("codebook: padding alignment — all # at same column", {
-  vars <- list(
-    Q_SHORT = list(var_label = "Short", role = "identifier", new_name = "A",
-                   levels = list()),
-    Q_LONG_NAME = list(var_label = "Long", role = "identifier",
-                        new_name = "VERY_LONG_VARIABLE_NAME", levels = list())
-  )
-  entries <- .gfs_build_entries(vars)
-  cb <- .gfs_codebook_lines(entries)
-
-  content_lines <- cb[!grepl("^(var_list|\\))", cb)]
-  # Find position of first # in each line
-  hash_positions <- regexpr("# ", content_lines)
-  # All should be at the same position
-  expect_true(length(unique(hash_positions)) == 1)
 })
 
 
@@ -356,7 +228,7 @@ test_that("format: double gets as.double + NA_real_", {
   expect_match(combined, "NA_real_", fixed = TRUE)
 })
 
-test_that("format: identifier produces comment-only, no assignment", {
+test_that("format: identifier leaves column untouched but applies label", {
   vars <- list(
     ID = list(var_label = "Identifier", role = "identifier", new_name = "ID",
               levels = list())
@@ -364,13 +236,12 @@ test_that("format: identifier produces comment-only, no assignment", {
   entries <- .gfs_build_entries(vars)
   fmt <- .gfs_format_blocks(entries, "data")
 
-  # No assignment (no <-)
-  assignment_lines <- fmt[grepl("<-", fmt)]
-  expect_length(assignment_lines, 0)
-
-  # Has a comment line
-  comment_lines <- fmt[grepl("^# ID", fmt)]
-  expect_true(length(comment_lines) >= 1)
+  # Column value is NOT reassigned (no conversion)
+  expect_false(any(grepl("data\\$ID <-", fmt)))
+  # Header comment + label applied via varlab
+  expect_true(any(grepl('^# "ID" identifier', fmt)))
+  expect_true(any(grepl('"Identifier" -> varlab', fmt, fixed = TRUE)))
+  expect_true(any(grepl('attr(data$ID, "label") <- varlab', fmt, fixed = TRUE)))
 })
 
 test_that("format: level order matches order field (ascending)", {
@@ -494,17 +365,17 @@ test_that("generate_format_script: contains expected sections", {
   expect_match(script, "library(dplyr)",   fixed = TRUE)
   expect_match(script, "library(forcats)", fixed = TRUE)
 
-  # Codebook
-  expect_match(script, "var_list <- c(", fixed = TRUE)
-  expect_match(script, '"GROUP"')
+  # No variable-list / select-reorder sections anymore (codebook covers that)
+  expect_false(grepl("var_list", script, fixed = TRUE))
+  expect_false(grepl("Select and reorder", script, fixed = TRUE))
 
   # Formatting
   expect_match(script, "fct_recode")
   expect_match(script, "as.ordered()", fixed = TRUE)
 
-  # Variable labels
-  expect_match(script, "Variable labels", fixed = TRUE)
-  expect_match(script, 'attr(data$GROUP, "label")', fixed = TRUE)
+  # Variable label applied inline via the `attr<-` pipe (label-first via varlab)
+  expect_match(script, '"Group" -> varlab', fixed = TRUE)
+  expect_match(script, '`attr<-`("label", varlab)', fixed = TRUE)
 
   # Rename block should be present (Q1 -> GROUP)
   expect_match(script, "dplyr::rename", fixed = TRUE)
@@ -618,4 +489,39 @@ test_that("CV6: double conversion uses as.double(as.character())", {
   combined <- paste(fmt, collapse = "\n")
 
   expect_match(combined, "as.double(as.character(", fixed = TRUE)
+})
+
+
+# ---------------------------------------------------------------------------
+# H. Shared level-label helper + numeric stats comment + inline labels
+# ---------------------------------------------------------------------------
+
+test_that("level-label helper: prefix + display label, zero-padded by max_order", {
+  lv <- list(order = 2L, display_label = "Natation")
+  expect_equal(.gfs_level_label(lv, max_order = 5L), "2-Natation")
+  expect_equal(.gfs_level_label(lv, max_order = 12L), "02-Natation")
+})
+
+test_that("num stats comment: integer rounds quantiles to 0, mean/sd to 1", {
+  st <- list(min = 0, max = 46, mean = 6.0397, sd = 4.9478, q1 = 3, median = 5, q3 = 8)
+  expect_equal(.gfs_num_stats_comment(st, digits = 0L),
+               "# min=0 Q1=3 median=5 Q3=8 max=46 ; mean 6.0 σ4.9")
+  expect_null(.gfs_num_stats_comment(NULL))
+})
+
+test_that("factor block: label applied via `attr<-` pipe end, label-first via varlab", {
+  vars <- list(
+    Q = list(
+      var_label = "Aime le sport", role = "factor_binary", new_name = "SPORT",
+      levels = list(
+        "1" = list(order = 1L, label = "Oui", new_label = "Sport", n = 60L, pct = 60L),
+        "0" = list(order = 2L, label = "Non", new_label = "Pas sport", n = 40L, pct = 40L)
+      )
+    )
+  )
+  entries <- .gfs_build_entries(vars)
+  fmt <- paste(.gfs_format_blocks(entries, "df"), collapse = "\n")
+  expect_match(fmt, '"Aime le sport" -> varlab', fixed = TRUE)
+  expect_match(fmt, 'fct_relevel(sort) |> `attr<-`("label", varlab)', fixed = TRUE)
+  expect_match(fmt, '"1-Sport"', fixed = TRUE)   # value label == codebook val
 })

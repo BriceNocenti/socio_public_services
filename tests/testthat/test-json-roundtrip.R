@@ -639,6 +639,36 @@ test_that("H7: metadata_add_level_stats excludes config missing_num from numeric
   expect_equal(st$mean, 20,  label = "H7: mean must be 20 (mean of 10+20+30+20 / 4)")
 })
 
+test_that("H8: metadata_add_level_stats adds observed-but-unlabelled factor level", {
+  # labels only {1=A, 2=B}; data also contains unlabelled code 3
+  col  <- make_labelled_col(c(1, 1, 1, 2, 2, 3, 3, 3, 3, 3), c("A" = 1, "B" = 2))
+  df   <- make_survey_df(col)
+  path <- tmp_json(); on.exit(unlink(path))
+  suppressMessages(extract_survey_metadata(df, path,
+    missing_num = integer(0), missing_chr = character(0)))
+  expect_false("3" %in% names(.read_meta_json(path)$variables$Q1$levels))
+
+  suppressMessages(metadata_add_level_stats(path, df))
+  lv <- .read_meta_json(path)$variables$Q1$levels
+  expect_true("3" %in% names(lv))
+  expect_identical(lv[["3"]]$label, "")          # empty label, awaiting review
+  expect_false(isTRUE(lv[["3"]]$missing))         # counted as non-missing
+  expect_equal(lv[["3"]]$n, 5L)
+  expect_false(is.null(lv[["3"]]$order))          # got a provisional order
+  # counted in pct: 3/2/5 over 10 → 30/20/50, sums to 100
+  expect_equal(sum(vapply(lv, function(l) as.numeric(l$pct %||% 0), numeric(1))), 100)
+})
+
+test_that("H9: add_observed_levels=FALSE keeps the classic exclude behaviour", {
+  col  <- make_labelled_col(c(1, 2, 3, 3), c("A" = 1, "B" = 2))
+  df   <- make_survey_df(col)
+  path <- tmp_json(); on.exit(unlink(path))
+  suppressMessages(extract_survey_metadata(df, path,
+    missing_num = integer(0), missing_chr = character(0)))
+  suppressMessages(metadata_add_level_stats(path, df, add_observed_levels = FALSE))
+  expect_false("3" %in% names(.read_meta_json(path)$variables$Q1$levels))
+})
+
 # ---------------------------------------------------------------------------
 # I. Empty string NA conversion in import_survey()
 # ---------------------------------------------------------------------------
