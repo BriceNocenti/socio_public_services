@@ -19,8 +19,15 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
 1. extract_survey_metadata(df, meta_json, ...)
    → Detects column roles, writes initial JSON with levels/labels/role
    → Numeric vars keep ONLY their special codes as levels (missing_num matches +
-     labelled codes, all flagged missing:true); plain data-range values never
-     become levels. Sparsely-labelled numerics stay numeric, not factor (coverage).
+     labelled codes, flagged missing:true); plain data-range values never become
+     levels. Labelled codes are auto-flagged missing ONLY when SPARSE sentinels
+     (≤2 extra labelled codes, or unlabelled-observed > max_levels_cat): a fully-
+     labelled count (integer_count with a label per value, e.g. NB_PERS_DOM) drops
+     its labels and stays a clean count, never 100% NA. Sparsely-labelled numerics
+     stay numeric, not factor (coverage).
+   → Value-label codes sort NUMERICALLY when all integer-like (string codes "1".."10"
+     otherwise sort lexically, "10" between "1" and "2"). A bare 0/1 numeric with no
+     value labels → factor_binary with synthesized Non(0)/Oui(1), positive=order 1.
    → Returns invisible(survey_meta) — enables |> piping
 
 2. ai_classify_roles(meta_json, ...)
@@ -264,13 +271,22 @@ by design — flagged `missing` only when the (normalized) label is literally in
 the code is in `config.missing_num`, OR the label matches the conservative `missing_lbl_pattern` regex
 (NSP/NR/REFUS/ne sait pas/non répondu/sans réponse). Tolerant/fuzzy matching was rejected (risks flagging
 real levels), so a label variant like `"Non concerné(e)"` must be in `missing_chr` (or marked in the JSON).
-NUMERIC vars: keep ONLY special codes as levels — a value in `missing_num` OR any value carrying a genuine
-value label (on a numeric column a label always marks a special/non-response code) → all flagged
-`missing:true` (auto-flag; the extract prints which labelled codes it flagged, override with
-`"missing": false` for a rare real code like top-coding). `.detect_role_v3()` uses label COVERAGE
-(`max_levels_cat`, revived): a numeric column whose labels cover only a few of many observed values is a
-partially-labelled numeric, not a factor. Separately, `ai_classify_roles()` never writes `factor_binary`
-without exactly 2 non-missing levels (→ `factor_nominal`) — the single "born-consistent" guard.
+NUMERIC vars: keep ONLY special codes as levels — a value in `missing_num` (always flagged), plus labelled
+codes flagged `missing:true` ONLY when they are SPARSE sentinels: `n_extra_lab <= 2` (labelled, not already
+missing) OR `n_unlabelled_obs > max_levels_cat`. A fully/mostly-labelled numeric (a label per value, e.g.
+NB_PERS_DOM "1 personne".."9 personnes", forced to `integer_count`) is descriptive, NOT missing — its
+labels are dropped and it stays a clean count (num_stats over the real values), never 100% NA. The extract
+prints auto-flagged labelled codes; override with `"missing": false` for a rare real code (top-coding).
+`.detect_role_v3()` uses the same label COVERAGE gate (`max_levels_cat`): a numeric column whose labels
+cover only a few of many observed values is a partially-labelled numeric, not a factor. A bare numeric with
+exactly 2 distinct values ⊆ {0,1} and NO value labels → `factor_binary` (Non/Oui synthesized, positive=code
+"1"). Value-label codes sort NUMERICALLY when all integer-like (else lexical → "10" between "1" and "2");
+same numeric sort for observed-but-undeclared codes in `metadata_add_level_stats()`. NOTE: `order` and
+`role` are PRESERVED across re-extract (and `ai_classify_roles` skips binary order once a level has
+`order:1`), so a stale order set before the missing-config was complete stays frozen — finalize
+`missing_chr`/yes-no labels BEFORE the first extract, or fix that variable's `order` in the JSON once.
+Separately, `ai_classify_roles()` never writes `factor_binary` without exactly 2 non-missing levels (→
+`factor_nominal`) — the single "born-consistent" guard.
 
 **Key Design Decision** — `metadata_add_level_stats(meta_json, df, add_observed_levels = TRUE,
 max_new_levels = 50L)` adds, for **factor** variables, value codes present in `df` but absent from the

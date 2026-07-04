@@ -2265,10 +2265,12 @@ extract_survey_metadata <- function(
 
     # --- values and labels vectors (ALL, including missing candidates) ---
     if (has_val_labs) {
-      # Sort by numeric value code — Stata's label-definition order may be
-      # alphabetical by label text, but we always want code-ascending order.
-      sorted_idx <- order(val_labs)
-      all_codes  <- unname(val_labs)[sorted_idx]   # numeric codes
+      # Sort by value code, code-ascending. Sort NUMERICALLY when every code is
+      # integer-like — string-coded value labels (SPSS/haven character columns)
+      # otherwise sort lexicographically, placing "10" between "1" and "2".
+      code_key   <- suppressWarnings(as.numeric(as.character(val_labs)))
+      sorted_idx <- if (!anyNA(code_key)) order(code_key) else order(val_labs)
+      all_codes  <- unname(val_labs)[sorted_idx]   # value codes
       all_labels <- .normalize_text(names(val_labs)[sorted_idx], sanitize = TRUE)
 
       # Inner join: keep only codes that are actually observed in the data.
@@ -2345,13 +2347,28 @@ extract_survey_metadata <- function(
       detected_role <- .effective_roles[[vname]]
     }
 
-    # --- Numeric roles: plain data-range values never become levels; keep only
-    #     the SPECIAL codes = missing-matched values OR values carrying a genuine
-    #     value label. On a numeric column a label always marks a special/non-
-    #     response code, so every kept level is flagged missing (auto-flag). ---
+    # A bare 0/1 numeric indicator (no source value labels) is classified
+    # factor_binary by .detect_role_v3; synthesize Non/Oui labels so it reads as a
+    # real binary (positive = code "1").
+    if (detected_role == "factor_binary" && !has_val_labs &&
+        length(raw_values) == 2L && setequal(raw_values, c("0", "1"))) {
+      raw_labels <- ifelse(raw_values == "1", "Oui", "Non")
+      lbls_clean <- ifelse(vals_clean == "1", "Oui", "Non")
+    }
+
+    # --- Numeric roles: plain data-range values never become levels; keep only the
+    #     SPECIAL codes = missing-matched values, plus (when SPARSE) labelled codes.
+    #     A label on a numeric code marks a special/non-response value ONLY when it is
+    #     a sparse sentinel: just 1-2 labelled codes, or labels covering few of many
+    #     observed values. A fully-labelled count (a label per value, e.g. NB_PERS_DOM
+    #     "1 personne".."9 personnes") is descriptive, NOT missing — keep only genuine
+    #     missing codes and drop the rest (num_stats then computed over real values). ---
     if (detected_role %in% c("double", "integer", "integer_count", "integer_scale")) {
       is_labelled <- nzchar(raw_labels) & raw_labels != raw_values
-      keep        <- is_miss | is_labelled
+      n_extra_lab <- sum(is_labelled & !is_miss)      # labelled codes not already missing
+      n_unlab_obs <- n_dist_total - n_labelled_obs     # observed values with NO label
+      sparse_sentinels <- n_extra_lab <= 2L || n_unlab_obs > max_levels_cat
+      keep <- if (sparse_sentinels) is_miss | is_labelled else is_miss
       # Report labelled codes auto-flagged missing without being in missing_num,
       # so a rare meaningful code (e.g. top-coding) can be un-flagged in the JSON.
       auto <- keep & is_labelled & !is_miss
@@ -2362,7 +2379,7 @@ extract_survey_metadata <- function(
       }
       raw_values <- raw_values[keep]
       raw_labels <- raw_labels[keep]
-      is_miss    <- rep(TRUE, length(raw_values))   # all numeric levels are missing/special
+      is_miss    <- rep(TRUE, length(raw_values))   # all kept numeric levels are missing/special
     } else if (detected_role == "identifier") {
       raw_values <- character(0)
       raw_labels <- character(0)
@@ -2674,8 +2691,12 @@ extract_survey_metadata <- function(
     return(list(role = "factor_nominal", pos_idx = NA_integer_))
   }
 
-  # 4. Unlabelled numeric: distinguish double (any non-whole value) from integer
+  # 4. Unlabelled numeric: a pure 0/1 indicator is a binary (Non/Oui, synthesized
+  #    by the caller); otherwise distinguish double (any non-whole value) from integer.
   if (is_numeric_type) {
+    if (n_clean == 2 && all(vals_clean %in% c("0", "1"))) {
+      return(list(role = "factor_binary", pos_idx = 2L))  # positive = code "1"
+    }
     return(.num_role())
   }
 
@@ -2874,7 +2895,9 @@ metadata_add_level_stats <- function(meta_json, df,
     add_rows <- list()
     for (vn in unique(as.character(unmatched$var_name))) {
       if (is.null(existing$variables[[vn]])) next
-      u <- unmatched[var_name == vn][order(val)]
+      u     <- unmatched[var_name == vn]
+      u_key <- suppressWarnings(as.numeric(as.character(u$val)))  # numeric when integer-like
+      u     <- u[order(if (!anyNA(u_key)) u_key else u$val)]
       if (nrow(u) > max_new_levels) {
         skipped_report <- c(skipped_report, sprintf("%s (%d codes)", vn, nrow(u)))
         next
