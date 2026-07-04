@@ -18,6 +18,9 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
 ```
 1. extract_survey_metadata(df, meta_json, ...)
    → Detects column roles, writes initial JSON with levels/labels/role
+   → Numeric vars keep ONLY their special codes as levels (missing_num matches +
+     labelled codes, all flagged missing:true); plain data-range values never
+     become levels. Sparsely-labelled numerics stay numeric, not factor (coverage).
    → Returns invisible(survey_meta) — enables |> piping
 
 2. ai_classify_roles(meta_json, ...)
@@ -25,6 +28,9 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
 
 3. metadata_add_level_stats(meta_json, df)
    → Adds n/pct per level + num_stats + config.n_individuals
+   → num_stats EXCLUDE the per-variable missing:true level codes (single source of
+     truth — NOT config.missing_num). Counts each missing code (factor AND numeric)
+     and stores it as the level's `n`.
    → Top-level na_n/na_pct for EVERY var (NA + missing-coded, post-format); text/other
      vars also get an `examples` array (first 5 distinct raw values)
    → For factors, adds df-observed codes absent from the value labels (empty label,
@@ -48,7 +54,7 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
    → Styled .xlsx codebook (openxlsx2): one row per level / numeric stat, variable
      info merged over rows, section titles, frozen panes, selective borders.
    → Reads JSON only — NO df param (examples/NA now stored in the JSON by
-     metadata_add_level_stats). NA cell lists the original labels of missing-recoded levels.
+     metadata_add_level_stats). NA cell = missing-value summary (see below), all types.
    → meta_json may be a DATA FRAME: runs extract + metadata_add_level_stats silently on a
      temp JSON (tempdir), keep_original forced TRUE (raw labels, code order, no prefix);
      `...` forwarded to extract_survey_metadata.
@@ -68,15 +74,19 @@ Users can (and do) manually edit the JSON between AI steps. Key fields per varia
 - `desc`: boolean — TRUE = descending order for ordinal factors
 - `new_name`: short variable name suggested by AI
 - `levels.{code}.new_label`: short display label suggested by AI
-- `levels.{code}.missing`: TRUE for missing-value levels (old `null_coded` field renamed)
-- `levels.{code}.order`: integer for ordinal level ordering
+- `levels.{code}.missing`: TRUE for missing-value levels (old `null_coded` field renamed). The set of
+  missing:true level codes is the SINGLE source of truth for stats-exclusion + format-script NA-conversion.
+- `levels.{code}.n`: written for every level incl. missing (missing-value counts); `pct` non-missing only
+- `levels.{code}.order`: integer for ordinal level ordering (missing levels have none)
 - `config.n_individuals`: total row count (written by extract_survey_metadata / backfilled by
   metadata_add_level_stats).
 - `na_n` / `na_pct` (top-level, per variable, ALL types): count/percent of individuals NA after
   formatting = NA + missing-coded. Written by metadata_add_level_stats. Codebook prefers these;
   falls back to n_individuals − Σ(non-missing level n) for factors on older JSONs.
 - `examples` (top-level, text/"other" vars only): first 5 distinct raw values, for the codebook.
-- `num_stats`: min/max/mean/sd/q1/median/q3 (numeric vars). NA moved OUT to top-level na_n/na_pct.
+- `num_stats`: mean/sd/min/q1/median/q3/max (numeric vars), each rounded to 5 digits. Field order
+  is fixed in `.gfs_compute_numeric_stats()` (list) + `ns_fields` (serializer). NA moved OUT to
+  top-level na_n/na_pct.
 
 ### SAS Format File Support
 
@@ -105,8 +115,10 @@ and `apply_sas_value_labels()`; resolution helpers are `.match_df_col()` /
 tibble (`.cb_build_tibble()`) then styles an xlsx (`.cb_write_xlsx()`, openxlsx2). It shares
 `.gfs_build_entries()` + `.gfs_level_label()` with `generate_format_script()` so the `val`
 column is byte-identical to the fct_recode LHS. Numeric summary values are written as exact
-numbers with per-range Excel number formats (`0.0`, `#,##0`, `0` for freq, `"σ"0.0` for sd) —
-not pre-rounded text — so precision is preserved. `type`/`role` labels come from
+numbers with number formats decided **per value**: a whole-number stat uses `#,##0` (no decimals),
+a fractional one `#,##0.0` (one decimal); factor `freq` is an Excel percentage (value stored as a
+0–1 fraction, format `0%`); sd keeps `"σ"0.0`. Not pre-rounded text, so precision is preserved.
+`type`/`role` labels come from
 `.cb_type_label()` / `.cb_role_label()` (FR default, `lang="en"` option); `type` is derived
 from `role` (+`r_class` only for identifier/other). A `factor_binary` with exactly 2
 non-missing levels renders one row (positive/order-1 level; `orig_val` shows both labels
@@ -123,23 +135,39 @@ code, no ordering prefix and no binary 1-row collapse — via the `natural_order
 
 **Key Design Decision** — Codebook xlsx layout (`.cb_write_xlsx`): column order
 `h | variable | description | type | role | missing_values | valeur | n | freq | sep | orig_val | code`
-(FR/EN headers via `.cb_headers`; `role` has no accent; an empty thin `sep` column separates the
-value block from the original-label block). All borders are **black thin**; each variable block is
-boxed top+bottom (skipping `h` + `sep`) so battery runs separated by spacer rows keep their upper
-border; `sep` gets vertical L+R borders, `orig_val` a left border, `orig_code` a right border
-(rightmost). Header/empty/title rows carry no block borders. `description` is always bold. The
-`missing_values` cell is `NA: <n> (<pct>%) ; <miss label 1> ; …` with the `NA: <n>` prefix bolded via
-`openxlsx2::fmt_txt` rich text; it wraps for all types EXCEPT factor binaries (kept on one row).
-`orig_val`/`orig_code` never wrap; text/other `valeur` = `Ex. : "v1", "v2", "v3", "v4", …` (4 values).
+(FR/EN headers via `.cb_headers`; `role` has no accent; `identifier`→`identifiant`/`identifier`; an
+empty thin `sep` column separates the value block from the original-label block). All borders are
+**black thin**. The `sep` + `orig_val`/`orig_code` borders (and the box extension over those columns)
+are drawn **only for factor blocks** — the only ones that fill them; non-factor blocks are boxed
+`variable → pct` with just the `val` left separator. Each factor block is boxed top+bottom (skipping
+`h` + `sep`) so battery runs separated by spacer rows keep their upper border; `orig_val` a left
+border, `orig_code` a right border (rightmost). Header/empty/title rows carry no block borders.
+`description` is always bold. Widths: `description` 72, `missing_values` 30, `orig_val` 60; `variable`
+is 18 but widens to 27 only when the longest name would wrap. Section titles sit in column `h` and
+**overflow** into the empty cells to their right: the data write uses `na = NULL` so trailing cells are
+genuinely empty (writing `""` counts as content and clips them). Internal `.cb_write_xlsx` args
+`title_mode` (`overflow`/`merge`/`centercont`) + `freeze` exist to compare renderings. The
+`missing_values` cell is built by the shared `.format_missing_summary()` (same string in the
+format-script `# Valeurs manquantes` comment): `NA: <na_n> (<na_pct>%) ; <n1> <label1> ; … ; <n_blank>
+vide` — **only missing levels with a real label** are listed (biggest→smallest); unlabelled coded
+sentinels (e.g. numeric 999) fold into the `NA:` total, never shown by code; this applies to numeric
+vars too. Genuine blanks (`na_n − Σ all counts`) appended last as `<n> vide`; only `NA: <n>` (front)
+is bolded. Graceful (any missing level lacks `n`): plain labelled-only list (no counts / no `vide`).
+It wraps for all types EXCEPT factor binaries (kept on one row). `orig_val`/`orig_code` never wrap;
+text/other `valeur` = `Ex. : "v1", "v2", "v3", "v4", …` (4 values).
 
-**Key Design Decision** — Missing-value flagging in `extract_survey_metadata()` is **exact** by design:
-a level is flagged `missing` only when its (normalized) label is literally in `config.missing_chr` OR
-matches the conservative `missing_lbl_pattern` regex (NSP/NR/REFUS/ne sait pas/non répondu/sans réponse).
-Tolerant/fuzzy matching was deliberately rejected — it risks flagging real response levels as NA. So a
-label variant like `"Non concerné(e)"` must be added to `missing_chr` explicitly (or marked `missing` in
-the JSON). Separately, `ai_classify_roles()` never writes `factor_binary` for a variable without exactly
-2 non-missing levels (mapped to `factor_nominal` instead), so the AI cannot create a role↔levels
-inconsistency — this is the single "born-consistent" guard (there is no extract-time auto-demotion).
+**Key Design Decision** — Missing-value flagging in `extract_survey_metadata()`. FACTOR levels: **exact**
+by design — flagged `missing` only when the (normalized) label is literally in `config.missing_chr`, OR
+the code is in `config.missing_num`, OR the label matches the conservative `missing_lbl_pattern` regex
+(NSP/NR/REFUS/ne sait pas/non répondu/sans réponse). Tolerant/fuzzy matching was rejected (risks flagging
+real levels), so a label variant like `"Non concerné(e)"` must be in `missing_chr` (or marked in the JSON).
+NUMERIC vars: keep ONLY special codes as levels — a value in `missing_num` OR any value carrying a genuine
+value label (on a numeric column a label always marks a special/non-response code) → all flagged
+`missing:true` (auto-flag; the extract prints which labelled codes it flagged, override with
+`"missing": false` for a rare real code like top-coding). `.detect_role_v3()` uses label COVERAGE
+(`max_levels_cat`, revived): a numeric column whose labels cover only a few of many observed values is a
+partially-labelled numeric, not a factor. Separately, `ai_classify_roles()` never writes `factor_binary`
+without exactly 2 non-missing levels (→ `factor_nominal`) — the single "born-consistent" guard.
 
 **Key Design Decision** — `metadata_add_level_stats(meta_json, df, add_observed_levels = TRUE,
 max_new_levels = 50L)` adds, for **factor** variables, value codes present in `df` but absent from the

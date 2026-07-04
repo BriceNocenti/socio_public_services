@@ -140,6 +140,42 @@ test_that("C3c: factor NA blank when n_individuals absent", {
   expect_equal(unique(cb$na[cb$variable %in% "FREQ" & !is.na(cb$variable)]), "")
 })
 
+test_that("C3d: missing levels with counts render 'NA: n (pct%) ; <n> <label> ; <blank> vide'", {
+  vars <- list(
+    Q = list(var_label = "Question", role = "factor_binary", r_class = "double",
+             new_name = "Q", n_distinct_data = 2L, na_n = 1481L, na_pct = 13.0,
+             levels = list(
+               "1" = list(order = 1L, label = "Oui", new_label = "Oui", n = 5000L, pct = 50L),
+               "0" = list(order = 2L, label = "Non", new_label = "Non", n = 5000L, pct = 50L),
+               "8" = list(missing = TRUE, label = "Non concerné", n = 900L),
+               "9" = list(missing = TRUE, label = "Non-réponse",  n = 500L))))
+  cb <- .cb_build_tibble(.read_meta_json(cb_json(vars, n_individuals = 11481L)))
+  # biggest coded missing first; genuine blanks (1481 - 900 - 500 = 81) last as "vide"
+  expect_equal(unique(cb$na[cb$variable %in% "Q" & !is.na(cb$variable)]),
+               "NA: 1481 (13%) ; 900 Non concerné ; 500 Non-réponse ; 81 vide")
+})
+
+test_that("C3e: numeric sentinels: unlabelled fold into the total, labelled ones are listed", {
+  vars <- list(
+    BRIC = list(var_label = "Bricolage", role = "double", r_class = "numeric",
+                new_name = "BRIC", n_distinct_data = 40L, na_n = 25L, na_pct = 20.0,
+                levels = list("999" = list(missing = TRUE, n = 25L)),
+                num_stats = list(mean = 6.2, sd = 4.9, min = 0, q1 = 1,
+                                 median = 5, q3 = 12, max = 40)),
+    HOURS = list(var_label = "Heures", role = "double", r_class = "numeric",
+                 new_name = "HOURS", n_distinct_data = 30L, na_n = 12L, na_pct = 10.0,
+                 levels = list("99" = list(missing = TRUE, label = "Ne sait pas", n = 12L)),
+                 num_stats = list(mean = 20, sd = 8, min = 0, q1 = 10,
+                                  median = 18, q3 = 30, max = 60)))
+  cb <- .cb_build_tibble(.read_meta_json(cb_json(vars, n_individuals = 125L)))
+  # Unlabelled sentinel 999: collapses into the overall NA total (no bare code).
+  expect_equal(unique(cb$na[cb$variable %in% "BRIC" & !is.na(cb$variable)]),
+               "NA: 25 (20%)")
+  # Labelled sentinel 99: numeric vars now list labelled missing levels like factors.
+  expect_equal(unique(cb$na[cb$variable %in% "HOURS" & !is.na(cb$variable)]),
+               "NA: 12 (10%) ; 12 Ne sait pas")
+})
+
 
 # ---------------------------------------------------------------------------
 # C4. Section titles + battery spacers

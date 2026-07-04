@@ -135,7 +135,7 @@ test_that("E4: Emploi dummy JSON roundtrip preserves SAS labels", {
   pcs_levels <- vars[["PCS1"]]$levels
   expect_true(length(pcs_levels) >= 6)
 
-  # HCONT should exist but have no levels (double)
+  # HCONT should be detected as a double (may carry only missing/special levels)
   expect_true("HCONT" %in% names(vars))
   expect_equal(vars[["HCONT"]]$role, "double")
 
@@ -314,4 +314,65 @@ test_that("E10: haven_labelled<double> binary appears in ai_suggest_labels promp
   prompt_text <- paste(prompts, collapse = "\n")
   expect_true(grepl("DBL_BINARY", prompt_text),
               info = "DBL_BINARY should appear in the AI prompt")
+})
+
+
+# ===========================================================================
+# E11: numeric var — sentinel in missing_num becomes a missing level (no label)
+# ===========================================================================
+test_that("E11: numeric sentinel in missing_num -> missing level, excluded from stats", {
+  path <- tmp_json(); on.exit(unlink(path))
+  df <- tibble::tibble(SCORE = c(as.numeric(0:40), rep(999, 25), rep(NA_real_, 5)))
+
+  suppressMessages(extract_survey_metadata(df, path,
+    missing_num = c(-1, 999, 9999), missing_chr = character(0)))
+  suppressMessages(metadata_add_level_stats(path, df))
+  v <- .read_meta_json(path)$variables$SCORE
+
+  expect_true(v$role %in% c("integer", "double"))
+  expect_true(isTRUE(v$levels[["999"]]$missing))
+  expect_null(v$levels[["999"]]$label)          # plain sentinel -> no label written
+  expect_equal(v$levels[["999"]]$n, 25L)        # count stored by metadata_add_level_stats
+  expect_true(v$num_stats$max <= 40)            # 999 excluded from stats
+  expect_equal(v$na_n, 30L)                     # 25 coded + 5 real NA
+})
+
+
+# ===========================================================================
+# E12: sparsely-labelled numeric — label only on a sentinel NOT in missing_num
+#      is typed numeric (not factor) and auto-flagged missing, keeping its label
+# ===========================================================================
+test_that("E12: sparse-labelled count stays numeric and auto-flags the labelled code", {
+  path <- tmp_json(); on.exit(unlink(path))
+  # 30 distinct data values in 40:69 (> max_levels_cat) + sentinel 7 labelled only.
+  col <- labelled::labelled(c(rep(40:69, 2), rep(7, 10)),
+                            labels = c("Non concerné" = 7))
+  df  <- tibble::tibble(NBH = col)
+
+  suppressMessages(extract_survey_metadata(df, path,
+    missing_num = c(-1, 99), missing_chr = character(0)))   # 7 NOT in missing_num
+  suppressMessages(metadata_add_level_stats(path, df))
+  v <- .read_meta_json(path)$variables$NBH
+
+  expect_true(v$role %in% c("integer", "double"))           # coverage rule -> numeric
+  expect_true(isTRUE(v$levels[["7"]]$missing))               # labelled code auto-flagged
+  expect_equal(v$levels[["7"]]$label, "Non concerné")   # label kept for the user
+  expect_equal(v$levels[["7"]]$n, 10L)
+  expect_true(v$num_stats$max <= 69)                         # 7 excluded from stats
+})
+
+
+# ===========================================================================
+# E13: a genuine coded factor (all codes labelled) is NOT flipped to numeric
+# ===========================================================================
+test_that("E13: fully-labelled coded variable stays a factor (coverage rule)", {
+  path <- tmp_json(); on.exit(unlink(path))
+  col <- labelled::labelled(rep(1:3, times = c(15L, 15L, 10L)),
+                            labels = c("Bas" = 1, "Moyen" = 2, "Haut" = 3))
+  df  <- tibble::tibble(NIVEAU = col)
+
+  suppressMessages(extract_survey_metadata(df, path,
+    missing_num = c(-1, 99), missing_chr = character(0)))
+  v <- .read_meta_json(path)$variables$NIVEAU
+  expect_true(grepl("^factor_", v$role))
 })

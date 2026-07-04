@@ -228,6 +228,28 @@ test_that("format: double gets as.double + NA_real_", {
   expect_match(combined, "NA_real_", fixed = TRUE)
 })
 
+test_that("format: '# Valeurs manquantes' comment lists counts, biggest first, blanks last", {
+  vars <- list(
+    WT = list(
+      var_label = "Weight", role = "double", new_name = "POIDS",
+      na_n = 1481L, na_pct = 13.0,
+      levels = list(
+        "8" = list(missing = TRUE, label = "Non concerné", n = 900L),
+        "9" = list(missing = TRUE, label = "Non-réponse",  n = 500L))))
+  combined <- paste(.gfs_format_blocks(.gfs_build_entries(vars), "data"), collapse = "\n")
+  expect_match(combined,
+    "# Valeurs manquantes — NA: 1481 (13%) ; 900 Non concerné ; 500 Non-réponse ; 81 vide",
+    fixed = TRUE)
+})
+
+test_that("format: no missing comment when na_n absent (graceful, JSON pre-stats)", {
+  vars <- list(
+    WT = list(var_label = "Weight", role = "double", new_name = "POIDS",
+              levels = list("9" = list(missing = TRUE, label = "NSP"))))
+  combined <- paste(.gfs_format_blocks(.gfs_build_entries(vars), "data"), collapse = "\n")
+  expect_false(grepl("Valeurs manquantes", combined, fixed = TRUE))
+})
+
 test_that("format: identifier leaves column untouched but applies label", {
   vars <- list(
     ID = list(var_label = "Identifier", role = "identifier", new_name = "ID",
