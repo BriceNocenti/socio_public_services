@@ -6564,13 +6564,14 @@ generate_format_script <- function(meta_json,
 #' only vertical borders; orig_val gets a left border, orig_code a right border
 #' (also the rightmost column). Header/empty/title rows carry no block borders.
 .cb_write_xlsx <- function(cb, path, lang = "fr", orig_val_kept = TRUE,
-                           title_mode = c("overflow", "merge", "centercont"),
+                           title_mode = c("overflow", "merge"),
                            freeze = TRUE) {
   if (!requireNamespace("openxlsx2", quietly = TRUE))
     stop("generate_codebook() needs the 'openxlsx2' package.", call. = FALSE)
-  # title_mode: how section titles fill the row (see the title loop below).
-  # "overflow" (default) relies on genuinely-empty trailing cells; the others
-  # exist mainly to compare rendering. freeze toggles the frozen header/columns.
+  # title_mode: how section titles fill the row. "overflow" (default) leaves the
+  # trailing cells genuinely empty (na = NULL) so the title spills across the row
+  # — confirmed readable even with the freeze pane on. "merge" is a fallback that
+  # merges the row instead. freeze toggles the frozen header/columns.
   title_mode <- match.arg(title_mode)
   cm_to_pt <- function(cm) cm * 28.3465
   RED   <- "FFA10D2E"
@@ -6609,8 +6610,9 @@ generate_format_script <- function(meta_json,
   hdr_df <- as.data.frame(matrix(hdr, nrow = 1), stringsAsFactors = FALSE)
   wb <- openxlsx2::wb_add_data(wb, "Codebook", x = hdr_df, dims = "A1", col_names = FALSE, na = "")
 
-  all_dims <- openxlsx2::wb_dims(rows = seq_len(n_row + 1L), cols = seq_len(K))
-  wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = all_dims, name = "DejaVu Sans", size = 10)
+  # Base font for every cell (one default instead of styling each cell — the
+  # per-cell palette below only overrides where a cell differs).
+  wb <- openxlsx2::wb_set_base_font(wb, font_size = 10, font_name = "DejaVu Sans")
 
   # Header styling: bold, light fill, black bottom rule, bottom-aligned.
   hdr_dims <- openxlsx2::wb_dims(rows = 1, cols = seq_len(K))
@@ -6624,121 +6626,148 @@ generate_format_script <- function(meta_json,
                                  top_border = NULL, left_border = NULL, right_border = NULL,
                                  bottom_border = "thin", bottom_color = black)
 
-  # Column-wide alignment for data rows.
-  data_rows <- 2:(n_row + 1L)
-  align <- function(cols, h, v = "top", wrap = TRUE) {
-    cols <- intersect(cols, disp_cols)
-    if (length(cols) == 0) return(invisible())
-    d <- openxlsx2::wb_dims(rows = data_rows, cols = unname(ci[cols]))
-    wb <<- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
-                                        horizontal = h, vertical = v, wrap_text = wrap)
-  }
-  align(c("variable", "description", "type", "role", "na"), "left", wrap = TRUE)
-  align("val", "left", wrap = TRUE)
-  align(c("orig_val", "orig_code"), "left", wrap = FALSE)   # never wrap the originals
-  align(c("n", "pct"), "right", wrap = FALSE)
+  # === Per-cell style palette (fast path) ================================
+  # Register ONE xf (font + alignment + numfmt + border edges) per DISTINCT cell
+  # appearance, then stamp it onto all matching cells in a single
+  # wb_set_cell_style() call — replacing ~15 read-modify-write wb_add_* calls per
+  # block. Merges + NA rich text still run per block (they set values, not xf).
+  # The styles manager is captured AFTER the block loop (below), because the
+  # merge/rich-text calls clone the workbook.
+  blocks <- split(seq_len(n_row), cb$.block_id)
 
-  # Description is always bold (visually striking).
-  wb <- openxlsx2::wb_add_font(wb, "Codebook",
-          dims = openxlsx2::wb_dims(rows = data_rows, cols = ci[["description"]]),
-          name = "DejaVu Sans", size = 10, bold = TRUE)
+  # Static per-column alignment for value cells ("" = leave Excel default, e.g. sep).
+  al_h <- c(variable = "left", description = "left", type = "left", role = "left",
+            na = "left", val = "left", n = "right", pct = "right",
+            orig_val = "left", orig_code = "left", sep = "", h = "")
+  al_wrap <- c(variable = TRUE, description = TRUE, type = TRUE, role = TRUE, na = TRUE,
+               val = TRUE, n = FALSE, pct = FALSE, orig_val = FALSE, orig_code = FALSE,
+               sep = FALSE, h = FALSE)
+  sd_fmt <- "\"σ\"0.0"
 
-  # Per-block styling: merges, NA rich text, borders, number formats.
-  blocks  <- split(seq_len(n_row), cb$.block_id)
-  hb_cols <- unname(ci[setdiff(disp_cols, c("h", "sep"))])  # horizontal block borders
-  # Non-factor blocks never fill orig_val/orig_code, so their box stops at pct.
-  hb_cols_nonfac <- unname(ci[setdiff(disp_cols,
-                                      c("h", "sep", "orig_val", "orig_code"))])
+  # Accumulate (excel row, excel col, style key) for every value cell.
+  acc_r <- list(); acc_c <- list(); acc_k <- list(); ai <- 0L
   for (b in blocks) {
     if (length(b) == 0) next
     kind      <- cb$.block_kind[b[1]]
     is_binary <- isTRUE(cb$.is_binary[b[1]])
     ex        <- xr(b)
-    r1 <- min(ex); r2 <- max(ex)
+    r1 <- min(ex); r2 <- max(ex); m <- length(ex)
 
     # merge repeated variable-level cells (top-aligned) when >1 row
-    if (length(ex) > 1) for (cc in var_lvl)
+    if (m > 1) for (cc in var_lvl)
       wb <- openxlsx2::wb_merge_cells(wb, "Codebook",
               dims = openxlsx2::wb_dims(rows = r1:r2, cols = ci[[cc]]))
 
     # NA cell rich text: bold the "NA: <count>" prefix; binaries stay on one row.
     na_val <- cb$na[b[1]]
     if (!is.na(na_val) && startsWith(na_val, "NA: ")) {
-      m <- regmatches(na_val, regexec("^(NA: \\S+)(.*)$", na_val))[[1]]
+      mm <- regmatches(na_val, regexec("^(NA: \\S+)(.*)$", na_val))[[1]]
       rich <- tryCatch(
-        if (length(m) == 3L)
-          openxlsx2::fmt_txt(m[2], bold = TRUE, font = "DejaVu Sans", size = 10) +
-          openxlsx2::fmt_txt(m[3], font = "DejaVu Sans", size = 10)
+        if (length(mm) == 3L)
+          openxlsx2::fmt_txt(mm[2], bold = TRUE, font = "DejaVu Sans", size = 10) +
+          openxlsx2::fmt_txt(mm[3], font = "DejaVu Sans", size = 10)
         else NULL,
         error = function(e) NULL)
       if (!is.null(rich))
         wb <- openxlsx2::wb_add_data(wb, "Codebook", x = rich,
                 dims = openxlsx2::wb_dims(rows = r1, cols = ci[["na"]]), col_names = FALSE)
     }
-    wb <- openxlsx2::wb_add_cell_style(wb, "Codebook",
-            dims = openxlsx2::wb_dims(rows = r1:r2, cols = ci[["na"]]),
-            horizontal = "left", vertical = "top", wrap_text = !is_binary)
 
-    # vertical separators (black thin): value boundary, empty col, orig block
-    vborder <- function(col, sides) {
-      if (!col %in% disp_cols) return(invisible())
-      args <- list(wb, "Codebook",
-                   dims = openxlsx2::wb_dims(rows = r1:r2, cols = ci[[col]]),
-                   update = TRUE, top_border = NULL, bottom_border = NULL,
-                   left_border = NULL, right_border = NULL)
-      if ("left"  %in% sides) { args$left_border  <- "thin"; args$left_color  <- black }
-      if ("right" %in% sides) { args$right_border <- "thin"; args$right_color <- black }
-      wb <<- do.call(openxlsx2::wb_add_border, args)
-    }
-    vborder("val", "left")
-    # sep + original-label/code borders belong only to factor blocks (the only
-    # ones that fill those columns); other kinds keep just the val separator.
-    if (kind == "factor") {
-      vborder("sep", c("left", "right"))
-      if (orig_val_kept) vborder("orig_val", "left")
-      vborder("orig_code", "right")
-    }
-
-    # horizontal box: top on first row, bottom on last row (skip h + sep col;
-    # non-factor blocks also skip the empty orig_val/orig_code columns)
-    hbc <- if (kind == "factor") hb_cols else hb_cols_nonfac
-    wb <- openxlsx2::wb_add_border(wb, "Codebook",
-            dims = openxlsx2::wb_dims(rows = r1, cols = hbc),
-            top_border = "thin", top_color = black,
-            bottom_border = NULL, left_border = NULL, right_border = NULL, update = TRUE)
-    wb <- openxlsx2::wb_add_border(wb, "Codebook",
-            dims = openxlsx2::wb_dims(rows = r2, cols = hbc),
-            bottom_border = "thin", bottom_color = black,
-            top_border = NULL, left_border = NULL, right_border = NULL, update = TRUE)
-
-    # numeric mean|quantiles rule: bottom border on the mean (first) row
-    rule_rows <- ex[cb$.stat_rule[b] %in% TRUE]
-    if (length(rule_rows) > 0)
-      wb <- openxlsx2::wb_add_border(wb, "Codebook",
-              dims = openxlsx2::wb_dims(rows = rule_rows,
-                       cols = unname(ci[intersect(c("val", "n", "pct"), disp_cols)])),
-              bottom_border = "thin", bottom_color = black,
-              top_border = NULL, left_border = NULL, right_border = NULL, update = TRUE)
-
-    # number formats (factor freq shown as an Excel percentage)
-    numfmt <- function(rows, col, fmt) {
-      if (length(rows) == 0 || !col %in% disp_cols) return(invisible())
-      wb <<- openxlsx2::wb_add_numfmt(wb, "Codebook",
-               dims = openxlsx2::wb_dims(rows = rows, cols = ci[[col]]), numfmt = fmt)
-    }
-    if (kind == "factor") {
-      numfmt(ex, "n", "#,##0"); numfmt(ex, "pct", "0%")
-    } else if (kind == "numeric") {
-      mean_rows <- ex[cb$.stat_rule[b] %in% TRUE]
-      # Per-value decimals: a whole-number stat shows no decimals, a fractional
-      # one shows a single decimal (so 999.0 -> 999 but a 0.22751 mean -> 0.2).
-      nvals <- suppressWarnings(as.numeric(cb$n[b]))
-      whole <- !is.na(nvals) & (nvals == round(nvals))
-      numfmt(ex[whole], "n", "#,##0")
-      numfmt(ex[!whole & !is.na(nvals)], "n", "#,##0.0")
-      numfmt(mean_rows, "pct", "\"σ\"0.0")
+    # collect per-cell style keys (font | h | v | wrap | numfmt | top bot left right)
+    scols <- if (kind == "factor") setdiff(disp_cols, "h")
+             else setdiff(disp_cols, c("h", "sep", "orig_val", "orig_code"))
+    hbc   <- if (kind == "factor") setdiff(disp_cols, c("h", "sep"))
+             else setdiff(disp_cols, c("h", "sep", "orig_val", "orig_code"))
+    mean_ex <- ex[cb$.stat_rule[b] %in% TRUE]
+    nvals   <- suppressWarnings(as.numeric(cb$n[b]))     # aligned with ex
+    for (nm in scols) {
+      hh <- al_h[[nm]]
+      vv <- if (nzchar(hh)) "top" else ""
+      ww <- if (isTRUE(al_wrap[[nm]])) (if (nm == "na") !is_binary else TRUE) else FALSE
+      ff <- if (nm == "description") "bold" else "reg"
+      nf <- rep("", m)
+      if (nm == "n") {
+        if (kind == "factor") nf[] <- "#,##0"
+        else if (kind == "numeric") {
+          wv <- !is.na(nvals) & (nvals == round(nvals))
+          nf[wv] <- "#,##0"; nf[!is.na(nvals) & !wv] <- "#,##0.0"
+        }
+      } else if (nm == "pct") {
+        if (kind == "factor") nf[] <- "0%"
+        else if (kind == "numeric") nf[ex %in% mean_ex] <- sd_fmt
+      }
+      inhbc <- nm %in% hbc
+      bt <- (ex == r1) & inhbc
+      bb <- (ex == r2) & inhbc
+      if (kind == "numeric" && nm %in% c("val", "n", "pct")) bb <- bb | (ex %in% mean_ex)
+      bl <- (nm == "val") || (kind == "factor" && nm %in% c("sep", "orig_val"))
+      br <- (kind == "factor" && nm %in% c("sep", "orig_code"))
+      keys <- paste(ff, hh, vv, if (ww) "1" else "0", nf,
+                    bt + 0L, bb + 0L, bl + 0L, br + 0L, sep = "|")
+      ai <- ai + 1L
+      acc_r[[ai]] <- ex
+      acc_c[[ai]] <- rep.int(ci[[nm]], m)
+      acc_k[[ai]] <- keys
     }
   }
+
+  all_r <- unlist(acc_r, use.names = FALSE)
+  all_c <- unlist(acc_c, use.names = FALSE)
+  all_k <- unlist(acc_k, use.names = FALSE)
+  ukeys <- unique(all_k)
+
+  # Capture the styles manager on the CURRENT wb (the merge/rich-text calls above
+  # clone the workbook), then register the whole palette BEFORE any
+  # wb_set_cell_style() reassigns wb again — otherwise later registrations would
+  # land on an orphaned manager and be lost on save.
+  mgr <- wb$styles_mgr
+  mgr$add(openxlsx2::create_font(sz = 10, name = "DejaVu Sans"),           "cb_font_reg")
+  mgr$add(openxlsx2::create_font(sz = 10, name = "DejaVu Sans", b = TRUE), "cb_font_bold")
+  fid <- c(reg = mgr$get_font_id("cb_font_reg"), bold = mgr$get_font_id("cb_font_bold"))
+  border_cache <- new.env(parent = emptyenv())
+  get_border_id <- function(bt, bb, bl, br) {
+    if (!(bt || bb || bl || br)) return("")
+    nm <- paste0("cb_bd_", bt + 0L, bb + 0L, bl + 0L, br + 0L)
+    if (!exists(nm, envir = border_cache, inherits = FALSE)) {
+      a <- list()
+      if (bt) { a$top    <- "thin"; a$top_color    <- black }
+      if (bb) { a$bottom <- "thin"; a$bottom_color <- black }
+      if (bl) { a$left   <- "thin"; a$left_color   <- black }
+      if (br) { a$right  <- "thin"; a$right_color  <- black }
+      mgr$add(do.call(openxlsx2::create_border, a), nm)
+      assign(nm, mgr$get_border_id(nm), envir = border_cache)
+    }
+    get(nm, envir = border_cache)
+  }
+  numfmt_cache <- new.env(parent = emptyenv()); numfmt_next <- 163L
+  get_numfmt_id <- function(code) {
+    if (!nzchar(code)) return("")
+    if (!exists(code, envir = numfmt_cache, inherits = FALSE)) {
+      numfmt_next <<- numfmt_next + 1L
+      mgr$add(openxlsx2::create_numfmt(numFmtId = numfmt_next, formatCode = code), code)
+      assign(code, mgr$get_numfmt_id(code), envir = numfmt_cache)
+    }
+    get(code, envir = numfmt_cache)
+  }
+
+  # Phase 1 — register one xf per distinct key + record its target cells. No wb
+  # reassignment here, so every xf lands on the same workbook object.
+  dstrs <- character(length(ukeys))
+  for (i in seq_along(ukeys)) {
+    p  <- strsplit(ukeys[i], "|", fixed = TRUE)[[1]]
+    xf <- openxlsx2::create_cell_style(
+      font_id    = fid[[p[1]]],
+      border_id  = get_border_id(p[6] == "1", p[7] == "1", p[8] == "1", p[9] == "1"),
+      num_fmt_id = get_numfmt_id(p[5]),
+      horizontal = p[2], vertical = p[3], wrap_text = (p[4] == "1"))
+    mgr$add(xf, paste0("cb_xf_", i))
+    sel <- all_k == ukeys[i]
+    dstrs[i] <- paste0(LETTERS[all_c[sel]], all_r[sel], collapse = ",")
+  }
+  # Phase 2 — stamp each xf onto its cells (one call per distinct style).
+  for (i in seq_along(ukeys))
+    wb <- openxlsx2::wb_set_cell_style(wb, "Codebook", dims = dstrs[i],
+                                       style = paste0("cb_xf_", i))
 
   # Title rows: colored/underlined heading text + tall rows. Text lives in the h
   # column and (with na = NULL above) overflows into the empty cells to its right.
@@ -6754,10 +6783,8 @@ generate_format_script <- function(meta_json,
     wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = d, name = "DejaVu Sans",
             size = size, bold = TRUE, underline = "single",
             color = openxlsx2::wb_color(hex = RED))
-    halign  <- if (identical(title_mode, "centercont")) "centerContinuous" else "left"
-    al_dims <- if (identical(title_mode, "centercont")) row_dims else d
-    wb <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = al_dims,
-            horizontal = halign, vertical = "bottom", wrap_text = FALSE)
+    wb <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
+            horizontal = "left", vertical = "bottom", wrap_text = FALSE)
     wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i), heights = cm_to_pt(hcm))
   }
 

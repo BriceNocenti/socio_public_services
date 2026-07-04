@@ -145,8 +145,9 @@ border, `orig_code` a right border (rightmost). Header/empty/title rows carry no
 `description` is always bold. Widths: `description` 72, `missing_values` 30, `orig_val` 60; `variable`
 is 18 but widens to 27 only when the longest name would wrap. Section titles sit in column `h` and
 **overflow** into the empty cells to their right: the data write uses `na = NULL` so trailing cells are
-genuinely empty (writing `""` counts as content and clips them). Internal `.cb_write_xlsx` args
-`title_mode` (`overflow`/`merge`/`centercont`) + `freeze` exist to compare renderings. The
+genuinely empty (writing `""` counts as content and clips them) — confirmed readable across the row
+even with the freeze pane on. Internal `.cb_write_xlsx` args `title_mode` (`overflow` default,
+`merge` fallback) + `freeze`. The
 `missing_values` cell is built by the shared `.format_missing_summary()` (same string in the
 format-script `# Valeurs manquantes` comment): `NA: <na_n> (<na_pct>%) ; <n1> <label1> ; … ; <n_blank>
 vide` — **only missing levels with a real label** are listed (biggest→smallest); unlabelled coded
@@ -155,6 +156,19 @@ vars too. Genuine blanks (`na_n − Σ all counts`) appended last as `<n> vide`;
 is bolded. Graceful (any missing level lacks `n`): plain labelled-only list (no counts / no `vide`).
 It wraps for all types EXCEPT factor binaries (kept on one row). `orig_val`/`orig_code` never wrap;
 text/other `valeur` = `Ex. : "v1", "v2", "v3", "v4", …` (4 values).
+
+**Key Design Decision** — Codebook styling uses a **fixed xf palette** (openxlsx2 low-level), not
+per-block `wb_add_*`. `.cb_write_xlsx()` computes each value cell's full appearance as a key
+(`font | h | v | wrap | numfmt | top bot left right`), registers **one** `create_cell_style()` xf per
+distinct key via `wb$styles_mgr$add()` (fonts/borders/numfmts deduped through `create_font`/
+`create_border`/`create_numfmt` caches), then stamps it with a single `wb_set_cell_style(dims = comma-
+joined cells, style = name)` per xf. This cut the ~500-var export from ~116 s to ~22 s and the style
+catalog from ~1600 xfs to ~46 — with byte-identical appearance (verified by a per-cell border/numfmt/
+bold/alignment diff). **Ordering constraint**: the merge + NA-rich-text calls clone the workbook, so the
+styles manager is captured AFTER the block loop and the whole palette is registered BEFORE any
+`wb_set_cell_style()` reassigns `wb` — otherwise later registrations land on an orphaned manager and are
+lost on save. Base font set once via `wb_set_base_font()`; merges + rich-text NA prefix still run per
+block (they set values, not xf). `sd` numfmt is `"σ"0.0`.
 
 **Key Design Decision** — Missing-value flagging in `extract_survey_metadata()`. FACTOR levels: **exact**
 by design — flagged `missing` only when the (normalized) label is literally in `config.missing_chr`, OR
