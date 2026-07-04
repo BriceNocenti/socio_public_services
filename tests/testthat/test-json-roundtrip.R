@@ -80,20 +80,20 @@ test_that("BT2: re-running extract_survey_metadata preserves battery + headers",
   expect_equal(unlist(v$headers), "## Grande partie")
 })
 
-test_that("BT5: extract(headers=) with ##-only anchors preserves AI ### / ####", {
+test_that("BT5: extract(headers=) is source of truth for user ##/###; AI #### preserved", {
   df <- data.frame(Q1 = c(1L, 2L, 1L, 2L, 1L))
   path <- tmp_json(); on.exit(unlink(path))
   suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
     missing_chr = character(0), headers = c("## Part" = "Q1")))
-  # ai_build_outline() adds finer levels
+  # a user ### and an AI #### are present on Q1
   m <- .read_meta_json(path)
-  m$variables$Q1$headers <- list("## Part", "### Sous-theme IA", "#### Groupe IA")
+  m$variables$Q1$headers <- list("## Part", "### Sous-theme", "#### Groupe IA")
   .write_meta_json(m, path)
-  # Re-extract with a ##-only anchor: it overrides ## but keeps ### / ####
+  # Re-extract with a ##-only arg: it replaces the USER levels (## / ###) and keeps AI ####
   suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
     missing_chr = character(0), headers = c("## Nouveau" = "Q1")))
   expect_equal(unlist(.read_meta_json(path)$variables$Q1$headers),
-               c("## Nouveau", "### Sous-theme IA", "#### Groupe IA"))
+               c("## Nouveau", "#### Groupe IA"))   # ### cleared (user level), #### kept (AI)
 })
 
 test_that("BT6: config.survey_description (multi-line) round-trips + is preserved", {

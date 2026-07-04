@@ -2355,10 +2355,6 @@ extract_survey_metadata <- function(
   # Outline headers from the `headers` argument (source of truth when supplied):
   # a per-variable list of markdown titles, in order, applied below (replacing).
   .hdr_map <- if (!is.null(headers)) split(names(headers), unname(as.character(headers))) else NULL
-  # Levels the argument controls (normally just ## ): it is source of truth for
-  # THESE levels only, so deeper AI-generated ### / #### survive re-extract.
-  .arg_levels <- if (!is.null(.hdr_map))
-    unique(vapply(unlist(.hdr_map, use.names = FALSE), .hdr_level, integer(1))) else integer(0)
   if (!is.null(.hdr_map)) {
     .unknown_hdr <- setdiff(names(.hdr_map), meta$var_name)
     if (length(.unknown_hdr) > 0)
@@ -2413,13 +2409,12 @@ extract_survey_metadata <- function(
           })
         }
       }
-      # Outline headers argument is source of truth for the LEVELS it contains
-      # (normally ## ): drop those levels from the preserved headers, then overlay
-      # the argument's titles for this variable, keeping deeper AI-set levels.
+      # The headers argument is the USER outline (## blocs, and ### subthemes for
+      # big surveys) — source of truth for those levels. Drop the old ## /### and
+      # overlay the argument for this variable, keeping only the AI-set #### groups.
       if (!is.null(.hdr_map)) {
         cur <- as.character(result$headers %||% character(0))
-        if (length(.arg_levels) > 0)
-          cur <- cur[!(vapply(cur, .hdr_level, integer(1)) %in% .arg_levels)]
+        cur <- cur[vapply(cur, .hdr_level, integer(1)) >= 4L]     # keep AI #### only
         add    <- if (!is.null(.hdr_map[[vname]])) as.character(.hdr_map[[vname]]) else character(0)
         merged <- c(cur, add)
         if (length(merged) > 1L)
@@ -4128,7 +4123,7 @@ ai_classify_roles <- function(
   }
 }
 
-# Extract {level,title,from,to,battery} objects from arbitrary text (fallback when
+# Extract {title,from,to,battery} objects from arbitrary text (fallback when
 # the whole array fails to parse — a truncated last object is simply dropped).
 .extract_outline_objects <- function(txt) {
   m    <- gregexpr("\\{[^{}]*\\}", txt, perl = TRUE)
@@ -4142,10 +4137,9 @@ ai_classify_roles <- function(
   out
 }
 
-# Parse leveled span arrays from all responses into a flat list of
-# list(level, title, from, to, battery). Robust to code fences, prose, truncation.
-# level defaults to 4 (clamped to 3..4 — the levels the AI owns); a level-4 span is
-# a battery unless it explicitly carries "battery": false.
+# Parse #### span arrays from all responses into a flat list of
+# list(title, from, to, battery). Robust to code fences, prose, truncation.
+# A span is a battery unless it explicitly carries "battery": false.
 .parse_outline_spans <- function(results_text) {
   spans <- list()
   for (txt in results_text) {
@@ -4156,17 +4150,13 @@ ai_classify_roles <- function(
     if (is.null(parsed) || !is.list(parsed)) parsed <- .extract_outline_objects(t)
     for (o in parsed) {
       if (!is.list(o) || is.null(o$title) || is.null(o$from) || is.null(o$to)) next
-      lvl <- suppressWarnings(as.integer(o$level %||% 4L))
-      if (is.na(lvl)) lvl <- 4L
-      lvl <- min(max(lvl, 3L), 4L)
       is_batt <- if (is.null(o$battery)) TRUE
                  else isTRUE(o$battery) || identical(tolower(as.character(o$battery)[[1]]), "true")
       spans[[length(spans) + 1L]] <- list(
-        level   = lvl,
         title   = as.character(o$title)[[1]],
         from    = as.character(o$from)[[1]],
         to      = as.character(o$to)[[1]],
-        battery = (lvl == 4L) && is_batt)
+        battery = is_batt)
     }
   }
   spans
@@ -4178,37 +4168,33 @@ ai_classify_roles <- function(
   if (m < 0L) 2L else as.integer(m)
 }
 
-#' Build the survey outline with the AI (### subthemes + #### batteries/groups)
+#' Build the survey outline with the AI (#### batteries + thematic groups)
 #'
 #' One global pass that reads every variable in questionnaire order — with the
-#' fixed \code{## } blocs you anchored (\code{set_headers()} /
-#' \code{extract_survey_metadata(headers=)}) interleaved as boundaries and a
-#' deterministic battery-candidate seed as a hint — and asks the model for the
-#' finer structure as \strong{leveled contiguous spans}
-#' \code{[{level, title, from, to, battery}]}: \code{### } subthemes covering every
-#' variable within each bloc, and \code{#### } groups (true question batteries or
-#' thematic groupings) within them.
+#' fixed outline sections you anchored (\code{## } blocs, and optionally \code{### }
+#' subthemes for large surveys) interleaved as boundaries and a deterministic
+#' battery-candidate seed as a hint — and asks the model to cover every variable
+#' with a single AI level, the \code{#### } group: \strong{contiguous spans}
+#' \code{[{title, from, to, battery}]} that tile each section completely. Each
+#' \code{#### } is either a true question \strong{battery} (\code{battery:true}) or a
+#' plain \strong{thematic group} (\code{battery:false}).
 #'
-#' Authoritative: it clears the levels it owns (\code{### }/\code{#### } in
-#' \code{headers} and all \code{battery}) and re-writes them from the validated
-#' spans — \code{### } and non-battery \code{#### } go to \code{headers}, true
-#' batteries to the repeated \code{battery} field. The \code{## } anchors are never
-#' touched. Nothing is wiped if the response parses to zero valid spans.
+#' Authoritative: it clears the level it owns (\code{#### } in \code{headers} and all
+#' \code{battery}) and re-writes them from the validated spans — non-battery
+#' \code{#### } go to \code{headers}, true batteries to the repeated \code{battery}
+#' field. The \code{## }/\code{### } anchors you set are never touched. Nothing is
+#' wiped if the response parses to zero valid spans.
 #'
 #' The model also receives \code{config.survey_description} (set at
 #' \code{extract_survey_metadata()}) as global context, when present.
 #'
 #' @param meta_json Path to the survey_meta JSON, or a \code{survey_meta} object.
-#' @param subthemes If \code{TRUE} (default), the AI owns \code{### } + \code{#### }
-#'   (it re-generates all subthemes, tiling the variables within each \code{## } bloc).
-#'   If \code{FALSE}, the AI owns only \code{#### } and your existing \code{### } are
-#'   kept as fixed anchors.
 #' @param seed If \code{TRUE} (default), feed the deterministic battery-candidate
 #'   seed as the \code{batt} hint. \code{FALSE} sends \code{batt:null} everywhere.
 #' @param min_size Minimum variables for a \code{#### } span to count as a real
 #'   \code{battery:true} battery (default 3). Smaller ones are kept but DEMOTED to a
 #'   thematic group (\code{#### } groups themselves have no minimum — they tile every
-#'   subtheme for complete coverage).
+#'   section for complete coverage).
 #' @param use_batch Use the Message Batch API instead of a synchronous call.
 #' @param resume_batch_id Retrieve an already-submitted batch instead of resending.
 #' @param dry_run If \code{TRUE}, print the prompt and return it without calling the
@@ -4224,7 +4210,6 @@ ai_classify_roles <- function(
 #' @export
 ai_build_outline <- function(
     meta_json,
-    subthemes          = TRUE,
     seed               = TRUE,
     min_size           = 3L,
     use_batch          = FALSE,
@@ -4243,20 +4228,19 @@ ai_build_outline <- function(
   }
   if (!is.null(resume_batch_id)) use_batch <- TRUE
 
-  # Levels the AI owns: #### always; ### too when subthemes = TRUE. Anchors are
-  # every header shallower than that (## always; ## + ### when subthemes = FALSE).
-  ai_levels <- if (isTRUE(subthemes)) c(3L, 4L) else 4L
-  min_ai    <- min(ai_levels)
-  idx_of    <- stats::setNames(seq_len(n), var_names)
+  # The AI owns a single level, #### . Everything shallower (## blocs, and ###
+  # subthemes when the user provides them) is a FIXED anchor: shown to the model
+  # as a boundary, kept in the JSON, never generated by the AI.
+  min_ai <- 4L
+  idx_of <- stats::setNames(seq_len(n), var_names)
 
   # -- fixed anchor boundaries (from the current headers, before we clear) -----
   hdrs_of <- function(k) as.character(existing$variables[[var_names[[k]]]]$headers %||% character(0))
-  bloc_open   <- vapply(seq_len(n), function(k) any(vapply(hdrs_of(k), .hdr_level, 1L) == 2L),
-                        logical(1))
-  bloc_cum    <- cumsum(bloc_open)                       # same value => same ## bloc
-  anchor_sub  <- if (isTRUE(subthemes)) logical(n) else
-                 vapply(seq_len(n), function(k) any(vapply(hdrs_of(k), .hdr_level, 1L) == 3L),
-                        logical(1))
+  bloc_open  <- vapply(seq_len(n), function(k) any(vapply(hdrs_of(k), .hdr_level, 1L) == 2L),
+                       logical(1))
+  bloc_cum   <- cumsum(bloc_open)                        # same value => same ## bloc
+  anchor_sub <- vapply(seq_len(n), function(k) any(vapply(hdrs_of(k), .hdr_level, 1L) == 3L),
+                       logical(1))                        # user ### subtheme anchors (may be none)
 
   # -- deterministic battery-candidate seed (a hint) --------------------------
   seed_res <- if (isTRUE(seed)) .batt_seed_candidates(existing, min_size)
@@ -4304,8 +4288,7 @@ ai_build_outline <- function(
     message(strrep("=", 60))
     message("DRY RUN — no API call made")
     message(strrep("=", 60))
-    message("Variables: ", n, "  |  AI levels: ",
-            if (isTRUE(subthemes)) "### + ####" else "####",
+    message("Variables: ", n, "  |  AI level: #### (batteries + groups)",
             "  |  Seed: ", if (isTRUE(seed)) "on" else "off",
             "  |  Route: ", if (use_batch) "batch" else "synchronous")
     message("\n", strrep("-", 60)); message("SYSTEM PROMPT"); message(strrep("-", 60))
@@ -4364,30 +4347,18 @@ ai_build_outline <- function(
     existing$variables[[vn]]$headers <<- as.list(c(cur, md))
   }
 
-  # -- level 3: subthemes (only when the AI owns them) ------------------------
-  used3    <- logical(n)
-  sub_open <- anchor_sub                     # ### boundaries: anchors + accepted spans
-  applied3 <- 0L
-  if (isTRUE(subthemes)) for (sp in Filter(function(s) s$level == 3L, spans)) {
-    fi <- unname(idx_of[sp$from]); ti <- unname(idx_of[sp$to])
-    if (is.na(fi) || is.na(ti)) { rejected <- c(rejected, paste0("### ", sp$title, " (unknown variable)")); next }
-    if (fi > ti)                { rejected <- c(rejected, paste0("### ", sp$title, " (from after to)"));     next }
-    if (bloc_cum[fi] != bloc_cum[ti]) { rejected <- c(rejected, paste0("### ", sp$title, " (crosses ## boundary)")); next }
-    rng <- fi:ti
-    if (any(used3[rng]))        { rejected <- c(rejected, paste0("### ", sp$title, " (overlaps another subtheme)")); next }
-    used3[rng] <- TRUE; sub_open[fi] <- TRUE
-    add_header(fi, paste0("### ", sp$title)); applied3 <- applied3 + 1L
-  }
-  sub_cum <- cumsum(sub_open)                 # same value => same ### subtheme
+  # ### subtheme boundaries come only from the USER anchors (the AI no longer
+  # makes ### ); a #### must stay within one ## bloc AND one ### subtheme.
+  sub_cum <- cumsum(anchor_sub)               # same value => same ### section
 
-  # -- level 4: #### batteries + thematic groups ------------------------------
-  # #### groups tile every subtheme (full coverage), so there is NO minimum size:
+  # -- #### batteries + thematic groups (the single AI level) -----------------
+  # #### groups tile every section (full coverage), so there is NO minimum size:
   # a thematic group may be small. A `battery:true` span with fewer than min_size
   # variables is not a real multi-answer battery — it is DEMOTED to a thematic
   # group (kept, so coverage holds; just not boxed).
   used4     <- logical(n)
   n_batt    <- 0L; n_grp <- 0L; n_demoted <- 0L
-  for (sp in Filter(function(s) s$level == 4L, spans)) {
+  for (sp in spans) {
     fi <- unname(idx_of[sp$from]); ti <- unname(idx_of[sp$to])
     if (is.na(fi) || is.na(ti)) { rejected <- c(rejected, paste0("#### ", sp$title, " (unknown variable)")); next }
     if (fi > ti)                { rejected <- c(rejected, paste0("#### ", sp$title, " (from after to)"));     next }
@@ -4419,7 +4390,6 @@ ai_build_outline <- function(
 
   # -- report -----------------------------------------------------------------
   message("ai_build_outline: applied ",
-          if (isTRUE(subthemes)) paste0(applied3, " subtheme(s), ") else "",
           n_batt, " batter", if (n_batt == 1L) "y" else "ies", " + ",
           n_grp, " group(s)",
           if (n_demoted > 0) paste0(" (", n_demoted, " under-", min_size,

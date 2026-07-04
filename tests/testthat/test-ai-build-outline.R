@@ -1,6 +1,7 @@
-# Tests for ai_build_outline() — AI outline (### subthemes + #### groups), mocked.
-# Functions under test: ai_build_outline, .parse_outline_spans,
-#   .extract_outline_objects, .build_outline_system_prompt, .hdr_level
+# Tests for ai_build_outline() — AI covers each section with #### groups
+# (batteries + thematic groups), mocked. Functions under test: ai_build_outline,
+#   .parse_outline_spans, .extract_outline_objects, .build_outline_system_prompt,
+#   .hdr_level
 # Prefix: OU
 
 ou_lv2 <- function() list(
@@ -83,21 +84,19 @@ test_that("OU1b: seed = FALSE sends batt null everywhere", {
 
 
 # ---------------------------------------------------------------------------
-# OU2. leveled spans -> ### / #### headers + battery field
+# OU2. #### spans -> battery field (battery) / headers (thematic group)
 # ---------------------------------------------------------------------------
 
-test_that("OU2: ### to headers, #### battery to battery field, #### group to headers", {
+test_that("OU2: a #### battery goes to the battery field, a #### group to headers", {
   path <- ou_json(ou_vars())
   resp <- paste0(
-    '[{"level":3,"title":"Univers","from":"UNIV_A","to":"UNIV_C"},',
-    '{"level":4,"title":"Univers de pratique","from":"UNIV_A","to":"UNIV_C","battery":true},',
-    '{"level":4,"title":"Familles","from":"FAM_X","to":"FAM_Z","battery":false}]')
+    '[{"title":"Univers de pratique","from":"UNIV_A","to":"UNIV_C","battery":true},',
+    '{"title":"Familles","from":"FAM_X","to":"FAM_Z","battery":false}]')
   with_mock_ai(resp, suppressWarnings(suppressMessages(ai_build_outline(path))))
   bt <- ou_batt(path)
   expect_equal(unname(bt["UNIV_A"]), "Univers de pratique")   # battery repeated
   expect_equal(unname(bt["UNIV_C"]), "Univers de pratique")
   expect_equal(unname(bt["FAM_X"]),  "")                      # group is NOT a battery
-  expect_true("### Univers"  %in% ou_hdr(path, "UNIV_A"))     # subtheme -> headers
   expect_true("#### Familles" %in% ou_hdr(path, "FAM_X"))     # group -> headers (start only)
   expect_equal(ou_hdr(path, "FAM_Y"), character(0))           # group not repeated
   expect_equal(ou_hdr(path, "HEAD"), "## Bloc B")             # ## anchor untouched
@@ -106,8 +105,8 @@ test_that("OU2: ### to headers, #### battery to battery field, #### group to hea
 test_that("OU2c: a battery below min_size is demoted to a group; small groups kept", {
   path <- ou_json(ou_vars())
   resp <- paste0(
-    '[{"level":4,"title":"Petit","from":"UNIV_A","to":"UNIV_B","battery":true},',  # 2 vars -> demote
-    '{"level":4,"title":"Duo","from":"FAM_X","to":"FAM_Y","battery":false}]')       # 2-var group kept
+    '[{"title":"Petit","from":"UNIV_A","to":"UNIV_B","battery":true},',  # 2 vars -> demote
+    '{"title":"Duo","from":"FAM_X","to":"FAM_Y","battery":false}]')       # 2-var group kept
   msg <- with_mock_ai(resp,
     capture_messages(suppressWarnings(ai_build_outline(path))))
   # demoted battery -> a #### header (headers), NOT the boxed battery field
@@ -120,36 +119,34 @@ test_that("OU2c: a battery below min_size is demoted to a group; small groups ke
 
 
 # ---------------------------------------------------------------------------
-# OU3. a #### that crosses a ### boundary is rejected
+# OU3. a #### crossing a user ### subtheme anchor is rejected
 # ---------------------------------------------------------------------------
 
-test_that("OU3: a #### crossing a ### boundary is rejected", {
-  path <- ou_json(ou_vars())
-  resp <- paste0(
-    '[{"level":3,"title":"Sub1","from":"UNIV_A","to":"UNIV_C"},',
-    '{"level":3,"title":"Sub2","from":"FAM_X","to":"FAM_Z"},',
-    '{"level":4,"title":"Cross","from":"UNIV_B","to":"FAM_Y","battery":true}]')
+test_that("OU3: a #### crossing a user ### anchor is rejected", {
+  vars <- ou_vars()
+  vars$FAM_X <- ou_bin("Athletisme", "FAM_X", headers = "### Familles")  # user ### anchor
+  path <- ou_json(vars)
+  resp <- '[{"title":"Cross","from":"UNIV_B","to":"FAM_Y","battery":true}]'  # crosses the ###
   msg <- with_mock_ai(resp,
     capture_messages(suppressWarnings(ai_build_outline(path))))
-  expect_true("### Sub1" %in% ou_hdr(path, "UNIV_A"))
-  expect_true("### Sub2" %in% ou_hdr(path, "FAM_X"))
   expect_equal(unname(ou_batt(path)["UNIV_B"]), "")           # Cross not applied
   expect_true(any(grepl("crosses ### boundary", msg)))
+  expect_equal(ou_hdr(path, "FAM_X"), "### Familles")         # ### anchor preserved
 })
 
 
 # ---------------------------------------------------------------------------
-# OU4. a span that crosses a ## bloc boundary is rejected
+# OU4. a #### crossing a ## bloc boundary is rejected
 # ---------------------------------------------------------------------------
 
-test_that("OU4: a ### crossing a ## bloc boundary is rejected", {
+test_that("OU4: a #### crossing a ## bloc boundary is rejected", {
   vars <- ou_vars()
-  vars$FAM_X <- ou_bin("Athletisme", "FAM_X", headers = "## Bloc C")  # 2nd anchor
+  vars$FAM_X <- ou_bin("Athletisme", "FAM_X", headers = "## Bloc C")  # 2nd bloc anchor
   path <- ou_json(vars)
-  resp <- '[{"level":3,"title":"Straddle","from":"UNIV_A","to":"FAM_Z"}]'  # crosses ##
+  resp <- '[{"title":"Straddle","from":"UNIV_A","to":"FAM_Z","battery":true}]'  # crosses ##
   msg <- with_mock_ai(resp,
     capture_messages(suppressWarnings(ai_build_outline(path))))
-  expect_false("### Straddle" %in% ou_hdr(path, "UNIV_A"))
+  expect_equal(unname(ou_batt(path)["UNIV_A"]), "")
   expect_true(any(grepl("crosses ## boundary", msg)))
   expect_equal(ou_hdr(path, "FAM_X"), "## Bloc C")            # anchor preserved
 })
@@ -170,58 +167,57 @@ test_that("OU5: zero valid spans -> meta_json left unchanged (no wipe)", {
 
 
 # ---------------------------------------------------------------------------
-# OU6. parser: fences, truncation, level/battery defaults
+# OU6. parser: fences, truncation, battery default
 # ---------------------------------------------------------------------------
 
 test_that("OU6: .parse_outline_spans survives fences + truncation", {
   txt <- paste0(
-    "```json\n[{\"level\":4,\"title\":\"A\",\"from\":\"X\",\"to\":\"Y\",\"battery\":true},",
-    "{\"level\":3,\"title\":\"B\",\"from\":\"Z\",\"to\":")          # truncated tail
+    "```json\n[{\"title\":\"A\",\"from\":\"X\",\"to\":\"Y\",\"battery\":true},",
+    "{\"title\":\"B\",\"from\":\"Z\",\"to\":")          # truncated tail
   spans <- .parse_outline_spans(list(txt))
   expect_equal(length(spans), 1L)
-  expect_equal(spans[[1]]$level, 4L)
+  expect_equal(spans[[1]]$title, "A")
   expect_true(spans[[1]]$battery)
 })
 
-test_that("OU6b: level defaults to 4; battery defaults to TRUE; false honored", {
+test_that("OU6b: battery defaults to TRUE when omitted; false is honored", {
   spans <- .parse_outline_spans(list(paste0(
     '[{"title":"G","from":"X","to":"Y","battery":false},',   # explicit group
-    '{"title":"H","from":"A","to":"B"}]')))                  # no level, no battery
+    '{"title":"H","from":"A","to":"B"}]')))                  # no battery -> TRUE
   expect_equal(length(spans), 2L)
   expect_false(spans[[1]]$battery)
-  expect_equal(spans[[2]]$level, 4L)
   expect_true(spans[[2]]$battery)
 })
 
 
 # ---------------------------------------------------------------------------
-# OU7. subthemes = FALSE: AI owns only ####; existing ### kept as anchor
+# OU7. a user ### subtheme anchor is kept and passed to the model as a section
 # ---------------------------------------------------------------------------
 
-test_that("OU7: subthemes = FALSE keeps ### anchors, applies only ####", {
+test_that("OU7: a user ### anchor is preserved and sent as a fixed section", {
   vars <- ou_vars()
-  vars$UNIV_A <- ou_bin("Aquatique", "UNIV_A", headers = "### Univers")  # ### anchor
+  vars$UNIV_A <- ou_bin("Aquatique", "UNIV_A", headers = "### Univers")  # user ### anchor
   path <- ou_json(vars)
-  resp <- paste0(
-    '[{"level":3,"title":"IgnoredSub","from":"FAM_X","to":"FAM_Z"},',
-    '{"level":4,"title":"Bat","from":"UNIV_A","to":"UNIV_C","battery":true}]')
-  with_mock_ai(resp,
-    suppressWarnings(suppressMessages(ai_build_outline(path, subthemes = FALSE))))
-  expect_true("### Univers" %in% ou_hdr(path, "UNIV_A"))       # anchor kept
-  expect_equal(unname(ou_batt(path)["UNIV_A"]), "Bat")         # #### applied
-  expect_false("### IgnoredSub" %in% ou_hdr(path, "FAM_X"))    # level-3 not owned
+  # dry_run: the ### is interleaved as a fixed section boundary
+  res <- suppressWarnings(suppressMessages(ai_build_outline(path, dry_run = TRUE)))
+  expect_match(res$user, '"section":"### Univers"', fixed = TRUE)
+  # a #### battery within it applies; the ### anchor survives
+  resp <- '[{"title":"Bat","from":"UNIV_A","to":"UNIV_C","battery":true}]'
+  with_mock_ai(resp, suppressWarnings(suppressMessages(ai_build_outline(path))))
+  expect_true("### Univers" %in% ou_hdr(path, "UNIV_A"))
+  expect_equal(unname(ou_batt(path)["UNIV_A"]), "Bat")
 })
 
 
 # ---------------------------------------------------------------------------
-# OU8. system prompt file loads with the leveled schema + real examples
+# OU8. system prompt file loads with the #### schema + real examples
 # ---------------------------------------------------------------------------
 
-test_that("OU8: outline prompt file has the leveled schema + real examples", {
+test_that("OU8: outline prompt file has the #### schema + real examples", {
   f <- file.path(.test_proj_root, "instructions", "outline_prompt.md")
   skip_if_not(file.exists(f))
   sp <- paste(readLines(f, encoding = "UTF-8", warn = FALSE), collapse = "\n")
-  expect_match(sp, '"level"', fixed = TRUE)
   expect_match(sp, '"battery"', fixed = TRUE)
-  expect_match(sp, "UNIV_AQUA_NAUT", fixed = TRUE)   # real pps20 example embedded
+  expect_match(sp, '"from"', fixed = TRUE)
+  expect_match(sp, "PRAT_VILLE", fixed = TRUE)   # a real example token
 })
