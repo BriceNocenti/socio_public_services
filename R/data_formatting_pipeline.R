@@ -1098,7 +1098,11 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
   esc <- function(s) {
     s <- as.character(s)
     s <- gsub("\\", "\\\\", s, fixed = TRUE)
-    gsub('"',  '\\"',  s,  fixed = TRUE)
+    s <- gsub('"',  '\\"',  s,  fixed = TRUE)
+    # Escape control chars so multi-line strings (e.g. survey_description) stay valid JSON.
+    s <- gsub("\r", "\\r", s, fixed = TRUE)
+    s <- gsub("\n", "\\n", s, fixed = TRUE)
+    gsub("\t", "\\t", s, fixed = TRUE)
   }
   rpad <- function(s, w) {
     n <- nchar(s, type = "chars")
@@ -1125,14 +1129,15 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
 
   # ---- config section -------------------------------------------------------
   cfg        <- meta_list$config
-  cfg_fields <- c("dataset", "n_individuals", "missing_num", "missing_chr", "yes_labels", "no_labels")
+  cfg_fields <- c("dataset", "n_individuals", "missing_num", "missing_chr",
+                  "yes_labels", "no_labels", "survey_description")
   cfg_lines  <- c('  "config": {')
   cfg_keys   <- intersect(cfg_fields, names(cfg))   # only present keys, in order
   for (i in seq_along(cfg_keys)) {
     k   <- cfg_keys[[i]]
     val <- cfg[[k]]
-    # dataset (string) and n_individuals (number) are scalars; the rest are arrays
-    v_str <- if (k %in% c("dataset", "n_individuals")) {
+    # dataset / n_individuals / survey_description are scalars; the rest are arrays
+    v_str <- if (k %in% c("dataset", "n_individuals", "survey_description")) {
       scalar_str(val[[1]])
     } else if (length(val) > 1 || k %in% c("missing_num", "missing_chr", "yes_labels", "no_labels")) {
       arr_str(unlist(val))
@@ -1196,6 +1201,28 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
       s_lines <- c(s_lines,
         paste0('      ', rpad('"examples"', w_field), ': ',
                arr_str(as.character(ex_val)), ','))
+    }
+    # Optional: headers — markdown outline titles ("## ...", "### ...") inserted
+    # ONCE before this variable in the codebook (the survey outline; replaces the
+    # old `titles` argument). A real "## ###" header lives on the single variable
+    # it precedes — it is NOT repeated, unlike the "battery" key below.
+    hdr_val <- entry[["headers"]]
+    if (!is.null(hdr_val) && length(hdr_val) > 0) {
+      s_lines <- c(s_lines,
+        paste0('      ', rpad('"headers"', w_field), ': ',
+               arr_str(as.character(hdr_val)), ','))
+    }
+    # Optional: battery — "####"-level title of the TRUE question battery this
+    # variable belongs to. Deliberately REPEATED on every member (it is the
+    # membership key); the codebook draws one #### header before the run. See
+    # ai_build_outline(). Empty/absent = standalone (or a non-battery #### group,
+    # which lives in `headers` instead).
+    batt_val <- entry[["battery"]]
+    if (!is.null(batt_val) && length(batt_val) == 1L && !is.na(batt_val) &&
+        nzchar(as.character(batt_val))) {
+      s_lines <- c(s_lines,
+        paste0('      ', rpad('"battery"', w_field), ': ',
+               scalar_str(as.character(batt_val)), ','))
     }
 
     # -- levels sub-block ------------------------------------------------------
@@ -1327,6 +1354,7 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
     '      "config.missing_chr"              : "Libell\u00e9s textuels trait\u00e9s comme valeurs manquantes ou non-r\u00e9ponses",\n',
     '      "config.yes_labels"               : "Libell\u00e9s qui d\u00e9signent la modalit\u00e9 positive des variables binaires (ex : Oui, Choisi)",\n',
     '      "config.no_labels"                : "Libell\u00e9s qui d\u00e9signent la modalit\u00e9 n\u00e9gative des variables binaires (ex : Non, Non choisi)",\n',
+    '      "config.survey_description"       : "Texte libre d\u00e9crivant l\'enqu\u00eate (th\u00e8me, plan document\u00e9) \u2014 contexte global lu par ai_build_outline()",\n',
     '      "variables.VAR.var_label"              : "Intitul\u00e9 original de la question dans le questionnaire (peut \u00eatre modifi\u00e9 pour la documentation)",\n',
     '      "variables.VAR.role"                   : "Type de variable : factor_binary = binaire, factor_ordinal = ordinale (ordre significatif), factor_nominal = nominale (cat\u00e9gories sans ordre), integer_scale = \u00e9chelle num\u00e9rique, integer_count = comptage, double = continu, identifier = identifiant, integer = entier, other = autre",\n',
     '      "variables.VAR.new_name"               : "Nom de la variable dans le fichier de donn\u00e9es final \u2014 c\'est ce nom qu\'il faut utiliser pour conseiller les \u00e9tudiant\u00b7es",\n',
@@ -1340,6 +1368,8 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
     '      "variables.VAR.na_n"                   : "Nombre de valeurs manquantes (NA + codes/modalit\u00e9s manquant\u00b7es) apr\u00e8s formatage \u2014 toutes variables",\n',
     '      "variables.VAR.na_pct"                 : "Pourcentage de valeurs manquantes (sur le nombre total d\'individus)",\n',
     '      "variables.VAR.examples"               : "Quelques valeurs brutes distinctes (variables textuelles), pour illustration dans le codebook",\n',
+    '      "variables.VAR.battery"                : "Titre \'#### ...\' de la VRAIE batterie de questions (m\u00eame question, plusieurs r\u00e9ponses) \u00e0 laquelle appartient la variable. R\u00e9p\u00e9t\u00e9 sur chaque membre (cl\u00e9 d\'appartenance) ; seules les vraies batteries l\'utilisent (encadr\u00e9es dans le codebook). Nomm\u00e9 par ai_build_outline(), modifiable \u00e0 la main.",\n',
+    '      "variables.VAR.headers"                : "Titres de plan (\'## ...\', \'### ...\', et \'#### ...\' pour un groupe th\u00e9matique non-batterie) ins\u00e9r\u00e9s une fois avant cette variable dans le codebook. Les \'## \' sont pos\u00e9s \u00e0 la main (set_headers / extract headers=), les \'### \'/\'#### \' par ai_build_outline().",\n',
     '      "variables.VAR.num_stats"             : "Statistiques r\u00e9sum\u00e9es (variables num\u00e9riques) : mean, sd, min, q1, median, q3, max"\n',
     '    }\n',
     '  }'
@@ -1925,6 +1955,20 @@ apply_nomenclatures <- function(
 #'                        \code{variables} section overrides auto-detected role,
 #'                        order, new_labels, new_name for each variable.
 #'                        Edit the JSON between steps for manual corrections.
+#' @param headers          Optional named vector — the survey outline —
+#'                        \code{c("## Grande partie" = "VARNAME", "### Sous" =
+#'                        "VAR2", ...)}, same form as \code{set_headers()}. It is
+#'                        the SOURCE OF TRUTH for the LEVELS it contains (normally
+#'                        the \code{## } blocs): those are (re)written every run,
+#'                        while deeper AI-generated \code{### }/\code{#### } are
+#'                        PRESERVED. Omit it to preserve all headers set with
+#'                        \code{set_headers()} / edited in the JSON. Setting the
+#'                        \code{## } blocs here (before \code{ai_build_outline()})
+#'                        makes the AI outline respect them as fixed boundaries.
+#' @param survey_description Optional free text (survey topic, documented outline)
+#'                        stored in \code{config.survey_description} and read by
+#'                        \code{ai_build_outline()} as global context. Source of
+#'                        truth when supplied; preserved on re-extract otherwise.
 #'
 #' @return A tibble with columns:
 #'   var_name, var_label, r_class, n_distinct, detected_role, order,
@@ -1948,8 +1992,17 @@ extract_survey_metadata <- function(
     yes_labels      = NULL,
     no_labels       = NULL,
     max_levels_cat  = 20,
-    sas_format_file = NULL
+    sas_format_file = NULL,
+    headers         = NULL,
+    survey_description = NULL
 ) {
+  # `headers`: optional named vector c("## Titre" = "VARNAME", ...) — the survey
+  # outline. When supplied it is the SOURCE OF TRUTH: re-applied (replacing) each
+  # run, so edit it in your script, not in the JSON. Omit it to instead preserve
+  # headers you set with set_headers() / edited in the JSON. See set_headers().
+  if (!is.null(headers) && (is.null(names(headers)) || any(!nzchar(names(headers)))))
+    stop("`headers` must be a NAMED vector: c('## Titre' = 'VARNAME', ...).",
+         call. = FALSE)
   # ---- Apply SAS format labels if provided -----------------------------------
   if (!is.null(sas_format_file) && nzchar(sas_format_file)) {
     sas_parsed <- parse_sas_formats(sas_format_file)
@@ -2299,6 +2352,20 @@ extract_survey_metadata <- function(
   .no_labels_used   <- if (.no_labels_explicit && !is.null(no_labels))
     no_labels[.normalize_text(no_labels) %in% .all_labels] else no_labels
 
+  # Outline headers from the `headers` argument (source of truth when supplied):
+  # a per-variable list of markdown titles, in order, applied below (replacing).
+  .hdr_map <- if (!is.null(headers)) split(names(headers), unname(as.character(headers))) else NULL
+  # Levels the argument controls (normally just ## ): it is source of truth for
+  # THESE levels only, so deeper AI-generated ### / #### survive re-extract.
+  .arg_levels <- if (!is.null(.hdr_map))
+    unique(vapply(unlist(.hdr_map, use.names = FALSE), .hdr_level, integer(1))) else integer(0)
+  if (!is.null(.hdr_map)) {
+    .unknown_hdr <- setdiff(names(.hdr_map), meta$var_name)
+    if (length(.unknown_hdr) > 0)
+      message("extract_survey_metadata: ", length(.unknown_hdr),
+              " header target(s) not found: ", paste(.unknown_hdr, collapse = ", "))
+  }
+
   # Build JSON variables from meta, merging with existing JSON when present
   .new_vars <- purrr::set_names(
     purrr::map(seq_len(nrow(meta)), function(i) {
@@ -2322,6 +2389,14 @@ extract_survey_metadata <- function(
           result$desc <- old$desc
         if (!is.null(old$new_name) && nzchar(old$new_name))
           result$new_name <- old$new_name
+        # Preserve battery membership/title, and outline headers set by
+        # set_headers() / ai_build_outline() / edited in the JSON. The `headers`
+        # argument (applied below) is level-aware: it overrides only the levels it
+        # contains, so AI-generated ### / #### survive re-extract.
+        if (!is.null(old$battery) && nzchar(as.character(old$battery)))
+          result$battery <- old$battery
+        if (!is.null(old$headers) && length(old$headers) > 0)
+          result$headers <- old$headers
         # Merge level-by-level: preserve new_label, n, pct, order from old JSON
         if (!is.null(old$levels) && length(old$levels) > 0) {
           result$levels <- purrr::imap(result$levels, function(lev, code) {
@@ -2338,6 +2413,19 @@ extract_survey_metadata <- function(
           })
         }
       }
+      # Outline headers argument is source of truth for the LEVELS it contains
+      # (normally ## ): drop those levels from the preserved headers, then overlay
+      # the argument's titles for this variable, keeping deeper AI-set levels.
+      if (!is.null(.hdr_map)) {
+        cur <- as.character(result$headers %||% character(0))
+        if (length(.arg_levels) > 0)
+          cur <- cur[!(vapply(cur, .hdr_level, integer(1)) %in% .arg_levels)]
+        add    <- if (!is.null(.hdr_map[[vname]])) as.character(.hdr_map[[vname]]) else character(0)
+        merged <- c(cur, add)
+        if (length(merged) > 1L)
+          merged <- merged[order(vapply(merged, .hdr_level, integer(1)))]
+        result$headers <- if (length(merged) > 0) as.list(merged) else NULL
+      }
       result
     }),
     meta$var_name
@@ -2350,6 +2438,9 @@ extract_survey_metadata <- function(
   .cfg_new$missing_chr <- as.list(.missing_chr_used)
   if (!is.null(.yes_labels_used)) .cfg_new$yes_labels <- as.list(.yes_labels_used)
   if (!is.null(.no_labels_used))  .cfg_new$no_labels  <- as.list(.no_labels_used)
+  # survey_description: source of truth when supplied, preserved (from .cfg_new) otherwise.
+  if (!is.null(survey_description) && nzchar(trimws(survey_description)))
+    .cfg_new$survey_description <- trimws(survey_description)
 
   if (.meta_json_existed) {
     .backup_meta_json(meta_json, "reextract")
@@ -2708,6 +2799,339 @@ metadata_add_level_stats <- function(meta_json, df,
   }
 
   invisible(.survey_meta_from_json(json_path, .read_meta_json(json_path)))
+}
+
+
+# ============================================================
+# 2b-bis. .batt_seed_candidates() — deterministic battery seed (internal)
+# ============================================================
+# PURPOSE: flag contiguous runs of variables that MIGHT answer the same
+#   questionnaire question with several answers ("battery candidates"), used only
+#   as a HINT fed to ai_build_outline() (the `batt` field). Never persisted.
+# ROLE: pure in-memory computation. Signals a run only when it matches the three
+#   mechanical criteria (same role + same level-code set + contiguity) AND shares
+#   a name-token prefix or a common label stem — a precision gate that keeps the
+#   seed inside "same-question" territory. The AI decides the real batteries from
+#   meaning (desc) and freely overrides the seed. No AI here, fully reproducible.
+# See: CLAUDE.md § Key Design Decisions > batteries.
+
+# Signature key used to detect same-question runs. Factors: role + the set of
+# level codes (missing codes tagged "*") — so {0,1,7} never merges with {0,1}
+# and a nominal run never merges with a binary run. Numerics: role only.
+# identifier/other/date/empty -> "X|" = never a battery.
+.batt_signature <- function(jv) {
+  role <- jv$role %||% ""
+  if (startsWith(role, "factor")) {
+    lvls <- jv$levels
+    codes <- if (length(lvls)) {
+      miss <- vapply(lvls, function(l) isTRUE(l$missing), logical(1))
+      paste(sort(paste0(names(lvls), ifelse(miss, "*", ""))), collapse = ",")
+    } else "<none>"
+    paste0("F|", role, "|", codes)
+  } else if (role %in% c("integer", "integer_count", "integer_scale", "double")) {
+    paste0("N|", role)
+  } else {
+    paste0("X|", role)
+  }
+}
+
+# Longest common leading substring of a character vector.
+.batt_common_char_prefix <- function(x) {
+  if (length(x) == 0) return("")
+  if (length(x) == 1) return(x[[1]])
+  m <- min(nchar(x))
+  if (m == 0) return("")
+  chars <- strsplit(substr(x, 1L, m), "", fixed = TRUE)
+  out <- ""
+  for (k in seq_len(m)) {
+    col <- vapply(chars, `[[`, character(1), k)
+    if (length(unique(col)) > 1L) break
+    out <- paste0(out, col[[1]])
+  }
+  out
+}
+
+# Reverse each string; used to compute a common SUFFIX via the prefix helper.
+.str_rev <- function(x) vapply(x, function(s)
+  paste(rev(strsplit(s, "", fixed = TRUE)[[1]]), collapse = ""),
+  character(1), USE.NAMES = FALSE)
+
+# Longest common trailing substring of a character vector.
+.batt_common_char_suffix <- function(x) .str_rev(.batt_common_char_prefix(.str_rev(x)))
+
+# For a battery's descriptions, drop the leading + trailing part common to ALL of
+# them (trimmed to word boundaries), leaving only what distinguishes each. Used by
+# preview_outline() so the member list reads without the repeated boilerplate.
+.batt_strip_common <- function(labels) {
+  labels <- as.character(labels)
+  if (length(labels) < 2L) return(trimws(labels))
+  pre <- sub("\\S+$", "", .batt_common_char_prefix(labels))  # back off partial last word
+  suf <- sub("^\\S+", "", .batt_common_char_suffix(labels))  # forward past partial first word
+  out <- labels
+  if (nchar(pre) > 0L) out <- substring(out, nchar(pre) + 1L)
+  if (nchar(suf) > 0L) out <- substr(out, 1L, nchar(out) - nchar(suf))
+  out <- sub("^[[:space:][:punct:]]+", "", out)
+  out <- sub("[[:space:][:punct:]]+$", "", out)
+  trimws(out)
+}
+
+# Markdown for ONE battery: a "#### <title>  (n variables[ · tag])" header and a
+# member list "- **NAME**: <desc, common part stripped>". Used by preview_outline().
+# Returns a character vector of lines.
+.batt_battery_md <- function(title, names, labels, tag = NULL, max_desc = 90L) {
+  stripped <- .batt_strip_common(labels)
+  hdr <- paste0("#### ", title, "  (", length(names), " variable",
+                if (length(names) == 1L) "" else "s",
+                if (!is.null(tag) && nzchar(tag)) paste0(" · ", tag) else "", ")")
+  members <- vapply(seq_along(names), function(k) {
+    d <- stripped[[k]]
+    if (max_desc > 0L && nchar(d) > max_desc) d <- paste0(substr(d, 1L, max_desc - 1L), "…")
+    paste0("- **", names[[k]], "**", if (nzchar(d)) paste0(": ", d) else "")
+  }, character(1))
+  c(hdr, "", members, "")
+}
+
+# Longest common leading underscore-token run of variable names, e.g.
+# c("NATIO_PERE_FR","NATIO_PERE_ETR") -> "NATIO_PERE".
+.batt_common_token_prefix <- function(names) {
+  if (length(names) == 0) return("")
+  toks <- strsplit(names, "_", fixed = TRUE)
+  m <- min(lengths(toks))
+  out <- character(0)
+  for (k in seq_len(m)) {
+    col <- vapply(toks, `[[`, character(1), k)
+    if (length(unique(col)) > 1L) break
+    out <- c(out, col[[1]])
+  }
+  paste(out, collapse = "_")
+}
+
+# Provisional (rough) battery title: a common var_label stem if long enough,
+# else a common name-token prefix, else the first label truncated.
+.batt_provisional_title <- function(names, labels) {
+  lab_pref <- trimws(sub("\\s+\\S*$", "", .batt_common_char_prefix(labels)))
+  if (nchar(lab_pref) >= 12L) return(lab_pref)
+  tok_pref <- .batt_common_token_prefix(names)
+  if (nzchar(tok_pref)) return(tok_pref)
+  first <- labels[[1]] %||% ""
+  if (nchar(first) > 45L) paste0(substr(first, 1L, 42L), "...") else first
+}
+
+# Deterministic battery-candidate seed (internal — no JSON write, no AI).
+# Returns:
+#   $seed     — per-variable character vector of candidate titles ("" = none),
+#               fed to ai_build_outline() as the `batt` HINT.
+#   $outliers — indices of likely wrong-type members healed into a candidate run
+#               (role differs from same-prefix neighbours; worth reviewing).
+# A run is signalled ONLY when it matches the three mechanical criteria (same
+# role + same level-code set + contiguity) AND shares a name-token prefix or a
+# >= 10-char label stem — the precision gate that keeps the seed in "same
+# question" territory (two unrelated yes/no questions in a row are NOT a
+# battery). Interleaved / mis-typed / no-signal batteries are left for the AI,
+# which reads meaning (desc) and creates the ones the seed misses.
+.batt_seed_candidates <- function(existing, min_size = 3L) {
+  vars   <- existing$variables
+  vnames <- names(vars)
+  n      <- length(vnames)
+  if (n == 0L) return(list(seed = character(0), outliers = integer(0)))
+
+  sig       <- vapply(vars, .batt_signature, character(1), USE.NAMES = FALSE)
+  labels    <- vapply(vars, function(jv) jv$var_label %||% "", character(1), USE.NAMES = FALSE)
+  first_tok <- vapply(vnames, function(x) strsplit(x, "_", fixed = TRUE)[[1]][[1]],
+                      character(1), USE.NAMES = FALSE)
+  eligible  <- !startsWith(sig, "X|")
+  # A variable carrying an outline header ("## ...") starts a new section: no
+  # candidate run may span across it (respects the fixed outline).
+  sect_head <- vapply(vars, function(jv) length(jv$headers %||% list()) > 0,
+                      logical(1), USE.NAMES = FALSE)
+
+  # -- heal single-variable type-outliers ------------------------------------
+  # A length-1 gap between two same-signature neighbours that shares their name
+  # prefix is almost certainly a mis-detected type; keep it in the candidate run
+  # but flag it (also un-fragments runs a bad type had split).
+  eff_sig  <- sig
+  outliers <- integer(0)
+  if (n >= 3L) {
+    for (i in 2:(n - 1L)) {
+      if (eligible[i] && eligible[i - 1L] && eligible[i + 1L] && !sect_head[i] &&
+          sig[i - 1L] == sig[i + 1L] && sig[i] != sig[i - 1L] &&
+          first_tok[i] == first_tok[i - 1L]) {
+        eff_sig[i] <- sig[i - 1L]
+        outliers   <- c(outliers, i)
+      }
+    }
+  }
+
+  # -- precision gate: a plausible same-question candidate shares a name prefix
+  #    or a >= 10-char common label stem (prefix OR suffix — the shared question
+  #    stem is often at the label's END). role+codes alone is not enough.
+  seed_ok <- function(idx) {
+    nm <- vnames[idx]; lb <- labels[idx]
+    if (nzchar(.batt_common_token_prefix(nm))) return(TRUE)
+    pre <- trimws(sub("\\s+\\S*$", "", .batt_common_char_prefix(lb)))
+    suf <- trimws(sub("^\\S+\\s+", "", .batt_common_char_suffix(lb)))
+    nchar(pre) >= 10L || nchar(suf) >= 10L
+  }
+
+  seed <- character(n)
+  add_batt <- function(idx) {
+    if (length(idx) < min_size || !seed_ok(idx)) return(invisible())
+    ttl <- .batt_provisional_title(vnames[idx], labels[idx])
+    for (j in idx) seed[j] <<- ttl
+  }
+
+  # -- uniform runs (same eff_sig), split by first name-token into clusters ----
+  i <- 1L
+  while (i <= n) {
+    if (!eligible[i]) { i <- i + 1L; next }
+    j <- i
+    while (j < n && eligible[j + 1L] && eff_sig[j + 1L] == eff_sig[i] &&
+           !sect_head[j + 1L]) j <- j + 1L
+    run <- i:j
+    if (length(run) >= min_size) {
+      ft  <- first_tok[run]
+      grp <- cumsum(c(TRUE, ft[-1] != ft[-length(ft)]))
+      # Split only when the run holds >=2 real prefix CLUSTERS (each >= min_size),
+      # e.g. UNIV_*/FAM_*/PAP_*. A run where every name has a distinct first token
+      # (a no-common-prefix battery like OBJET/APPLI/RES) stays whole.
+      if (sum(tabulate(grp) >= min_size) >= 2L) {
+        for (g in unique(grp)) add_batt(run[grp == g])
+      } else {
+        add_batt(run)
+      }
+    }
+    i <- j + 1L
+  }
+
+  list(seed = seed, outliers = outliers)
+}
+
+
+# ============================================================
+# 2b-ter. set_headers() — write the survey outline into the JSON
+# ============================================================
+
+#' Write survey-outline headers (## / ###) into the metadata JSON
+#'
+#' Takes the same named-vector form the old \code{titles} argument used —
+#' \code{c("## Grande partie" = "VARNAME", "### Sous-partie" = "VAR2", ...)} —
+#' and stores each markdown title in the \code{headers} array of the variable it
+#' precedes, so \code{generate_codebook()} renders it once as an outline row and
+#' \code{ai_build_outline()} treats it as a fixed section boundary. Preserved on
+#' re-extract. Run this \emph{before} \code{ai_build_outline()} so the AI outline
+#' respects your \code{## } blocs.
+#'
+#' @param meta_json Path to the survey_meta JSON, or a \code{survey_meta} object.
+#' @param headers Named character vector: names = markdown titles
+#'   (\code{"## ..."} / \code{"### ..."}), values = the variable before which to
+#'   insert them. Repeat a variable name to stack several titles before it.
+#' @param replace If \code{TRUE} (default), overwrite each targeted variable's
+#'   existing headers; \code{FALSE} appends to them.
+#' @return Invisibly, the updated \code{survey_meta} object.
+#' @examples
+#' \dontrun{
+#' set_headers("survey.survey_meta.json",
+#'   c("## Partie A" = "Q1", "## Partie B" = "Q42", "### Sous-partie" = "Q42"))
+#' }
+#' @export
+set_headers <- function(meta_json, headers, replace = TRUE) {
+  if (is.null(names(headers)) || any(!nzchar(names(headers))))
+    stop("`headers` must be a NAMED vector: c('## Titre' = 'VARNAME', ...).",
+         call. = FALSE)
+  json_path <- .resolve_json_path(meta_json)
+  existing  <- .read_meta_json(json_path)
+  vnames    <- names(existing$variables)
+
+  titles_md <- names(headers)
+  targets   <- unname(as.character(headers))
+  unknown   <- setdiff(unique(targets), vnames)
+  if (length(unknown) > 0)
+    message("set_headers: ", length(unknown), " target variable(s) not found: ",
+            paste(unknown, collapse = ", "))
+
+  by_var <- split(titles_md, targets)               # titles per variable, in order
+  n_set  <- 0L
+  for (v in names(by_var)) {
+    if (!v %in% vnames) next
+    old <- if (replace) character(0)
+           else as.character(existing$variables[[v]]$headers %||% character(0))
+    existing$variables[[v]]$headers <- as.list(c(old, by_var[[v]]))
+    n_set <- n_set + 1L
+  }
+
+  .backup_meta_json(json_path, "headers")
+  .write_meta_json(existing, json_path)
+  message("set_headers: wrote outline titles on ", n_set, " variable(s) in ",
+          basename(json_path), ".")
+  invisible(.survey_meta_from_json(json_path, existing))
+}
+
+
+# ============================================================
+# 2b-quater. preview_outline() — markdown outline view
+# ============================================================
+
+#' Print the survey outline as markdown in the console
+#'
+#' Walks the variables in order and prints the codebook structure the way the
+#' xlsx renders it: the \code{## }/\code{### }/\code{#### } outline headers stored
+#' in each variable's \code{headers} array (as-is), and each question battery
+#' (a contiguous run sharing a \code{battery} title) expanded as a
+#' \code{#### <title> (n variables · battery)} header with its member variables
+#' and their distinctive description (common part stripped). Read-only; handy to
+#' eyeball the structure before or after \code{ai_build_outline()}.
+#'
+#' @param meta_json Path to the survey_meta JSON, or a \code{survey_meta} object.
+#' @param max_desc Truncate each shown battery-member description to this many
+#'   characters (\code{0} = no truncation).
+#' @return Invisibly, the markdown string (also printed to the console).
+#' @examples
+#' \dontrun{
+#' set_headers("survey.survey_meta.json", titles)  # ## blocs (source of truth)
+#' ai_build_outline("survey.survey_meta.json")     # AI ### / #### structure
+#' preview_outline("survey.survey_meta.json")
+#' }
+#' @export
+preview_outline <- function(meta_json, max_desc = 90L) {
+  json_path <- .resolve_json_path(meta_json)
+  existing  <- .read_meta_json(json_path)
+  vars   <- existing$variables
+  vnames <- names(vars)
+  n      <- length(vnames)
+  batt   <- vapply(vars, function(v) as.character(v$battery %||% ""), character(1), USE.NAMES = FALSE)
+  labs   <- vapply(vars, function(v) as.character(v$var_label %||% ""), character(1), USE.NAMES = FALSE)
+
+  lines  <- character(0)
+  n_batt <- 0L; n_grp <- 0L
+  i <- 1L
+  while (i <= n) {
+    # Outline headers opening at this variable (## / ### / #### groups), as-is.
+    for (h in as.character(vars[[i]]$headers %||% character(0))) {
+      lines <- c(lines, h)
+      if (startsWith(h, "####")) n_grp <- n_grp + 1L
+    }
+    # A question battery starting here: expand it with its members.
+    if (nzchar(batt[i])) {
+      j <- i
+      while (j < n && batt[j + 1L] == batt[i]) j <- j + 1L    # contiguous run
+      idx    <- i:j
+      n_batt <- n_batt + 1L
+      lines  <- c(lines, .batt_battery_md(batt[i], vnames[idx], labs[idx],
+                                          tag = "battery", max_desc = max_desc))
+      i <- j + 1L
+      next
+    }
+    i <- i + 1L
+  }
+
+  md <- paste(lines, collapse = "\n")
+  if (length(lines) == 0L)
+    message("preview_outline: no outline in ", basename(json_path),
+            " — set ## headers (set_headers) and run ai_build_outline() first.")
+  else cat(md, "\n")
+  message(sprintf("preview_outline: %d batter%s + %d non-battery #### group(s) over %d variables.",
+                  n_batt, if (n_batt == 1L) "y" else "ies", n_grp, n))
+  invisible(md)
 }
 
 
@@ -3660,6 +4084,367 @@ ai_classify_roles <- function(
   }
 
   message(strrep("=", 60))
+  invisible(.survey_meta_from_json(json_path, existing))
+}
+
+
+# ============================================================
+# 7b. ai_build_outline()
+# ============================================================
+# PURPOSE: build the finer codebook structure in ONE global AI pass — ### subthemes
+#   (tiling every variable in a bloc) and #### groups (question batteries + thematic
+#   groupings) — within the fixed ## blocs the user anchors.
+# ROLE: sends every variable (in order) with the fixed ## anchors interleaved and a
+#   deterministic battery-candidate seed (`batt`, a hint), gets back leveled contiguous
+#   spans [{level, title, from, to, battery}], validates nesting/overlap, and writes the
+#   `headers` (### / non-battery ####) and `battery` (true batteries) fields
+#   authoritatively. Reuses the shared AI infra (build body, call, batch, cache, robust
+#   parse). See CLAUDE.md § Key Design Decisions > outline.
+
+# Load the outline system prompt (installed pkg first, then ./instructions).
+.build_outline_system_prompt <- function() {
+  .pkg_name <- utils::packageName()
+  p <- if (!is.null(.pkg_name) && nzchar(.pkg_name))
+         system.file("instructions/outline_prompt.md", package = .pkg_name) else ""
+  if (!nzchar(p) || !file.exists(p))
+    p <- file.path(getwd(), "instructions", "outline_prompt.md")
+  if (file.exists(p)) {
+    paste(readLines(p, encoding = "UTF-8", warn = FALSE), collapse = "\n")
+  } else {
+    warning("ai_build_outline: instructions/outline_prompt.md not found; ",
+            "using minimal inline prompt.")
+    paste0(
+      "Structure a French survey codebook. Input: a JSON array in questionnaire ",
+      "order of {var, role, nlev, desc, batt} rows and fixed {\"section\":\"## ...\"} ",
+      "anchors. Produce ### subthemes (covering every variable within each ## bloc) ",
+      "and #### groups (batteries or thematic groupings) within them.\n",
+      'Reply ONLY as a JSON array of contiguous spans: ',
+      '[{"level":3|4,"title":"...","from":"<var>","to":"<var>","battery":true|false}].\n',
+      "level 3 = ###, level 4 = #### (battery=true for a real question battery, false ",
+      "for a thematic group). from/to = variable names (inclusive). Spans of the same ",
+      "level must not overlap; every span must stay inside one ## bloc; each #### must ",
+      "stay inside one ###. `batt` is only a candidate hint — override it freely. No prose."
+    )
+  }
+}
+
+# Extract {level,title,from,to,battery} objects from arbitrary text (fallback when
+# the whole array fails to parse — a truncated last object is simply dropped).
+.extract_outline_objects <- function(txt) {
+  m    <- gregexpr("\\{[^{}]*\\}", txt, perl = TRUE)
+  objs <- regmatches(txt, m)[[1]]
+  out  <- list()
+  for (o in objs) {
+    p <- tryCatch(jsonlite::fromJSON(o, simplifyVector = FALSE), error = function(e) NULL)
+    if (!is.null(p) && !is.null(p$title) && !is.null(p$from) && !is.null(p$to))
+      out[[length(out) + 1L]] <- p
+  }
+  out
+}
+
+# Parse leveled span arrays from all responses into a flat list of
+# list(level, title, from, to, battery). Robust to code fences, prose, truncation.
+# level defaults to 4 (clamped to 3..4 — the levels the AI owns); a level-4 span is
+# a battery unless it explicitly carries "battery": false.
+.parse_outline_spans <- function(results_text) {
+  spans <- list()
+  for (txt in results_text) {
+    if (is.null(txt) || !nzchar(txt)) next
+    t      <- gsub("```json|```", "", txt)
+    parsed <- tryCatch(jsonlite::fromJSON(t, simplifyVector = FALSE),
+                       error = function(e) NULL)
+    if (is.null(parsed) || !is.list(parsed)) parsed <- .extract_outline_objects(t)
+    for (o in parsed) {
+      if (!is.list(o) || is.null(o$title) || is.null(o$from) || is.null(o$to)) next
+      lvl <- suppressWarnings(as.integer(o$level %||% 4L))
+      if (is.na(lvl)) lvl <- 4L
+      lvl <- min(max(lvl, 3L), 4L)
+      is_batt <- if (is.null(o$battery)) TRUE
+                 else isTRUE(o$battery) || identical(tolower(as.character(o$battery)[[1]]), "true")
+      spans[[length(spans) + 1L]] <- list(
+        level   = lvl,
+        title   = as.character(o$title)[[1]],
+        from    = as.character(o$from)[[1]],
+        to      = as.character(o$to)[[1]],
+        battery = (lvl == 4L) && is_batt)
+    }
+  }
+  spans
+}
+
+# Markdown depth of an outline header string ("## ..." -> 2). Missing -> 2.
+.hdr_level <- function(h) {
+  m <- attr(regexpr("^#+", h), "match.length")
+  if (m < 0L) 2L else as.integer(m)
+}
+
+#' Build the survey outline with the AI (### subthemes + #### batteries/groups)
+#'
+#' One global pass that reads every variable in questionnaire order — with the
+#' fixed \code{## } blocs you anchored (\code{set_headers()} /
+#' \code{extract_survey_metadata(headers=)}) interleaved as boundaries and a
+#' deterministic battery-candidate seed as a hint — and asks the model for the
+#' finer structure as \strong{leveled contiguous spans}
+#' \code{[{level, title, from, to, battery}]}: \code{### } subthemes covering every
+#' variable within each bloc, and \code{#### } groups (true question batteries or
+#' thematic groupings) within them.
+#'
+#' Authoritative: it clears the levels it owns (\code{### }/\code{#### } in
+#' \code{headers} and all \code{battery}) and re-writes them from the validated
+#' spans — \code{### } and non-battery \code{#### } go to \code{headers}, true
+#' batteries to the repeated \code{battery} field. The \code{## } anchors are never
+#' touched. Nothing is wiped if the response parses to zero valid spans.
+#'
+#' The model also receives \code{config.survey_description} (set at
+#' \code{extract_survey_metadata()}) as global context, when present.
+#'
+#' @param meta_json Path to the survey_meta JSON, or a \code{survey_meta} object.
+#' @param subthemes If \code{TRUE} (default), the AI owns \code{### } + \code{#### }
+#'   (it re-generates all subthemes, tiling the variables within each \code{## } bloc).
+#'   If \code{FALSE}, the AI owns only \code{#### } and your existing \code{### } are
+#'   kept as fixed anchors.
+#' @param seed If \code{TRUE} (default), feed the deterministic battery-candidate
+#'   seed as the \code{batt} hint. \code{FALSE} sends \code{batt:null} everywhere.
+#' @param min_size Minimum variables for a \code{#### } span to count as a real
+#'   \code{battery:true} battery (default 3). Smaller ones are kept but DEMOTED to a
+#'   thematic group (\code{#### } groups themselves have no minimum — they tile every
+#'   subtheme for complete coverage).
+#' @param use_batch Use the Message Batch API instead of a synchronous call.
+#' @param resume_batch_id Retrieve an already-submitted batch instead of resending.
+#' @param dry_run If \code{TRUE}, print the prompt and return it without calling the
+#'   API or writing anything.
+#' @param api_key,model Anthropic credentials / model id.
+#' @return Invisibly, the updated \code{survey_meta} object.
+#' @examples
+#' \dontrun{
+#' set_headers("survey.survey_meta.json", titles)  # ## blocs (source of truth)
+#' ai_build_outline("survey.survey_meta.json")
+#' preview_outline("survey.survey_meta.json")
+#' }
+#' @export
+ai_build_outline <- function(
+    meta_json,
+    subthemes          = TRUE,
+    seed               = TRUE,
+    min_size           = 3L,
+    use_batch          = FALSE,
+    resume_batch_id    = NULL,
+    dry_run            = FALSE,
+    api_key            = Sys.getenv("ANTHROPIC_API_KEY"),
+    model              = .DEFAULT_AI_MODEL) {
+
+  json_path <- .resolve_json_path(meta_json)
+  existing  <- .read_meta_json(json_path)
+  var_names <- names(existing$variables)
+  n         <- length(var_names)
+  if (n == 0L) {
+    message("ai_build_outline: no variables in ", basename(json_path))
+    return(invisible(.survey_meta_from_json(json_path, existing)))
+  }
+  if (!is.null(resume_batch_id)) use_batch <- TRUE
+
+  # Levels the AI owns: #### always; ### too when subthemes = TRUE. Anchors are
+  # every header shallower than that (## always; ## + ### when subthemes = FALSE).
+  ai_levels <- if (isTRUE(subthemes)) c(3L, 4L) else 4L
+  min_ai    <- min(ai_levels)
+  idx_of    <- stats::setNames(seq_len(n), var_names)
+
+  # -- fixed anchor boundaries (from the current headers, before we clear) -----
+  hdrs_of <- function(k) as.character(existing$variables[[var_names[[k]]]]$headers %||% character(0))
+  bloc_open   <- vapply(seq_len(n), function(k) any(vapply(hdrs_of(k), .hdr_level, 1L) == 2L),
+                        logical(1))
+  bloc_cum    <- cumsum(bloc_open)                       # same value => same ## bloc
+  anchor_sub  <- if (isTRUE(subthemes)) logical(n) else
+                 vapply(seq_len(n), function(k) any(vapply(hdrs_of(k), .hdr_level, 1L) == 3L),
+                        logical(1))
+
+  # -- deterministic battery-candidate seed (a hint) --------------------------
+  seed_res <- if (isTRUE(seed)) .batt_seed_candidates(existing, min_size)
+              else list(seed = character(n), outliers = integer(0))
+  seedv    <- seed_res$seed
+
+  # -- build the single global input ------------------------------------------
+  esc <- function(x) {
+    x <- gsub("[\r\n\t]+", " ", x)
+    x <- gsub("\\", "\\\\", x, fixed = TRUE)
+    gsub('"', '\\"', x, fixed = TRUE)
+  }
+  build_input <- function() {
+    parts <- character(0)
+    for (k in seq_len(n)) {
+      jv <- existing$variables[[var_names[[k]]]]
+      # Fixed anchors (the levels the AI does NOT own) inserted where they open.
+      for (h in hdrs_of(k))
+        if (.hdr_level(h) < min_ai)
+          parts <- c(parts, paste0('{"section":"', esc(h), '"}'))
+      role <- jv$role %||% ""
+      lvls <- jv$levels
+      nlev <- if (length(lvls))
+        sum(!vapply(lvls, function(l) isTRUE(l$missing), logical(1))) else 0L
+      # Keep enough of the label that the model sees the shared question stem
+      # (often at the END, e.g. "… au cours des 4 dernières semaines").
+      desc      <- esc(substr(jv$var_label %||% "", 1L, 160L))
+      batt_json <- if (nzchar(seedv[[k]])) paste0('"', esc(seedv[[k]]), '"') else "null"
+      parts <- c(parts, paste0('{"var":"', esc(var_names[[k]]), '","role":"', esc(role),
+                               '","nlev":', nlev, ',"desc":"', desc, '","batt":', batt_json, '}'))
+    }
+    body <- paste0("[\n", paste(parts, collapse = ",\n"), "\n]")
+    sd <- as.character(existing$config$survey_description %||% "")
+    if (nzchar(trimws(sd)))
+      body <- paste0("SURVEY DESCRIPTION:\n", trimws(sd),
+                     "\n\nVARIABLES (in questionnaire order; {\"section\"} rows are FIXED ",
+                     "## anchors you must not move or rename):\n", body)
+    body
+  }
+  user_prompt   <- build_input()
+  system_prompt <- .build_outline_system_prompt()
+
+  # -- dry run ----------------------------------------------------------------
+  if (dry_run) {
+    message(strrep("=", 60))
+    message("DRY RUN — no API call made")
+    message(strrep("=", 60))
+    message("Variables: ", n, "  |  AI levels: ",
+            if (isTRUE(subthemes)) "### + ####" else "####",
+            "  |  Seed: ", if (isTRUE(seed)) "on" else "off",
+            "  |  Route: ", if (use_batch) "batch" else "synchronous")
+    message("\n", strrep("-", 60)); message("SYSTEM PROMPT"); message(strrep("-", 60))
+    cat(system_prompt, "\n")
+    message("\n", strrep("-", 60)); message("USER MESSAGE"); message(strrep("-", 60))
+    cat(user_prompt, "\n")
+    message(strrep("=", 60))
+    return(invisible(list(system = system_prompt, user = user_prompt)))
+  }
+
+  max_tok <- min(120000L, max(8000L, n * 40L))
+  system_prompt_cached <- list(
+    list(type = "text", text = system_prompt, cache_control = list(type = "ephemeral")))
+
+  # -- single API call --------------------------------------------------------
+  if (!is.null(resume_batch_id)) {
+    message("ai_build_outline: resuming batch ", resume_batch_id)
+    raw          <- ai_batch_retrieve(resume_batch_id, api_key = api_key)
+    results_text <- purrr::map(purrr::set_names(names(raw)), ~ raw[[.x]])
+  } else if (!use_batch) {
+    message("ai_build_outline: synchronous (", n, " vars, one call)")
+    results_text <- list(.ai_extract_text(
+      ai_call_claude(user_prompt, model = model, api_key = api_key,
+                     system = system_prompt_cached, max_tokens = max_tok)))
+  } else {
+    message("ai_build_outline: batch mode (", n, " vars)")
+    requests <- list(list(custom_id = "outline_1", prompt = user_prompt))
+    batch    <- ai_batch_submit(requests, model = model, api_key = api_key,
+                                system = system_prompt_cached, max_tokens = max_tok)
+    message("Batch submitted. ID: ", batch$id)
+    raw          <- ai_batch_retrieve(batch$id, api_key = api_key)
+    results_text <- purrr::map(purrr::set_names(names(raw)), ~ raw[[.x]])
+  }
+  .cache_ai_raw(results_text, "outline_cache")
+
+  # -- parse spans ------------------------------------------------------------
+  spans <- .parse_outline_spans(results_text)
+  if (length(spans) == 0L) {
+    warning("ai_build_outline: no valid spans parsed — meta_json left unchanged.")
+    return(invisible(.survey_meta_from_json(json_path, existing)))
+  }
+
+  # -- clear the AI-owned levels (authoritative), keep the anchors ------------
+  for (vn in var_names) {
+    hs   <- as.character(existing$variables[[vn]]$headers %||% character(0))
+    keep <- hs[vapply(hs, .hdr_level, 1L) < min_ai]
+    existing$variables[[vn]]$headers <- if (length(keep)) as.list(keep) else NULL
+    existing$variables[[vn]]$battery <- NULL
+  }
+
+  rejected <- character(0)
+  # <<- : assign into the enclosing `existing` (a plain <- would mutate a local copy).
+  add_header <- function(k, md) {
+    vn  <- var_names[[k]]
+    cur <- as.character(existing$variables[[vn]]$headers %||% character(0))
+    existing$variables[[vn]]$headers <<- as.list(c(cur, md))
+  }
+
+  # -- level 3: subthemes (only when the AI owns them) ------------------------
+  used3    <- logical(n)
+  sub_open <- anchor_sub                     # ### boundaries: anchors + accepted spans
+  applied3 <- 0L
+  if (isTRUE(subthemes)) for (sp in Filter(function(s) s$level == 3L, spans)) {
+    fi <- unname(idx_of[sp$from]); ti <- unname(idx_of[sp$to])
+    if (is.na(fi) || is.na(ti)) { rejected <- c(rejected, paste0("### ", sp$title, " (unknown variable)")); next }
+    if (fi > ti)                { rejected <- c(rejected, paste0("### ", sp$title, " (from after to)"));     next }
+    if (bloc_cum[fi] != bloc_cum[ti]) { rejected <- c(rejected, paste0("### ", sp$title, " (crosses ## boundary)")); next }
+    rng <- fi:ti
+    if (any(used3[rng]))        { rejected <- c(rejected, paste0("### ", sp$title, " (overlaps another subtheme)")); next }
+    used3[rng] <- TRUE; sub_open[fi] <- TRUE
+    add_header(fi, paste0("### ", sp$title)); applied3 <- applied3 + 1L
+  }
+  sub_cum <- cumsum(sub_open)                 # same value => same ### subtheme
+
+  # -- level 4: #### batteries + thematic groups ------------------------------
+  # #### groups tile every subtheme (full coverage), so there is NO minimum size:
+  # a thematic group may be small. A `battery:true` span with fewer than min_size
+  # variables is not a real multi-answer battery — it is DEMOTED to a thematic
+  # group (kept, so coverage holds; just not boxed).
+  used4     <- logical(n)
+  n_batt    <- 0L; n_grp <- 0L; n_demoted <- 0L
+  for (sp in Filter(function(s) s$level == 4L, spans)) {
+    fi <- unname(idx_of[sp$from]); ti <- unname(idx_of[sp$to])
+    if (is.na(fi) || is.na(ti)) { rejected <- c(rejected, paste0("#### ", sp$title, " (unknown variable)")); next }
+    if (fi > ti)                { rejected <- c(rejected, paste0("#### ", sp$title, " (from after to)"));     next }
+    rng <- fi:ti
+    if (bloc_cum[fi] != bloc_cum[ti]){ rejected <- c(rejected, paste0("#### ", sp$title, " (crosses ## boundary)")); next }
+    if (sub_cum[fi] != sub_cum[ti])  { rejected <- c(rejected, paste0("#### ", sp$title, " (crosses ### boundary)")); next }
+    if (any(used4[rng]))             { rejected <- c(rejected, paste0("#### ", sp$title, " (overlaps another group)")); next }
+    used4[rng] <- TRUE
+    is_batt <- isTRUE(sp$battery) && length(rng) >= min_size
+    if (is_batt) {
+      for (j in rng) existing$variables[[var_names[[j]]]]$battery <- sp$title
+      n_batt <- n_batt + 1L
+    } else {
+      add_header(fi, paste0("#### ", sp$title))
+      n_grp <- n_grp + 1L
+      if (isTRUE(sp$battery)) n_demoted <- n_demoted + 1L
+    }
+  }
+
+  # -- keep each variable's headers outermost-first (## -> ### -> ####) --------
+  for (vn in var_names) {
+    hs <- as.character(existing$variables[[vn]]$headers %||% character(0))
+    if (length(hs) > 1L)
+      existing$variables[[vn]]$headers <- as.list(hs[order(vapply(hs, .hdr_level, 1L))])
+  }
+
+  .backup_meta_json(json_path, "outline_ai")
+  .write_meta_json(existing, json_path)
+
+  # -- report -----------------------------------------------------------------
+  message("ai_build_outline: applied ",
+          if (isTRUE(subthemes)) paste0(applied3, " subtheme(s), ") else "",
+          n_batt, " batter", if (n_batt == 1L) "y" else "ies", " + ",
+          n_grp, " group(s)",
+          if (n_demoted > 0) paste0(" (", n_demoted, " under-", min_size,
+                                    "-var batteries demoted to groups)") else "",
+          " in ", basename(json_path), ".")
+  # #### groups tile everything, so a variable in no #### means the outline is
+  # incomplete (the codebook won't read as a full table of contents there).
+  uncov <- var_names[!used4]
+  if (length(uncov) > 0)
+    message("  ", length(uncov), " variable(s) not placed in any #### group ",
+            "(outline incomplete) — review coverage: ",
+            paste(utils::head(uncov, 6L), collapse = ", "),
+            if (length(uncov) > 6L) ", …" else "", ".")
+  if (length(rejected) > 0)
+    message("\nai_build_outline: ", length(rejected), " span(s) rejected: ",
+            paste(rejected, collapse = "; "))
+  if (length(seed_res$outliers) > 0) {
+    message("\nai_build_outline: ", length(seed_res$outliers),
+            " variable(s) look like a WRONG TYPE inside a candidate run ",
+            "(role differs from same-prefix neighbours) — review their 'role':")
+    for (i in seed_res$outliers)
+      message("  - ", var_names[[i]], "  role=",
+              existing$variables[[var_names[[i]]]]$role %||% "?")
+  }
+
   invisible(.survey_meta_from_json(json_path, existing))
 }
 
@@ -4741,13 +5526,22 @@ ai_suggest_labels <- function(
             ". Check levels$missing flags in the JSON for these variables.")
   }
 
+  # Battery of each target var (so a chunk break never cuts a battery in two —
+  # the model then sees all siblings and can propose parallel labels).
+  batt_key <- vapply(target$var_name,
+                     function(v) as.character(loaded$json$variables[[v]]$battery %||% ""),
+                     character(1), USE.NAMES = FALSE)
   chunks <- local({
     chunk_ids <- integer(nrow(target))
     cid   <- 1L
     cumul <- 0L
     for (i in seq_len(nrow(target))) {
       n <- target$.n_levels[[i]]
-      if (cumul + n > max_levels && cumul > 0L) {
+      # Only break at a battery boundary; the 2× budget valve forces a break if a
+      # single battery is huge, so a chunk can never overflow max_tokens.
+      at_boundary <- i == 1L || !nzchar(batt_key[[i]]) || batt_key[[i]] != batt_key[[i - 1L]]
+      if (cumul + n > max_levels && cumul > 0L &&
+          (at_boundary || cumul > 2L * max_levels)) {
         cid   <- cid + 1L
         cumul <- 0L
       }
@@ -5812,7 +6606,8 @@ ai_suggest_varnames <- function(
 #'
 #' Returns a list in JSON variable order, where each element is a list with
 #' fields: orig_name, new_name, var_label, role, r_class, levels_sorted
-#' (non-missing, by order ascending), missing_levels, n_non_missing, max_order.
+#' (non-missing, by order ascending), missing_levels, n_non_missing, max_order,
+#' na_n, na_pct, battery (#### title or ""), headers (chr vector of "## ..." outline).
 #'
 #' Each level entry has: code, order, display_label, orig_label, n, pct.
 #'
@@ -5886,7 +6681,9 @@ ai_suggest_varnames <- function(
       n_non_missing  = length(non_missing),
       max_order      = as.integer(max_order),
       na_n           = jv$na_n,
-      na_pct         = jv$na_pct
+      na_pct         = jv$na_pct,
+      battery        = jv$battery %||% "",
+      headers        = as.character(jv$headers %||% character(0))
     )
   }
   entries
@@ -6267,11 +7064,13 @@ generate_format_script <- function(meta_json,
   if (identical(lang, "en"))
     c(h = "", variable = "variable", type = "type", role = "role",
       description = "description", na = "missing_values", val = "value", n = "n",
-      pct = "freq", orig_val = "original label", orig_code = "code")
+      pct = "freq", orig_val = "original label", orig_code = "code",
+      question_prefix = "question")
   else
     c(h = "", variable = "variable", type = "type", role = "role",
       description = "description", na = "valeurs_manquantes", val = "valeur", n = "n",
-      pct = "freq", orig_val = "libellé d'origine", orig_code = "code")
+      pct = "freq", orig_val = "libellé d'origine", orig_code = "code",
+      question_prefix = "prefixe_question")
 }
 
 # Compose the missing-value summary (codebook cell AND format-script comment):
@@ -6328,26 +7127,22 @@ generate_format_script <- function(meta_json,
     h = NA_character_, variable = NA_character_, type = NA_character_,
     role = NA_character_, description = NA_character_, na = NA_character_,
     val = NA_character_, n = NA_real_, pct = NA_real_,
-    orig_val = NA_character_, orig_code = NA_character_
+    orig_val = NA_character_, orig_code = NA_character_,
+    question_prefix = NA_character_
   )
   utils::modifyList(base, list(...))
 }
 
-# Which battery prefix (if any) a binary variable belongs to; NA otherwise.
-.cb_battery_of <- function(e, prefixes) {
-  if (length(prefixes) == 0 || e$role != "factor_binary") return(NA_character_)
-  for (p in prefixes) {
-    if (startsWith(e$new_name, p) || startsWith(e$orig_name, p)) return(p)
-  }
-  NA_character_
-}
-
 #' Build the long codebook tibble (internal).
+#'
+#' Section headers (\code{##}/\code{###}) come from each variable's \code{headers}
+#' field; battery headers (\code{####}) from the \code{battery} field — both read
+#' from the JSON, not from function arguments.
 #'
 #' @return A tibble with display columns + internal (dot-prefixed) columns used
 #'   by \code{.cb_write_xlsx()}. Carries attribute \code{"any_new_label"}.
-.cb_build_tibble <- function(json_data, lang = "fr", titles = NULL,
-                             binary_batteries = NULL, natural_order = FALSE) {
+.cb_build_tibble <- function(json_data, lang = "fr", natural_order = FALSE,
+                             battery_column = FALSE) {
   entries   <- .gfs_build_entries(json_data$variables)
   json_vars <- json_data$variables
   config    <- json_data$config
@@ -6358,43 +7153,40 @@ generate_format_script <- function(meta_json,
   word_nost <- if (identical(lang, "en")) "(run metadata_add_level_stats())"
                                      else "(exécuter metadata_add_level_stats())"
 
-  # Which battery each entry belongs to (for run-boundary spacers).
-  prefixes <- as.character(binary_batteries %||% character(0))
-  batt <- vapply(entries, .cb_battery_of, character(1), prefixes = prefixes)
-
-  # Track titles consumed (to warn on titles targeting an absent variable).
-  titles_used <- rep(FALSE, length(titles))
-  title_targets <- unname(titles)
-
   rows <- list()
   block_id <- 0L
   any_new_label <- FALSE
   binary_anomalies <- character(0)
+  prev_battery <- ""            # last rendered battery title (for #### boundaries)
 
   push <- function(r) rows[[length(rows) + 1L]] <<- r
 
   for (i in seq_along(entries)) {
     e  <- entries[[i]]
     jv <- json_vars[[e$orig_name]]
+    cur_batt <- e$battery %||% ""
 
-    # --- Section titles before this variable ------------------------------
-    title_inserted <- FALSE
-    if (length(titles) > 0) {
-      hit <- which(!titles_used &
-                   (title_targets == e$orig_name | title_targets == e$new_name))
-      for (ti in hit) {
-        raw <- names(titles)[ti]
-        lvl <- attr(regexpr("^#+", raw), "match.length")
-        lvl <- if (lvl < 0) 2L else min(max(lvl, 2L), 4L)
-        push(.cb_row(.row_type = "title", .h_level = as.integer(lvl), h = raw))
-        titles_used[ti] <- TRUE
-        title_inserted <- TRUE
-      }
+    # --- Close the previous battery with an empty (2 cm) row when the next
+    #     variable is NOT itself introduced by a header — i.e. a standalone
+    #     variable with no outline header and no new #### battery header. This
+    #     stops the variables after a battery from looking as if they belonged to
+    #     it. (A following battery / outline header already provides the break.)
+    if (nzchar(prev_battery) && !nzchar(cur_batt) && length(e$headers) == 0L)
+      push(.cb_row(.row_type = "spacer"))
+
+    # --- Outline headers (## / ###) stored on this variable ---------------
+    # The markdown depth sets the level; the "#"s are stripped for display.
+    for (raw in e$headers) {
+      lvl  <- attr(regexpr("^#+", raw), "match.length")
+      lvl  <- if (lvl < 0) 2L else min(max(lvl, 2L), 4L)
+      disp <- trimws(sub("^#+\\s*", "", raw))
+      push(.cb_row(.row_type = "title", .h_level = as.integer(lvl), h = disp))
     }
 
-    # --- Battery spacer before a run start (skip if a title already broke) -
-    starts_batt <- !is.na(batt[i]) && (i == 1L || is.na(batt[i - 1L]) || batt[i - 1L] != batt[i])
-    if (starts_batt && !title_inserted) push(.cb_row(.row_type = "spacer"))
+    # --- Battery #### header, emitted when the battery title changes -------
+    if (nzchar(cur_batt) && !identical(cur_batt, prev_battery))
+      push(.cb_row(.row_type = "title", .h_level = 4L, h = cur_batt))
+    prev_battery <- cur_batt
 
     # --- Variable-level fields (repeated on every row of the block) --------
     block_id <- block_id + 1L
@@ -6427,10 +7219,11 @@ generate_format_script <- function(meta_json,
     na_str <- .format_missing_summary(na_n_val, na_pct_val, e$missing_levels)
 
     block_kind <- if (is_factor) "factor" else if (is_num) "numeric" else "char"
+    qp <- if (isTRUE(battery_column) && nzchar(cur_batt)) cur_batt else NA_character_
     mk <- function(...) .cb_row(
       .block_id = block_id, .block_kind = block_kind, .is_double = is_double,
       variable = var_disp, type = type_lab, role = role_lab,
-      description = e$var_label, na = na_str, ...)
+      description = e$var_label, na = na_str, question_prefix = qp, ...)
 
     # --- Value rows ------------------------------------------------------
     block_rows <- list()
@@ -6518,37 +7311,15 @@ generate_format_script <- function(meta_json,
     block_rows[[1]]$.is_first <- TRUE
     block_rows[[length(block_rows)]]$.is_block_last <- TRUE
     for (r in block_rows) push(r)
-
-    # --- Battery spacer after a run end -----------------------------------
-    ends_batt <- !is.na(batt[i]) && (i == length(entries) || is.na(batt[i + 1L]) || batt[i + 1L] != batt[i])
-    if (ends_batt) push(.cb_row(.row_type = "spacer"))
   }
 
-  # Warn about unmatched titles / anomalous binaries.
-  if (length(titles) > 0 && any(!titles_used)) {
-    message("generate_codebook: ", sum(!titles_used),
-            " title(s) target a variable not found: ",
-            paste(unique(title_targets[!titles_used]), collapse = ", "))
-  }
+  # Warn about anomalous binaries (factor_binary without exactly 2 levels).
   if (length(binary_anomalies) > 0) {
     message("generate_codebook: ", length(binary_anomalies),
             " variable(s) tagged factor_binary do not have exactly 2 non-missing ",
             "levels; all their levels are shown (consider reclassifying as ",
             "factor_nominal/ordinal): ", paste(binary_anomalies, collapse = ", "))
   }
-
-  # Drop leading/duplicate spacer rows (a spacer after a title/spacer or first).
-  keep <- rep(TRUE, length(rows))
-  for (i in seq_along(rows)) {
-    if (rows[[i]]$.row_type != "spacer") next
-    if (i == 1L) { keep[i] <- FALSE; next }
-    prev <- rows[[i - 1L]]$.row_type
-    if (prev %in% c("spacer", "title")) keep[i] <- FALSE
-  }
-  rows <- rows[keep]
-  # Drop a trailing spacer.
-  if (length(rows) > 0 && rows[[length(rows)]]$.row_type == "spacer")
-    rows <- rows[-length(rows)]
 
   cb <- tibble::as_tibble(data.table::rbindlist(rows, fill = TRUE))
   attr(cb, "any_new_label") <- any_new_label
@@ -6564,6 +7335,7 @@ generate_format_script <- function(meta_json,
 #' only vertical borders; orig_val gets a left border, orig_code a right border
 #' (also the rightmost column). Header/empty/title rows carry no block borders.
 .cb_write_xlsx <- function(cb, path, lang = "fr", orig_val_kept = TRUE,
+                           battery_column = FALSE,
                            title_mode = c("overflow", "merge"),
                            freeze = TRUE) {
   if (!requireNamespace("openxlsx2", quietly = TRUE))
@@ -6579,7 +7351,8 @@ generate_format_script <- function(meta_json,
 
   disp_cols <- c("h", "variable", "description", "type", "role", "na",
                  "val", "n", "pct", "sep",
-                 if (orig_val_kept) "orig_val", "orig_code")
+                 if (orig_val_kept) "orig_val", "orig_code",
+                 if (isTRUE(battery_column)) "question_prefix")
   ci   <- setNames(seq_along(disp_cols), disp_cols)
   K    <- length(disp_cols)
   hdr  <- .cb_headers(lang)
@@ -6591,7 +7364,8 @@ generate_format_script <- function(meta_json,
   # --- data frame to write: add empty sep col, blank var-level on non-first rows
   cb$sep <- NA_character_
   dat <- as.data.frame(cb[disp_cols], stringsAsFactors = FALSE)
-  var_lvl <- intersect(c("variable", "description", "type", "role", "na"), disp_cols)
+  var_lvl <- intersect(c("variable", "description", "type", "role", "na", "question_prefix"),
+                       disp_cols)
   non_first <- !(cb$.is_first %in% TRUE)
   for (cc in var_lvl) dat[non_first, cc] <- NA
 
@@ -6638,10 +7412,11 @@ generate_format_script <- function(meta_json,
   # Static per-column alignment for value cells ("" = leave Excel default, e.g. sep).
   al_h <- c(variable = "left", description = "left", type = "left", role = "left",
             na = "left", val = "left", n = "right", pct = "right",
-            orig_val = "left", orig_code = "left", sep = "", h = "")
+            orig_val = "left", orig_code = "left", question_prefix = "left",
+            sep = "", h = "")
   al_wrap <- c(variable = TRUE, description = TRUE, type = TRUE, role = TRUE, na = TRUE,
                val = TRUE, n = FALSE, pct = FALSE, orig_val = FALSE, orig_code = FALSE,
-               sep = FALSE, h = FALSE)
+               question_prefix = TRUE, sep = FALSE, h = FALSE)
   sd_fmt <- "\"σ\"0.0"
 
   # Accumulate (excel row, excel col, style key) for every value cell.
@@ -6674,10 +7449,12 @@ generate_format_script <- function(meta_json,
     }
 
     # collect per-cell style keys (font | h | v | wrap | numfmt | top bot left right)
+    # question_prefix is styled (font/alignment) but stays OUTSIDE the boxed
+    # block (an optional annotation column), so exclude it from box borders.
     scols <- if (kind == "factor") setdiff(disp_cols, "h")
              else setdiff(disp_cols, c("h", "sep", "orig_val", "orig_code"))
-    hbc   <- if (kind == "factor") setdiff(disp_cols, c("h", "sep"))
-             else setdiff(disp_cols, c("h", "sep", "orig_val", "orig_code"))
+    hbc   <- if (kind == "factor") setdiff(disp_cols, c("h", "sep", "question_prefix"))
+             else setdiff(disp_cols, c("h", "sep", "orig_val", "orig_code", "question_prefix"))
     mean_ex <- ex[cb$.stat_rule[b] %in% TRUE]
     nvals   <- suppressWarnings(as.numeric(cb$n[b]))     # aligned with ex
     for (nm in scols) {
@@ -6774,7 +7551,7 @@ generate_format_script <- function(meta_json,
   title_idx <- which(cb$.row_type == "title")
   for (i in title_idx) {
     lvl  <- cb$.h_level[i]
-    size <- c(`2` = 16, `3` = 14, `4` = 12)[[as.character(lvl)]]
+    size <- c(`2` = 16, `3` = 14, `4` = 10)[[as.character(lvl)]]
     hcm  <- c(`2` = 5,  `3` = 2,  `4` = 1)[[as.character(lvl)]]
     row_dims <- openxlsx2::wb_dims(rows = xr(i), cols = seq_len(K))
     if (identical(title_mode, "merge"))
@@ -6788,12 +7565,19 @@ generate_format_script <- function(meta_json,
     wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i), heights = cm_to_pt(hcm))
   }
 
+  # Empty battery-closing rows: a genuinely blank 2 cm row that visually detaches
+  # the variables below a battery from it.
+  spacer_idx <- which(cb$.row_type == "spacer")
+  if (length(spacer_idx) > 0)
+    wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(spacer_idx),
+                                        heights = cm_to_pt(2))
+
   # Column widths (description + na wider; variable widened only when names wrap).
   var_maxlen <- suppressWarnings(max(nchar(cb$variable), na.rm = TRUE))
   var_w      <- if (is.finite(var_maxlen) && var_maxlen > 16) 27 else 18
   widths <- c(h = 2.5, variable = var_w, description = 72, type = 12, role = 12,
               na = 30, val = 30, n = 9, pct = 10, sep = 2, orig_val = 60,
-              orig_code = 12)
+              orig_code = 12, question_prefix = 26)
   wb <- openxlsx2::wb_set_col_widths(wb, "Codebook", cols = seq_len(K),
                                      widths = unname(widths[disp_cols]))
 
@@ -6814,6 +7598,12 @@ generate_format_script <- function(meta_json,
 #' selective borders. Value labels and their order are identical to
 #' \code{generate_format_script()} (shared helpers).
 #'
+#' Headers are \strong{data-driven}, read from the JSON: each variable's
+#' \code{headers} field holds its \code{##}/\code{###}/non-battery \code{####}
+#' outline titles, and its \code{battery} field the \code{####} title of a true
+#' question battery. Populate them with \code{set_headers()} (the \code{## } blocs)
+#' and \code{ai_build_outline()} (the \code{###}/\code{####}), or by editing the JSON.
+#'
 #' @param meta_json    Path to the unified JSON (or a \code{survey_meta} object),
 #'                     OR a data frame. When a data frame is passed, the whole
 #'                     non-AI pipeline runs silently on a temporary JSON
@@ -6827,15 +7617,10 @@ generate_format_script <- function(meta_json,
 #'                     df-first mode).
 #' @param lang         \code{"fr"} (default) or \code{"en"} for column headers,
 #'                     type/role and summary-statistic labels.
-#' @param titles       Optional named character vector to insert section titles.
-#'                     Names carry markdown \code{##}/\code{###}/\code{####};
-#'                     values are the variable before which to insert the title.
-#'                     Vector order = insertion order; the same value repeated
-#'                     stacks several title levels before that variable.
-#' @param binary_batteries Optional character vector of variable-name prefixes.
-#'                     Consecutive \code{factor_binary} variables sharing a
-#'                     listed prefix are separated by a blank row before and
-#'                     after the run (readable frequency batteries).
+#' @param battery_column Logical. When \code{TRUE}, add a last column
+#'                     (\code{prefixe_question} / \code{question}) repeating each
+#'                     variable's \code{battery} title per row — a flat, filterable
+#'                     view. Off by default (the \code{####} header already shows it).
 #' @param keep_original Logical. When \code{TRUE}, factor value labels are shown
 #'                     exactly as stored, sorted by original code, with no numeric
 #'                     ordering prefix (and no binary 1-row collapse). Forced
@@ -6847,19 +7632,18 @@ generate_format_script <- function(meta_json,
 #'   effect.
 #' @examples
 #' \dontrun{
-#'   # From an enriched JSON:
+#'   # From an enriched JSON (outline + batteries read from the JSON):
 #'   metadata_add_level_stats("pps20_meta.json", df)
-#'   generate_codebook("pps20_meta.json",
-#'     titles = c("## Pratiques" = "STATUT_PRAT"),
-#'     binary_batteries = c("FAM_", "PROJ_"))
+#'   set_headers("pps20_meta.json", titles)   # ## blocs
+#'   ai_build_outline("pps20_meta.json")      # ### / #### structure
+#'   generate_codebook("pps20_meta.json")
 #'   # Straight from a data frame (silent, no AI):
 #'   generate_codebook(pps20)
 #' }
 generate_codebook <- function(meta_json,
                               output_path      = NULL,
                               lang             = "fr",
-                              titles           = NULL,
-                              binary_batteries = NULL,
+                              battery_column   = FALSE,
                               keep_original    = FALSE,
                               ...) {
   lang <- match.arg(lang, c("fr", "en"))
@@ -6889,14 +7673,15 @@ generate_codebook <- function(meta_json,
   }
 
   json_data <- .read_meta_json(json_path)
-  cb <- .cb_build_tibble(json_data, lang = lang, titles = titles,
-                         binary_batteries = binary_batteries,
-                         natural_order = isTRUE(keep_original))
+  cb <- .cb_build_tibble(json_data, lang = lang,
+                         natural_order = isTRUE(keep_original),
+                         battery_column = isTRUE(battery_column))
 
   orig_val_kept <- isTRUE(attr(cb, "any_new_label"))
   if (!orig_val_kept) cb$orig_val <- NULL
 
-  .cb_write_xlsx(cb, output_path, lang = lang, orig_val_kept = orig_val_kept)
+  .cb_write_xlsx(cb, output_path, lang = lang, orig_val_kept = orig_val_kept,
+                 battery_column = isTRUE(battery_column))
   message(sprintf("Codebook written to %s (%d variables, %d rows)",
                   output_path, length(unique(stats::na.omit(cb$.block_id))), nrow(cb)))
 

@@ -4,6 +4,112 @@
 #
 
 # ---------------------------------------------------------------------------
+# BT. battery + headers fields round-trip and survive re-extract
+# ---------------------------------------------------------------------------
+
+test_that("BT1: battery + headers (incl. ####) survive a write → read round-trip", {
+  vars <- list(
+    V1 = list(var_label = "q1", role = "factor_binary", new_name = "V1",
+              battery = "Ma batterie",
+              headers = list("## Partie", "### Sous-partie", "#### Groupe thematique"),
+              levels = list("1" = list(order = 1L, label = "Oui", n = 6L, pct = 60L),
+                            "0" = list(order = 2L, label = "Non", n = 4L, pct = 40L)))
+  )
+  path <- tmp_json()
+  .write_meta_json(make_meta_list(vars), path)
+  v <- .read_meta_json(path)$variables$V1
+  expect_equal(v$battery, "Ma batterie")
+  expect_equal(unlist(v$headers), c("## Partie", "### Sous-partie", "#### Groupe thematique"))
+})
+
+test_that("BT3: set_headers() writes the outline (incl. stacked titles) into `headers`", {
+  vars <- list(
+    A = list(var_label = "a", role = "factor_binary", new_name = "A",
+             levels = list("1" = list(order = 1L, label = "Oui", n = 6L, pct = 60L),
+                           "0" = list(order = 2L, label = "Non", n = 4L, pct = 40L))),
+    B = list(var_label = "b", role = "factor_binary", new_name = "B",
+             levels = list("1" = list(order = 1L, label = "Oui", n = 5L, pct = 50L),
+                           "0" = list(order = 2L, label = "Non", n = 5L, pct = 50L)))
+  )
+  path <- tmp_json()
+  .write_meta_json(make_meta_list(vars), path)
+  suppressMessages(set_headers(path, c("## Partie" = "A", "### Sous" = "A", "## Autre" = "B")))
+  v <- .read_meta_json(path)$variables
+  expect_equal(unlist(v$A$headers), c("## Partie", "### Sous"))   # stacked, in order
+  expect_equal(unlist(v$B$headers), "## Autre")
+  # unnamed vector rejected
+  expect_error(set_headers(path, c("A", "B")), "NAMED")
+})
+
+test_that("BT4: extract_survey_metadata(headers=) applies on create and is the source of truth", {
+  df <- data.frame(Q1 = c(1L, 2L, 1L, 2L, 1L), Q2 = c(1L, 1L, 2L, 2L, 1L))
+  path <- tmp_json(); on.exit(unlink(path))
+  # First creation: headers argument applies immediately
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+    missing_chr = character(0), headers = c("## Part" = "Q1", "### Sub" = "Q1")))
+  v <- .read_meta_json(path)$variables
+  expect_equal(unlist(v$Q1$headers), c("## Part", "### Sub"))
+  # A JSON hand-edit is OVERRIDDEN when the argument is supplied again (replace)
+  m <- .read_meta_json(path); m$variables$Q1$headers <- list("## Edited"); .write_meta_json(m, path)
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+    missing_chr = character(0), headers = c("## Part" = "Q1")))
+  expect_equal(unlist(.read_meta_json(path)$variables$Q1$headers), "## Part")
+  # But WITHOUT the argument, a JSON hand-edit is PRESERVED
+  m <- .read_meta_json(path); m$variables$Q2$headers <- list("## Kept"); .write_meta_json(m, path)
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+    missing_chr = character(0)))
+  expect_equal(unlist(.read_meta_json(path)$variables$Q2$headers), "## Kept")
+  expect_error(extract_survey_metadata(df, path, headers = c("Q1", "Q2")), "NAMED")
+})
+
+test_that("BT2: re-running extract_survey_metadata preserves battery + headers", {
+  df <- data.frame(Q1 = c(1L, 2L, 1L, 2L, 1L))
+  path <- tmp_json(); on.exit(unlink(path))
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+                                           missing_chr = character(0)))
+  # simulate ai_build_outline() / manual outline edits
+  m <- .read_meta_json(path)
+  m$variables$Q1$battery <- "Batterie X"
+  m$variables$Q1$headers <- list("## Grande partie")
+  .write_meta_json(m, path)
+  # re-extract must merge them back
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+                                           missing_chr = character(0)))
+  v <- .read_meta_json(path)$variables$Q1
+  expect_equal(v$battery, "Batterie X")
+  expect_equal(unlist(v$headers), "## Grande partie")
+})
+
+test_that("BT5: extract(headers=) with ##-only anchors preserves AI ### / ####", {
+  df <- data.frame(Q1 = c(1L, 2L, 1L, 2L, 1L))
+  path <- tmp_json(); on.exit(unlink(path))
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+    missing_chr = character(0), headers = c("## Part" = "Q1")))
+  # ai_build_outline() adds finer levels
+  m <- .read_meta_json(path)
+  m$variables$Q1$headers <- list("## Part", "### Sous-theme IA", "#### Groupe IA")
+  .write_meta_json(m, path)
+  # Re-extract with a ##-only anchor: it overrides ## but keeps ### / ####
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+    missing_chr = character(0), headers = c("## Nouveau" = "Q1")))
+  expect_equal(unlist(.read_meta_json(path)$variables$Q1$headers),
+               c("## Nouveau", "### Sous-theme IA", "#### Groupe IA"))
+})
+
+test_that("BT6: config.survey_description (multi-line) round-trips + is preserved", {
+  df <- data.frame(Q1 = c(1L, 2L, 1L, 2L, 1L))
+  path <- tmp_json(); on.exit(unlink(path))
+  desc <- "Enquete test\nGrandes parties :\n- Bloc A\n- Bloc B"
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+    missing_chr = character(0), survey_description = desc))
+  expect_equal(.read_meta_json(path)$config$survey_description, desc)  # newlines intact
+  # Preserved on re-extract WITHOUT the argument
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+    missing_chr = character(0)))
+  expect_equal(.read_meta_json(path)$config$survey_description, desc)
+})
+
+# ---------------------------------------------------------------------------
 # A. Basic write → read round-trip
 # ---------------------------------------------------------------------------
 

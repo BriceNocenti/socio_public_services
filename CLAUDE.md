@@ -42,6 +42,32 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
 5. ai_suggest_varnames(meta_json, ...)
    → AI suggests short variable names, writes new_name to JSON
 
+5.5 ai_build_outline(meta_json, subthemes = TRUE, seed = TRUE,
+                     min_size = 3, use_batch, resume_batch_id, dry_run, ...)
+   → ONE global AI pass that builds a COMPLETE table of contents inside the fixed ## blocs the
+     user anchors (set_headers / extract headers=): ### subthemes AND #### groups (batteries +
+     thematic groupings) that BOTH tile every variable (full coverage at both levels — a variable
+     is always under one ### and one ####). Input = every var IN ORDER with the ## anchors
+     interleaved as {"section":"## ..."} rows + the config.survey_description prefix (set at
+     extract, read from the JSON — not an argument) + a deterministic battery-candidate seed
+     (`batt`, a HINT). Output = leveled contiguous spans [{level:3|4, title, from, to, battery}]
+     (level 4 only: battery true|false).
+   → Authoritative: clears the AI-owned levels (### /#### in `headers` and all `battery`),
+     validates each span (unknown/reversed/crosses-##/crosses-###/overlap rejected). #### groups
+     have NO minimum size (they must tile every subtheme); a battery:true below min_size is DEMOTED
+     to a thematic group (kept, not boxed) so coverage holds. Writes ### and non-battery #### to
+     `headers` (start-markers) and true batteries (>=min_size) to the repeated `battery` field;
+     reports variables in no #### (incomplete coverage). ## anchors never touched; JSON untouched
+     if 0 valid spans.
+     subthemes=FALSE: AI owns only #### (existing ### kept as anchors). seed=FALSE: batt null.
+     Prompt = instructions/outline_prompt.md (real pps20 examples; the seed is framed as a mere
+     candidate the AI overrides). Reuses all shared AI infra (.build_message_body / ai_call_claude
+     / batch / .cache_ai_raw / robust parse).
+   → Internal seed = .batt_seed_candidates(): same role + level-code signature + a precision gate
+     (must share a name-token prefix OR a >=10-char label stem — role+codes alone is not enough),
+     split by prefix cluster, heals + FLAGS type-outliers. preview_outline(meta_json) prints the
+     full ##/###/#### markdown outline (batteries expanded), usable before/after this step.
+
 6. generate_format_script(meta_json, output_path = NULL)
    → Generates executable R script that applies all formatting
    → Reads numeric stats from JSON (run metadata_add_level_stats() first)
@@ -49,10 +75,16 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
      each block applies its var label inline via
      "label" -> varlab  then  ... |> `attr<-`("label", varlab)  (survives conversion)
 
-7. generate_codebook(meta_json, output_path = NULL, lang = "fr", titles = NULL,
-                      binary_batteries = NULL, keep_original = FALSE, ...)
+7. generate_codebook(meta_json, output_path = NULL, lang = "fr",
+                      battery_column = FALSE, keep_original = FALSE, ...)
    → Styled .xlsx codebook (openxlsx2): one row per level / numeric stat, variable
-     info merged over rows, section titles, frozen panes, selective borders.
+     info merged over rows, headers, frozen panes, selective borders.
+   → Headers are DATA-DRIVEN from the JSON (no more titles/binary_batteries args): each
+     var's `headers` array holds its ##/### outline titles (## stripped for display); its
+     `battery` field the #### question-battery title (one header per run). A battery is CLOSED
+     by an empty 2 cm row, unless the next variable already carries a header (a new #### battery
+     or a ##/### outline) — so standalone variables never read as part of the battery above them.
+     Optional battery_column adds a last prefixe_question column (per-row battery title).
    → Reads JSON only — NO df param (examples/NA now stored in the JSON by
      metadata_add_level_stats). NA cell = missing-value summary (see below), all types.
    → meta_json may be a DATA FRAME: runs extract + metadata_add_level_stats silently on a
@@ -84,6 +116,20 @@ Users can (and do) manually edit the JSON between AI steps. Key fields per varia
   formatting = NA + missing-coded. Written by metadata_add_level_stats. Codebook prefers these;
   falls back to n_individuals − Σ(non-missing level n) for factors on older JSONs.
 - `examples` (top-level, text/"other" vars only): first 5 distinct raw values, for the codebook.
+- `battery` (top-level, per variable): title of the TRUE question battery the variable belongs to
+  (membership + header text in one field, deliberately REPEATED on every member). Only true
+  multi-answer batteries use this field — they alone get the boxed rendering + optional
+  prefixe_question column. Written by ai_build_outline(); preserved on re-extract.
+- `headers` (top-level, per variable): array of markdown outline titles (`"## ..."`, `"### ..."`,
+  and `"#### ..."` for a non-battery thematic GROUP) rendered ONCE before this variable in the
+  codebook. Start-markers, not repeated; the level = the count of `#` (clamped 2..4). Set the
+  `## ` blocs the same named-vector way `c("## Titre" = "VARNAME", ...)`:
+  `extract_survey_metadata(df, meta_json, headers = titles)` OR `set_headers(meta_json, titles)`.
+  The argument is LEVEL-AWARE source of truth: it overrides only the levels it contains (normally
+  `## `) and PRESERVES deeper AI-generated ### /#### across re-extract. ai_build_outline() writes
+  the ### subthemes + non-battery #### groups here (authoritative for the levels it owns).
+  Survives the serializer (optional blocks after `examples` in `.write_meta_json`) and is carried
+  onto codebook entries by `.gfs_build_entries()`.
 - `num_stats`: mean/sd/min/q1/median/q3/max (numeric vars), each rounded to 5 digits. Field order
   is fixed in `.gfs_compute_numeric_stats()` (list) + `ns_fields` (serializer). NA moved OUT to
   top-level na_n/na_pct.
@@ -140,8 +186,10 @@ empty thin `sep` column separates the value block from the original-label block)
 **black thin**. The `sep` + `orig_val`/`orig_code` borders (and the box extension over those columns)
 are drawn **only for factor blocks** — the only ones that fill them; non-factor blocks are boxed
 `variable → pct` with just the `val` left separator. Each factor block is boxed top+bottom (skipping
-`h` + `sep`) so battery runs separated by spacer rows keep their upper border; `orig_val` a left
-border, `orig_code` a right border (rightmost). Header/empty/title rows carry no block borders.
+`h` + `sep`), independently, so adjacent battery members (now under one `####` header, no blank
+spacers) keep their own box; `orig_val` a left border, `orig_code` a right border (rightmost). An
+optional `battery_column` adds a rightmost `prefixe_question`/`question` column (styled, outside the
+box). Header/title rows carry no block borders.
 `description` is always bold. Widths: `description` 72, `missing_values` 30, `orig_val` 60; `variable`
 is 18 but widens to 27 only when the longest name would wrap. Section titles sit in column `h` and
 **overflow** into the empty cells to their right: the data write uses `na = NULL` so trailing cells are
@@ -169,6 +217,41 @@ styles manager is captured AFTER the block loop and the whole palette is registe
 `wb_set_cell_style()` reassigns `wb` — otherwise later registrations land on an orphaned manager and are
 lost on save. Base font set once via `wb_set_base_font()`; merges + rich-text NA prefix still run per
 block (they set values, not xf). `sd` numfmt is `"σ"0.0`.
+
+**Key Design Decision** — The whole codebook outline is **data-driven** (per-variable `headers`
+array + `battery` title in the JSON) and built in **one AI pass**, `ai_build_outline()`, replacing
+the old `detect_batteries()` + `ai_name_batteries()` two-step (and the `titles`/`binary_batteries`
+codebook args, long gone). The user anchors the **`## ` blocs** (documentation); the AI generates a
+**complete table of contents** inside them — **`### ` subthemes** and **`#### ` groups** that BOTH
+tile every variable (full coverage at each level: a variable is always under one `### ` and one
+`#### `). A `#### ` is either a **battery** or a **thematic group**; together they leave nothing loose.
+Two storage concerns, deliberately split:
+`headers` holds the whole outline as **start-markers** (`## `/`### `/non-battery `#### `, rendered once,
+level = `#` count clamped 2..4), and `battery` (REPEATED on every member) flags a **true multi-answer
+battery** — which alone gets the boxed rendering + closing spacer + optional prefixe_question column.
+The codebook renderer already treats a `#### ` in `headers` as a size-10 title, so non-battery groups
+need **no renderer change**. Input to the model = every var in order with the `## ` anchors interleaved
+as `{"section":"## ..."}` rows + optional `survey_description` + a deterministic candidate `batt` seed;
+output = **leveled contiguous spans** `[{level, title, from, to, battery}]` (level 4 only: battery
+boolean). Applied authoritatively: clears the AI-owned levels (`### `/`#### ` in `headers`, all
+`battery`), validates each span (unknown/reversed/**crosses-## **/**crosses-### **/overlap rejected —
+nesting enforced against the fixed `## ` blocs and the accepted `### ` boundaries). `#### ` groups have
+**no minimum size** (they tile every subtheme); a `battery:true` below `min_size` is **demoted** to a
+thematic group (kept, not boxed) so coverage never breaks. Writes `### `/non-battery `#### ` to
+`headers` and true batteries (>=`min_size`) to `battery`, re-sorts headers outermost-first, and reports
+any variable left in no `#### ` (incomplete coverage); JSON untouched on 0 valid spans. `subthemes=FALSE` → AI owns only `#### ` (existing
+`### ` kept as anchors); `seed=FALSE` → no seed. The internal `.batt_seed_candidates()` seed is now
+just a HINT: same role + level-code signature with a **precision gate** (must share a name-token prefix
+OR a >=10-char label stem — role+codes alone is not a battery), prefix-cluster split, type-outlier heal
++ flag; it does NOT persist and the prompt frames it as a candidate the AI overrides. `extract(headers=)`
+is **level-aware**: it overrides only the levels the argument contains (normally `## `) and preserves
+deeper AI `### `/`#### ` across re-extract. `ai_suggest_labels()` chunking never cuts a battery in two.
+`preview_outline()` prints the full `##`/`###`/`####` markdown outline (batteries expanded). Prompt =
+`instructions/outline_prompt.md` — real pps20 examples that teach the seed-override (split an over-merged
+interleaved run into per-sub-question batteries; merge/extend/**bridge** a mis-typed interior variable;
+keep distinct nomenclatures separate; a battery=false thematic group vs a battery) — because examples
+teach harder than rules. `desc` truncated to 160 chars so the shared question stem (often at the label's
+END) is visible.
 
 **Key Design Decision** — Missing-value flagging in `extract_survey_metadata()`. FACTOR levels: **exact**
 by design — flagged `missing` only when the (normalized) label is literally in `config.missing_chr`, OR
@@ -250,7 +333,9 @@ Each dummy has matching configs:
 | `test-ai-merge-levels.R`        | M      | `ai_merge_levels()` logic                                 |
 | `test-generate-format-script.R` | G/CV/H | `generate_format_script()` + level-label / stats-comment  |
 | `test-generate-codebook.R`      | C      | `generate_codebook()` tibble build + xlsx write           |
-| `test-json-roundtrip.R`         | J/K    | JSON read/write roundtrip, backup, migration helpers      |
+| `test-outline-seed.R`           | D      | `.batt_seed_candidates()` seed + precision gate + preview |
+| `test-ai-build-outline.R`       | OU     | `ai_build_outline()` leveled spans → headers/battery (mock)|
+| `test-json-roundtrip.R`         | J/K/BT | JSON roundtrip, backup, migration, battery/headers fields |
 | `test-nomenclatures-insee.R`    | O      | INSEE nomenclature helpers                                |
 
 ### Mocking AI Calls

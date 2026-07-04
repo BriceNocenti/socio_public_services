@@ -178,27 +178,45 @@ test_that("C3e: numeric sentinels: unlabelled fold into the total, labelled ones
 
 
 # ---------------------------------------------------------------------------
-# C4. Section titles + battery spacers
+# C4. Outline headers (## / ###) + battery (####) headers, from the JSON
 # ---------------------------------------------------------------------------
 
-test_that("C4: titles insert markdown title rows before the target variable", {
-  jd <- .read_meta_json(cb_json(cb_vars()))
-  cb <- .cb_build_tibble(jd, titles = c("## Bloc" = "FREQ", "### Détail" = "FREQ"))
+test_that("C4: `headers` on a variable insert markdown title rows (stripped) before it", {
+  vars <- cb_vars()
+  vars$FREQ$headers <- list("## Bloc", "### Détail")
+  jd <- .read_meta_json(cb_json(vars))
+  cb <- .cb_build_tibble(jd)
   titles <- cb[cb$.row_type == "title", ]
   expect_equal(nrow(titles), 2L)
-  expect_equal(titles$h, c("## Bloc", "### Détail"))
+  # Markdown "#"s set the level and are stripped from the displayed text.
+  expect_equal(titles$h, c("Bloc", "Détail"))
   expect_equal(titles$.h_level, c(2L, 3L))
-  # Title rows appear immediately before the FREQ block.
   first_freq <- min(which(cb$variable %in% "FREQ"))
   expect_equal(cb$.row_type[first_freq - 1L], "title")
 })
 
-test_that("C4b: binary battery prefixes get a spacer around the run", {
+test_that("C4d: a #### group in `headers` renders a level-4 title row (not a battery)", {
+  vars <- cb_vars()
+  vars$FREQ$headers <- list("### Sous-theme", "#### Groupe thematique")
+  jd <- .read_meta_json(cb_json(vars))
+  cb <- .cb_build_tibble(jd)
+  titles <- cb[cb$.row_type == "title", ]
+  # The #### group is a start-marker: a level-4 title row, "#"s stripped.
+  expect_equal(titles$h, c("Sous-theme", "Groupe thematique"))
+  expect_equal(titles$.h_level, c(3L, 4L))
+  # No battery field -> no boxed battery / no question_prefix, even with the column on.
+  cb2 <- .cb_build_tibble(jd, battery_column = TRUE)
+  expect_true(all(is.na(cb2$question_prefix)))
+})
+
+test_that("C4b: a `battery` title emits ONE #### header before the run's first member", {
   vars <- list(
     A_ONE = list(var_label = "q1", role = "factor_binary", r_class = "double", new_name = "A_ONE",
+                 battery = "Batterie A",
                  levels = list("1" = list(order = 1L, label = "Oui", n = 6L, pct = 60L),
                                "0" = list(order = 2L, label = "Non", n = 4L, pct = 40L))),
     A_TWO = list(var_label = "q2", role = "factor_binary", r_class = "double", new_name = "A_TWO",
+                 battery = "Batterie A",
                  levels = list("1" = list(order = 1L, label = "Oui", n = 5L, pct = 50L),
                                "0" = list(order = 2L, label = "Non", n = 5L, pct = 50L))),
     OTHER = list(var_label = "x", role = "factor_nominal", r_class = "character", new_name = "OTHER",
@@ -206,11 +224,48 @@ test_that("C4b: binary battery prefixes get a spacer around the run", {
                                "2" = list(order = 2L, label = "b", n = 5L, pct = 50L)))
   )
   jd <- .read_meta_json(cb_json(vars))
-  cb <- .cb_build_tibble(jd, binary_batteries = c("A_"))
-  expect_true(any(cb$.row_type == "spacer"))
-  # A spacer separates the A_ battery from OTHER.
+  cb <- .cb_build_tibble(jd)
+  titles <- cb[cb$.row_type == "title", ]
+  # Exactly one #### header, carrying the battery title, at level 4.
+  expect_equal(nrow(titles), 1L)
+  expect_equal(titles$h, "Batterie A")
+  expect_equal(titles$.h_level, 4L)
+  # It sits immediately before A_ONE, and there is no header before A_TWO.
+  first_a1 <- min(which(cb$variable %in% "A_ONE"))
+  expect_equal(cb$.row_type[first_a1 - 1L], "title")
+  first_a2 <- min(which(cb$variable %in% "A_TWO"))
+  expect_equal(cb$.row_type[first_a2 - 1L], "value")
+  # A closing spacer row detaches the standalone OTHER from the battery above it.
   first_other <- min(which(cb$variable %in% "OTHER"))
   expect_equal(cb$.row_type[first_other - 1L], "spacer")
+})
+
+test_that("C4b2: no closing spacer between two adjacent batteries (new #### separates)", {
+  bin <- function(nm, batt) list(var_label = nm, role = "factor_binary", r_class = "double",
+    new_name = nm, battery = batt,
+    levels = list("1" = list(order = 1L, label = "Oui", n = 6L, pct = 60L),
+                  "0" = list(order = 2L, label = "Non", n = 4L, pct = 40L)))
+  vars <- list(A1 = bin("A1", "Bat A"), A2 = bin("A2", "Bat A"),
+               B1 = bin("B1", "Bat B"), B2 = bin("B2", "Bat B"))
+  jd <- .read_meta_json(cb_json(vars))
+  cb <- .cb_build_tibble(jd)
+  expect_false("spacer" %in% cb$.row_type)          # battery -> battery: no gap
+  first_b1 <- min(which(cb$variable %in% "B1"))
+  expect_equal(cb$.row_type[first_b1 - 1L], "title") # B's own #### header instead
+})
+
+test_that("C4c: battery_column adds a per-row question_prefix column", {
+  vars <- list(
+    A_ONE = list(var_label = "q1", role = "factor_binary", r_class = "double", new_name = "A_ONE",
+                 battery = "Batterie A",
+                 levels = list("1" = list(order = 1L, label = "Oui", n = 6L, pct = 60L),
+                               "0" = list(order = 2L, label = "Non", n = 4L, pct = 40L)))
+  )
+  jd <- .read_meta_json(cb_json(vars))
+  cb_on  <- .cb_build_tibble(jd, battery_column = TRUE)
+  cb_off <- .cb_build_tibble(jd, battery_column = FALSE)
+  expect_true("Batterie A" %in% cb_on$question_prefix)
+  expect_true(all(is.na(cb_off$question_prefix)))
 })
 
 
@@ -247,8 +302,7 @@ test_that("C6: generate_codebook writes a readable .xlsx and returns a tibble", 
   out  <- tempfile(fileext = ".xlsx")
   on.exit(unlink(c(path, out)), add = TRUE)
 
-  cb <- suppressMessages(generate_codebook(path, output_path = out,
-          titles = c("## Bloc" = "FREQ"), binary_batteries = c("DECL")))
+  cb <- suppressMessages(generate_codebook(path, output_path = out))
   expect_true(file.exists(out))
   expect_s3_class(cb, "tbl_df")
   expect_false(any(grepl("^\\.", names(cb))))     # internal cols dropped
