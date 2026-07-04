@@ -84,6 +84,36 @@ test_that("C2b: nominal/ordinal = one row per level, ascending order", {
   expect_equal(rows$val, c("1-Souvent", "2-Parfois", "3-Rare"))
 })
 
+test_that("C2b-bis: binary-battery members show positional codes in the codebook", {
+  vars <- stats::setNames(lapply(1:3, function(k) list(
+    var_label = paste0("Item ", k), role = "factor_binary", r_class = "double",
+    new_name = paste0("B", k), n_distinct_data = 2L, battery = "Univers",
+    levels = list(
+      "1" = list(order = 1L, label = "Oui", new_label = paste0("Item", k),     n = 10L, pct = 30L),
+      "2" = list(order = 2L, label = "Non", new_label = paste0("Pas item", k), n = 20L, pct = 70L)))),
+    paste0("B", 1:3))
+  jd <- .read_meta_json(cb_json(vars))
+  cb <- .cb_build_tibble(jd)
+  vals <- vapply(paste0("B", 1:3), function(v)
+    cb$val[cb$variable == v & cb$.row_type == "value"], character(1))
+  expect_equal(unname(vals), c("1-Item1", "2-Item2", "3-Item3"))
+})
+
+test_that("C2b-ter: keep_codes variable keeps original codes in the codebook", {
+  vars <- list(REGION = list(
+    var_label = "Region", role = "factor_nominal", r_class = "character",
+    new_name = "REGION", n_distinct_data = 4L, keep_codes = TRUE,
+    levels = list(
+      "01" = list(order = 1L, label = "Guadeloupe", new_label = "Guadeloupe", n = 5L,  pct = 5L),
+      "06" = list(order = 2L, label = "Mayotte",    new_label = "Mayotte",    n = 4L,  pct = 4L),
+      "11" = list(order = 3L, label = "IDF",        new_label = "Île de France", n = 20L, pct = 20L),
+      "94" = list(order = 4L, label = "Corse",      new_label = "Corse",      n = 2L,  pct = 2L))))
+  jd <- .read_meta_json(cb_json(vars))
+  cb <- .cb_build_tibble(jd)
+  rows <- cb[cb$variable %in% "REGION" & cb$.row_type == "value", ]
+  expect_equal(rows$val, c("01-Guadeloupe", "06-Mayotte", "11-Île de France", "94-Corse"))
+})
+
 test_that("C2c: numeric = 6 stat rows, mean row carries sd + rule", {
   jd <- .read_meta_json(cb_json(cb_vars()))
   cb <- .cb_build_tibble(jd)

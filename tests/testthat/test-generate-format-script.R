@@ -106,6 +106,56 @@ test_that("build_entries: ordinal with missing, sorted by order", {
 
 
 # ---------------------------------------------------------------------------
+# D. Binary-battery numbering (positive = position, negative = 9…9 sentinel)
+# ---------------------------------------------------------------------------
+
+# Build `n` binary members sharing one battery title.
+batt_vars <- function(n, title = "Batterie", role = "factor_binary") {
+  stats::setNames(lapply(seq_len(n), function(k) list(
+    var_label = paste0("Item ", k), role = role, new_name = paste0("B", k),
+    battery = title,
+    levels = list(
+      "1" = list(order = 1L, label = "Oui", new_label = paste0("Item", k),      n = 10L, pct = 30),
+      "2" = list(order = 2L, label = "Non", new_label = paste0("Pas item", k),  n = 20L, pct = 70)))),
+    paste0("B", seq_len(n)))
+}
+
+test_that("D1: 3-member binary battery -> positive 1,2,3 ; negative sentinel 9", {
+  entries <- .gfs_build_entries(batt_vars(3))
+  for (k in seq_along(entries)) {
+    e <- entries[[k]]
+    expect_equal(e$max_order, 9L)
+    expect_equal(e$levels_sorted[[1]]$order, k)     # positive -> battery position
+    expect_equal(e$levels_sorted[[2]]$order, 9L)    # negative -> all-nines sentinel
+    expect_equal(.gfs_level_label(e$levels_sorted[[1]], e$max_order), paste0(k, "-Item", k))
+    expect_equal(.gfs_level_label(e$levels_sorted[[2]], e$max_order), paste0("9-Pas item", k))
+  }
+})
+
+test_that("D2: 10-member battery -> positives 01..10, negative 99 (width tracks size)", {
+  entries <- .gfs_build_entries(batt_vars(10))
+  expect_equal(entries[[1]]$max_order, 99L)
+  expect_equal(.gfs_level_label(entries[[1]]$levels_sorted[[1]], entries[[1]]$max_order), "01-Item1")
+  expect_equal(.gfs_level_label(entries[[10]]$levels_sorted[[1]], entries[[10]]$max_order), "10-Item10")
+  expect_equal(.gfs_level_label(entries[[1]]$levels_sorted[[2]], entries[[1]]$max_order), "99-Pas item1")
+})
+
+test_that("D3: a battery with a non-binary member is left untouched + reports", {
+  vars <- batt_vars(2)
+  vars$B3 <- list(var_label = "Nominal", role = "factor_nominal", new_name = "B3",
+    battery = "Batterie",
+    levels = list(
+      "1" = list(order = 1L, label = "a", new_label = "a", n = 1L, pct = 33),
+      "2" = list(order = 2L, label = "b", new_label = "b", n = 1L, pct = 33),
+      "3" = list(order = 3L, label = "c", new_label = "c", n = 1L, pct = 34)))
+  expect_message(entries <- .gfs_build_entries(vars), "skipped")
+  # Members keep their normal per-variable numbering (max_order == 2), not the sentinel.
+  expect_equal(entries[[1]]$max_order, 2L)
+  expect_equal(entries[[1]]$levels_sorted[[2]]$order, 2L)
+})
+
+
+# ---------------------------------------------------------------------------
 # E. Format blocks
 # ---------------------------------------------------------------------------
 

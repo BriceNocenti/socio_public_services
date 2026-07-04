@@ -63,6 +63,8 @@
 #   invert_ordinal_order()           — invert ordinal order for descending variables
 #   export_metadata_excel()          — export to Excel for visual review
 #   detect_nomenclature_vars()       — auto-detect INSEE nomenclature variables
+#   suggest_keep_codes()             — heuristic: variables to keep original codes
+#   set_keep_codes()                 — flag variables to keep original codes as numbers
 #   generate_format_script()         — generate readable _format.R script
 #
 # AI helpers (require ANTHROPIC_API_KEY env var):
@@ -1224,6 +1226,13 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
         paste0('      ', rpad('"battery"', w_field), ': ',
                scalar_str(as.character(batt_val)), ','))
     }
+    # Optional: keep_codes — TRUE keeps the original level codes as the final
+    # numbers (original code order) instead of clean sequential numbering. For
+    # nomenclatures (region, month, PCS…). Set by set_keep_codes() / extract().
+    if (isTRUE(entry[["keep_codes"]])) {
+      s_lines <- c(s_lines,
+        paste0('      ', rpad('"keep_codes"', w_field), ': true,'))
+    }
 
     # -- levels sub-block ------------------------------------------------------
     levels <- entry$levels
@@ -1370,6 +1379,7 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
     '      "variables.VAR.examples"               : "Quelques valeurs brutes distinctes (variables textuelles), pour illustration dans le codebook",\n',
     '      "variables.VAR.battery"                : "Titre \'#### ...\' de la VRAIE batterie de questions (m\u00eame question, plusieurs r\u00e9ponses) \u00e0 laquelle appartient la variable. R\u00e9p\u00e9t\u00e9 sur chaque membre (cl\u00e9 d\'appartenance) ; seules les vraies batteries l\'utilisent (encadr\u00e9es dans le codebook). Nomm\u00e9 par ai_build_outline(), modifiable \u00e0 la main.",\n',
     '      "variables.VAR.headers"                : "Titres de plan (\'## ...\', \'### ...\', et \'#### ...\' pour un groupe th\u00e9matique non-batterie) ins\u00e9r\u00e9s une fois avant cette variable dans le codebook. Les \'## \' sont pos\u00e9s \u00e0 la main (set_headers / extract headers=), les \'### \'/\'#### \' par ai_build_outline().",\n',
+    '      "variables.VAR.keep_codes"             : "true = garder les codes d\'origine des modalit\u00e9s comme num\u00e9ros finaux (ordre des codes), au lieu de la num\u00e9rotation s\u00e9quentielle propre. Pour les nomenclatures (r\u00e9gion, mois, PCS\u2026). Pos\u00e9 par set_keep_codes() / extract(keep_codes=), sugg\u00e9r\u00e9 par suggest_keep_codes().",\n',
     '      "variables.VAR.num_stats"             : "Statistiques r\u00e9sum\u00e9es (variables num\u00e9riques) : mean, sd, min, q1, median, q3, max"\n',
     '    }\n',
     '  }'
@@ -1845,6 +1855,152 @@ detect_nomenclature_vars <- function(meta_json) {
 }
 
 # ---------------------------------------------------------------------------
+# Accent-insensitive, lowercase, punctuation-collapsed normalizer for the
+# keyword matching in suggest_keep_codes().
+.kc_norm <- function(x) {
+  x <- tolower(as.character(x))
+  x <- if (requireNamespace("stringi", quietly = TRUE))
+    stringi::stri_trans_general(x, "Latin-ASCII")
+  else iconv(x, to = "ASCII//TRANSLIT")
+  x <- gsub("[^a-z0-9]+", " ", x)
+  trimws(gsub("[[:space:]]+", " ", x))
+}
+
+# Content vocabularies for suggest_keep_codes() (already normalized: lowercase,
+# no accents). Regions = the 18 French regions; PCS = distinctive CS/PCS category
+# stems; months = the 12 French months (matched as WHOLE words — "mars" must not
+# hit "marseille").
+.KC_REGIONS <- c("guadeloupe", "martinique", "guyane", "la reunion", "mayotte",
+  "ile de france", "centre val de loire", "bourgogne franche comte", "normandie",
+  "hauts de france", "grand est", "pays de la loire", "bretagne",
+  "nouvelle aquitaine", "occitanie", "auvergne rhone alpes",
+  "provence alpes cote d azur", "corse")
+# PCS/CS category stems — niveau 1 + a few distinctive niveau-2 labels (e.g.
+# "Professeurs, professions scientifiques"). Deliberately NON-nesting (no term is
+# a substring of another) so the count of distinct matched terms is meaningful.
+# PCS niveau 4 (~330 occupations) is NOT enumerated — too many, and job names
+# overlap ordinary words; those variables are caught by the "PCS" name prefix
+# (and letter-suffixed PCS2003 codes trip the "codes non entiers" rule).
+.KC_PCS <- c(
+  "agriculteurs", "artisans", "commercants", "chefs d entreprise",
+  "cadres", "professions intermediaires", "professions liberales",
+  "professeurs", "ingenieurs", "techniciens", "contremaitres",
+  "employes", "ouvriers", "chauffeurs", "policiers",
+  "retraites", "chomeurs", "eleves etudiants", "clerge")
+.KC_MONTHS <- c("janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet",
+  "aout", "septembre", "octobre", "novembre", "decembre")
+
+#' Suggest variables whose original codes should be kept as final numbers
+#'
+#' Heuristic, deterministic console report (no API call): walks the factor
+#' variables and flags those likely coded with a meaningful nomenclature that the
+#' default clean renumbering would destroy. Signals (any one flags the variable,
+#' all listed as reasons):
+#' \itemize{
+#'   \item \strong{name} matches a nomenclature prefix (PCS/CS/GS/REGION/DEP/
+#'     COMMUNE/MOIS/NAF/FAP/geo-typologies…);
+#'   \item \strong{régions} — labels name >=3 French regions;
+#'   \item \strong{PCS} — labels use >=2 CS/PCS category stems (niveau 1-2);
+#'   \item \strong{mois} — labels name >=3 French months;
+#'   \item \strong{âge} — >=2 labels of the form "NN ans" (age/duration classes);
+#'   \item \strong{déciles} — labels mention "décile";
+#'   \item \strong{codes non entiers} — codes that are not plain integers, so they
+#'     carry extra meaning (zero-padded \code{01}, ranges \code{80-84}/\code{2000-2004},
+#'     compound \code{"01 - GUADELOUPE"}, letter-suffixed PCS \code{311a}).
+#' }
+#' Only variables whose codes start with a DISTINCT leading number are proposed
+#' (\code{keep_codes} needs a leading number to order by; a stray code like
+#' \code{"f"} is excluded). Deliberately does NOT use code contiguity or
+#' display-vs-code order (both flag ordinary Likert/frequency batteries — too
+#' noisy). Commune names and generic geographic codes are not detected by content
+#' (unreliable); rely on the variable name (PCS/REGION/DEP/COMMUNE/…) for those,
+#' and on \code{codes non entiers} for PCS niveau 4. Review the list, then pass it
+#' to \code{\link{set_keep_codes}}.
+#'
+#' @param meta_json Path to the survey_meta JSON, or a \code{survey_meta} object.
+#' @return Invisibly, a character vector of candidate variable names.
+#' @seealso \code{\link{set_keep_codes}}, \code{\link{detect_nomenclature_vars}}
+#' @examples
+#' \dontrun{
+#' set_keep_codes("survey.survey_meta.json", suggest_keep_codes("survey.survey_meta.json"))
+#' }
+#' @export
+suggest_keep_codes <- function(meta_json) {
+  json_path <- .resolve_json_path(meta_json)
+  existing  <- .read_meta_json(json_path)
+  vars      <- existing$variables
+
+  name_pattern <- paste0("^(PCS|CSP|CS_|GS_|GS$|REGION|DEP_|DEP$|DEPT|COMMUNE|",
+                         "CODGEO|IRIS|TUU|TAAV|TYPO|CATEAAV|CATAAV|MOIS|NAF|FAP)")
+
+  candidates <- character(0)
+  reasons    <- character(0)
+
+  for (vname in names(vars)) {
+    jv   <- vars[[vname]]
+    role <- jv$role %||% ""
+    if (!role %in% c("factor_nominal", "factor_ordinal")) next
+    lvls <- jv$levels
+    if (length(lvls) == 0L) next
+
+    nm    <- Filter(function(l) !isTRUE(l$missing), lvls)   # non-missing levels
+    codes <- names(nm)
+    codes <- codes[!is.na(codes) & nzchar(codes)]
+    if (length(codes) < 3L) next
+
+    # keep_codes needs codes that START with the ordering number (leading digit).
+    code_int <- suppressWarnings(as.integer(sub("^\\s*(\\d+).*$", "\\1", codes)))
+    code_int[!grepl("^\\s*[0-9]", codes)] <- NA_integer_
+    if (anyNA(code_int) || anyDuplicated(code_int)) next
+
+    labs  <- vapply(nm, function(l) .first_nzchar(l$new_label, l$label, ""), character(1))
+    norm  <- .kc_norm(labs)                                  # normalized labels
+    words <- unique(unlist(strsplit(norm, " ", fixed = TRUE)))
+    # A code is a "plain integer" only if it round-trips losslessly (so "01",
+    # "80-84", "2000-2004", "01 - GUADELOUPE" are NOT — they carry extra meaning).
+    plain_int <- vapply(codes, function(cd) {
+      i <- suppressWarnings(as.integer(cd)); !is.na(i) && identical(as.character(i), trimws(cd))
+    }, logical(1))
+
+    reason <- character(0)
+    if (grepl(name_pattern, vname, ignore.case = TRUE))
+      reason <- c(reason, "nom de nomenclature")
+    if (sum(vapply(.KC_REGIONS, function(r) any(grepl(r, norm, fixed = TRUE)), logical(1))) >= 3L)
+      reason <- c(reason, "régions")
+    if (sum(vapply(.KC_PCS, function(p) any(grepl(p, norm, fixed = TRUE)), logical(1))) >= 2L)
+      reason <- c(reason, "PCS")
+    if (sum(.KC_MONTHS %in% words) >= 3L)
+      reason <- c(reason, "mois")
+    if (sum(grepl("\\b[0-9]+\\s*ans?\\b", labs)) >= 2L)
+      reason <- c(reason, "âge")
+    if (sum(grepl("decile", norm, fixed = TRUE)) >= 2L)
+      reason <- c(reason, "déciles")
+    if (!all(plain_int))
+      reason <- c(reason, "codes non entiers")
+
+    if (length(reason) > 0) {
+      candidates <- c(candidates, vname)
+      reasons    <- c(reasons, paste(reason, collapse = ", "))
+    }
+  }
+
+  if (length(candidates) == 0) {
+    message("suggest_keep_codes: aucune variable candidate détectée.")
+  } else {
+    # Copy-paste-ready character-vector block: c("VAR", ...) with reasons as
+    # aligned comments — drop into set_keep_codes(meta_json, c(...)).
+    quoted <- paste0('"', candidates, '"',
+                     c(rep(",", length(candidates) - 1L), ""))   # no trailing comma
+    lines  <- paste0("  ", format(quoted), "  # ", reasons)
+    message("suggest_keep_codes: ", length(candidates), " variable(s) candidate(s) ",
+            "(à vérifier, puis set_keep_codes()) :\n",
+            "c(\n", paste0(lines, collapse = "\n"), "\n)")
+  }
+
+  invisible(candidates)
+}
+
+# ---------------------------------------------------------------------------
 # Apply reference nomenclature labels to the metadata table.
 # mapping: named list(VAR_NAME = "NOMENCLATURE_ID") — use detect_nomenclature_vars()
 #          to generate it automatically.
@@ -1965,6 +2121,13 @@ apply_nomenclatures <- function(
 #'                        \code{set_headers()} / edited in the JSON. Setting the
 #'                        \code{## } blocs here (before \code{ai_build_outline()})
 #'                        makes the AI outline respect them as fixed boundaries.
+#' @param keep_codes       Optional character vector of variable names whose
+#'                        original level codes must be kept as the final numbers
+#'                        (in original code order) instead of clean sequential
+#'                        numbering — for nomenclatures (region, month, PCS…).
+#'                        Additive: sets the per-variable \code{keep_codes} flag,
+#'                        preserved on re-extract. See \code{\link{set_keep_codes}}
+#'                        and \code{\link{suggest_keep_codes}}.
 #' @param survey_description Optional free text (survey topic, documented outline)
 #'                        stored in \code{config.survey_description} and read by
 #'                        \code{ai_build_outline()} as global context. Source of
@@ -1994,6 +2157,7 @@ extract_survey_metadata <- function(
     max_levels_cat  = 20,
     sas_format_file = NULL,
     headers         = NULL,
+    keep_codes      = character(0),
     survey_description = NULL
 ) {
   # `headers`: optional named vector c("## Titre" = "VARNAME", ...) — the survey
@@ -2393,6 +2557,9 @@ extract_survey_metadata <- function(
           result$battery <- old$battery
         if (!is.null(old$headers) && length(old$headers) > 0)
           result$headers <- old$headers
+        # Preserve keep_codes flag (set by set_keep_codes() / edited in the JSON);
+        # the keep_codes argument (applied below) can only add to it, never unset.
+        if (isTRUE(old$keep_codes)) result$keep_codes <- TRUE
         # Merge level-by-level: preserve new_label, n, pct, order from old JSON
         if (!is.null(old$levels) && length(old$levels) > 0) {
           result$levels <- purrr::imap(result$levels, function(lev, code) {
@@ -2421,6 +2588,9 @@ extract_survey_metadata <- function(
           merged <- merged[order(vapply(merged, .hdr_level, integer(1)))]
         result$headers <- if (length(merged) > 0) as.list(merged) else NULL
       }
+      # keep_codes argument: source of truth for the named variables (adds the
+      # flag; use set_keep_codes(value = FALSE) or edit the JSON to remove one).
+      if (vname %in% keep_codes) result$keep_codes <- TRUE
       result
     }),
     meta$var_name
@@ -3058,6 +3228,56 @@ set_headers <- function(meta_json, headers, replace = TRUE) {
   .write_meta_json(existing, json_path)
   message("set_headers: wrote outline titles on ", n_set, " variable(s) in ",
           basename(json_path), ".")
+  invisible(.survey_meta_from_json(json_path, existing))
+}
+
+
+#' Flag variables that must keep their original level codes as final numbers
+#'
+#' By default \code{generate_format_script()} / \code{generate_codebook()}
+#' renumber factor levels with a clean sequential prefix (\code{01-}, \code{02-}
+#' …). For variables coded with a standard nomenclature (CSP/PCS, region, month,
+#' department…), that destroys meaningful codes. \code{set_keep_codes()} marks
+#' such variables with a per-variable \code{keep_codes} boolean in the JSON, so
+#' both outputs keep the original numeric code as the prefix, in code order
+#' (e.g. \code{01-Guadeloupe}, \code{11-Île de France}, \code{94-Corse}).
+#' Preserved on re-extract. Use \code{\link{suggest_keep_codes}} to get
+#' candidates. The same can be set at extraction time via
+#' \code{extract_survey_metadata(keep_codes = ...)}.
+#'
+#' @param meta_json Path to the survey_meta JSON, or a \code{survey_meta} object.
+#' @param vars Character vector of variable names to flag.
+#' @param value \code{TRUE} (default) sets the flag; \code{FALSE} removes it.
+#' @return Invisibly, the updated \code{survey_meta} object.
+#' @seealso \code{\link{suggest_keep_codes}}, \code{\link{set_headers}}
+#' @examples
+#' \dontrun{
+#' set_keep_codes("survey.survey_meta.json", c("REGION", "MOIS_REP", "PCS_ACT"))
+#' set_keep_codes("survey.survey_meta.json", suggest_keep_codes("survey.survey_meta.json"))
+#' }
+#' @export
+set_keep_codes <- function(meta_json, vars, value = TRUE) {
+  json_path <- .resolve_json_path(meta_json)
+  existing  <- .read_meta_json(json_path)
+  vnames    <- names(existing$variables)
+
+  vars    <- as.character(vars)
+  unknown <- setdiff(unique(vars), vnames)
+  if (length(unknown) > 0)
+    message("set_keep_codes: ", length(unknown), " variable(s) not found: ",
+            paste(unknown, collapse = ", "))
+
+  n_set <- 0L
+  for (v in intersect(vars, vnames)) {
+    if (isTRUE(value)) existing$variables[[v]]$keep_codes <- TRUE
+    else               existing$variables[[v]]$keep_codes <- NULL
+    n_set <- n_set + 1L
+  }
+
+  .backup_meta_json(json_path, "keep_codes")
+  .write_meta_json(existing, json_path)
+  message("set_keep_codes: ", if (isTRUE(value)) "set" else "removed",
+          " keep_codes on ", n_set, " variable(s) in ", basename(json_path), ".")
   invisible(.survey_meta_from_json(json_path, existing))
 }
 
@@ -6520,10 +6740,23 @@ ai_suggest_varnames <- function(
 }
 
 
+# Smallest all-nines integer STRICTLY greater than n — the negative-level
+# sentinel code for a binary battery (see .gfs_build_entries battery pass).
+#   n<=8 -> 9 ; 9<=n<=98 -> 99 ; 99<=n<=998 -> 999
+.nines_sentinel <- function(n) {
+  d <- nchar(as.character(n))
+  if (n >= 10L^d - 1L) d <- d + 1L
+  as.integer(10L^d - 1L)
+}
+
+
 # Build the displayed level label ("1-Natation") for a normalized non-missing
 # level (from .gfs_build_entries). Shared by the format script (fct_recode LHS)
-# and generate_codebook() so both are byte-identical.
+# and generate_codebook() so both are byte-identical. A level carrying a
+# precomputed `num_prefix` (keep_codes: original code as prefix) uses it as-is;
+# otherwise the prefix is the order-derived zero-padded number.
 .gfs_level_label <- function(lv, max_order) {
+  if (!is.null(lv$num_prefix)) return(paste0(lv$num_prefix, lv$display_label))
   paste0(.gfs_numeric_prefix(lv$order, max_order), lv$display_label)
 }
 
@@ -6634,6 +6867,35 @@ ai_suggest_varnames <- function(
       non_missing <- non_missing[order(orders)]
     }
 
+    # keep_codes: use the ORIGINAL level code (its LEADING number) as the final
+    # number instead of the sequential order, sorted by code. For nomenclatures
+    # (region, month, PCS…) where clean renumbering would destroy standard codes.
+    # Preserves leading zeros via `num_prefix` (consumed by .gfs_level_label()).
+    # The code MUST start with the ordering number (after optional spaces): a code
+    # with leading text like "Avant 1930" cannot be placed and makes the whole
+    # variable fall back to normal numbering — rename such a code (give it a
+    # leading number) or drop keep_codes for that variable.
+    if (isTRUE(jv$keep_codes) && length(non_missing) > 0) {
+      codes_v  <- vapply(non_missing, function(x) x$code, character(1))
+      num_str  <- sub("^\\s*(\\d+).*$", "\\1", codes_v)     # leading number only
+      code_int <- suppressWarnings(as.integer(sub("^\\s*(\\d+).*$", "\\1", codes_v)))
+      code_int[!grepl("^\\s*[0-9]", codes_v)] <- NA_integer_  # no leading number -> unusable
+      if (!anyNA(code_int) && !anyDuplicated(code_int)) {
+        w <- max(nchar(num_str))
+        for (i in seq_along(non_missing)) {
+          non_missing[[i]]$order      <- code_int[i]      # for sorting / max_order
+          non_missing[[i]]$num_prefix <- paste0(formatC(code_int[i], width = w, flag = "0"), "-")
+        }
+        non_missing <- non_missing[order(code_int)]
+      } else {
+        bad <- if (anyNA(code_int)) codes_v[is.na(code_int)]
+               else codes_v[duplicated(code_int) | duplicated(code_int, fromLast = TRUE)]
+        message("keep_codes: '", vname, "' — codes without a leading number or with ",
+                "duplicate numbers, kept normal numbering: ",
+                paste0("'", utils::head(unique(bad), 6), "'", collapse = ", "))
+      }
+    }
+
     max_order <- if (length(non_missing) > 0) {
       max(sapply(non_missing, function(x) x$order), na.rm = TRUE)
     } else {
@@ -6656,6 +6918,39 @@ ai_suggest_varnames <- function(
       headers        = as.character(jv$headers %||% character(0))
     )
   }
+
+  # --- Binary-battery numbering pass -----------------------------------------
+  # For each battery whose members are ALL binary, number the positive levels
+  # sequentially across the battery (01, 02, … in member order) and give every
+  # negative level a shared all-nines sentinel (99), so the battery reads as one
+  # multi-answer nomenclature. Runs AFTER keep_codes so battery wins if both set.
+  batt_titles <- vapply(entries, function(e) e$battery %||% "", character(1))
+  mixed_batteries <- character(0)
+  for (title in unique(batt_titles[nzchar(batt_titles)])) {
+    idx     <- which(batt_titles == title)
+    members <- entries[idx]
+    all_binary <- all(vapply(members,
+      function(e) identical(e$role, "factor_binary") && e$n_non_missing == 2L, logical(1)))
+    if (!all_binary) {
+      mixed_batteries <- c(mixed_batteries, title)
+      next
+    }
+    sentinel <- .nines_sentinel(length(idx))
+    for (k in seq_along(idx)) {
+      e <- entries[[idx[[k]]]]
+      e$levels_sorted[[1]]$order <- k          # positive (order 1) -> battery position
+      e$levels_sorted[[2]]$order <- sentinel   # negative (order 2) -> all-nines sentinel
+      e$levels_sorted[[1]]$num_prefix <- NULL  # battery wins over any keep_codes prefix
+      e$levels_sorted[[2]]$num_prefix <- NULL
+      e$max_order <- sentinel                  # width tracks battery size (9 / 99 / 999)
+      entries[[idx[[k]]]] <- e
+    }
+  }
+  if (length(mixed_batteries) > 0)
+    message("Binary-battery numbering skipped ", length(mixed_batteries),
+            " non-binary batter", if (length(mixed_batteries) == 1L) "y" else "ies",
+            " (kept normal numbering): ", paste(mixed_batteries, collapse = " ; "))
+
   entries
 }
 

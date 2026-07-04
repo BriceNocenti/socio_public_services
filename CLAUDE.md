@@ -118,6 +118,14 @@ Users can (and do) manually edit the JSON between AI steps. Key fields per varia
   (membership + header text in one field, deliberately REPEATED on every member). Only true
   multi-answer batteries use this field — they alone get the boxed rendering + optional
   prefixe_question column. Written by ai_build_outline(); preserved on re-extract.
+- `keep_codes` (top-level, per variable, boolean): TRUE keeps the ORIGINAL level codes as the final
+  numbering (prefix = the code's LEADING number `^\s*(\d+)`, zero-padded to the widest code; levels
+  sorted by that number) instead of clean sequential numbering — for nomenclatures (region, month, PCS,
+  age/year ranges…). A code must START with the ordering number: `"01 - GUADELOUPE"`→01, `"80-84"`→80,
+  but a leading-text code like `"Avant 1930"` (or a duplicate number) makes the whole variable fall back
+  to normal numbering, with a message naming the offending code. Set by `set_keep_codes(meta_json, vars)`
+  or `extract_survey_metadata(keep_codes = c(...))` (additive, preserved on re-extract); candidates from
+  `suggest_keep_codes()`. Applied in `.gfs_build_entries()`.
 - `headers` (top-level, per variable): array of markdown outline titles (`"## ..."`, `"### ..."`,
   and `"#### ..."` for a non-battery thematic GROUP) rendered ONCE before this variable in the
   codebook. Start-markers, not repeated; the level = the count of `#` (clamped 2..4). The USER owns
@@ -274,6 +282,22 @@ mis-detected as factors don't accumulate spurious levels. Empty-label levels are
 `ai_suggest_labels()`, and `.gfs_build_entries()` falls back to the code (via `.first_nzchar()`) for
 display so `generate_format_script()`/`generate_codebook()` stay clean until the label is filled.
 
+**Key Design Decision** — Final level numbering (the `NN-Label` prefix) has THREE modes, all decided in
+the shared `.gfs_build_entries()` so `generate_format_script()` and `generate_codebook()` stay identical:
+(1) **default** = sequential per-level `order`, zero-padded to `nchar(max_order)` via `.gfs_numeric_prefix()`;
+(2) **binary-battery** = automatic for every battery whose members are all `factor_binary` — positive level
+gets its battery position (1,2,3…), the negative an all-nines sentinel `.nines_sentinel(N)` (N≤8→9, 9–98→99,
+99–998→999); width tracks battery size. Mixed batteries are skipped + reported. (3) **keep_codes** = the
+code's leading number as prefix (`^\s*(\d+)`, zero-padded to the widest code, stored per-level as
+`num_prefix`, sorted by code); leading-text or duplicate-number codes fall back to mode 1 with a message.
+`.gfs_level_label()` prefers `num_prefix` when present. `suggest_keep_codes()` is a deterministic,
+content-based console detector (sibling of `detect_nomenclature_vars()`) for mode-3 candidates: it flags a
+factor by **variable name** (PCS/CS/GS/REGION/DEP/COMMUNE/MOIS/geo-typologies…), **label vocabulary**
+(≥3 French regions, ≥2 PCS niveau-1/2 stems, ≥3 months, ≥2 "NN ans" classes, "décile"), or **`codes non
+entiers`** (codes not round-tripping as plain integers: `01`, `80-84`, `01 - GUADELOUPE`, PCS `311a`). It
+deliberately does NOT use code contiguity or display-vs-code order (those flag ordinary Likert batteries);
+commune names / generic geo codes are left to the name rule (unreliable by content).
+
 ---
 
 ## Test Suite Design
@@ -333,6 +357,7 @@ Each dummy has matching configs:
 | `test-generate-codebook.R`      | C      | `generate_codebook()` tibble build + xlsx write           |
 | `test-outline-seed.R`           | D      | `.batt_seed_candidates()` seed + precision gate + preview |
 | `test-ai-build-outline.R`       | OU     | `ai_build_outline()` #### spans → headers/battery (mock)   |
+| `test-keep-codes.R`             | KC     | keep_codes numbering + set_keep_codes / suggest_keep_codes |
 | `test-json-roundtrip.R`         | J/K/BT | JSON roundtrip, backup, migration, battery/headers fields |
 | `test-nomenclatures-insee.R`    | O      | INSEE nomenclature helpers                                |
 
