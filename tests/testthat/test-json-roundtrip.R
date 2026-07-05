@@ -109,6 +109,49 @@ test_that("BT6: config.survey_description (multi-line) round-trips + is preserve
   expect_equal(.read_meta_json(path)$config$survey_description, desc)
 })
 
+test_that("BT7: all config.survey_* fields round-trip + are preserved on re-extract", {
+  df <- data.frame(Q1 = c(1L, 2L, 1L, 2L, 1L))
+  path <- tmp_json(); on.exit(unlink(path))
+  vals <- list(survey_title = "Titre", survey_population = "Champ X",
+               survey_producer = "Prod", survey_source = "Src",
+               survey_distributor = "Diff", survey_methodology = "**M**\nligne")
+  suppressMessages(do.call(extract_survey_metadata, c(
+    list(df, path, missing_num = numeric(0), missing_chr = character(0)), vals)))
+  cfg <- .read_meta_json(path)$config
+  for (k in names(vals)) expect_equal(cfg[[k]], vals[[k]], info = k)
+  # Preserved on re-extract WITHOUT the arguments (seeded from prior config).
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+    missing_chr = character(0)))
+  cfg2 <- .read_meta_json(path)$config
+  for (k in names(vals)) expect_equal(cfg2[[k]], vals[[k]], info = k)
+})
+
+test_that("BT8: recreate = TRUE rebuilds from scratch (no preservation of battery/headers/config)", {
+  df <- data.frame(Q1 = c(1L, 2L, 1L, 2L, 1L))
+  path <- tmp_json(); on.exit(unlink(path))
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+    missing_chr = character(0), survey_title = "T"))
+  raw <- .read_meta_json(path)
+  raw$variables$Q1$battery <- "Bat X"
+  raw$variables$Q1$headers <- list("## Bloc")
+  .write_meta_json(raw, path)
+
+  # Default re-extract preserves the manual battery/headers + the config title.
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+    missing_chr = character(0)))
+  kept <- .read_meta_json(path)
+  expect_equal(kept$variables$Q1$battery, "Bat X")
+  expect_equal(kept$config$survey_title, "T")
+
+  # recreate = TRUE ignores the existing file entirely -> fresh build.
+  suppressMessages(extract_survey_metadata(df, path, missing_num = numeric(0),
+    missing_chr = character(0), recreate = TRUE))
+  fresh <- .read_meta_json(path)
+  expect_null(fresh$variables$Q1$battery)
+  expect_true(is.null(fresh$variables$Q1$headers) || length(fresh$variables$Q1$headers) == 0L)
+  expect_null(fresh$config$survey_title)          # config not carried over either
+})
+
 # ---------------------------------------------------------------------------
 # A. Basic write → read round-trip
 # ---------------------------------------------------------------------------

@@ -201,9 +201,34 @@ test_that("C3e: numeric sentinels: unlabelled fold into the total, labelled ones
   # Unlabelled sentinel 999: collapses into the overall NA total (no bare code).
   expect_equal(unique(cb$na[cb$variable %in% "BRIC" & !is.na(cb$variable)]),
                "NA: 25 (20%)")
-  # Labelled sentinel 99: numeric vars now list labelled missing levels like factors.
+  # Labelled sentinel 99 accounts for ALL the NA (12 == na_n): drop the repeated
+  # count, show the label alone.
   expect_equal(unique(cb$na[cb$variable %in% "HOURS" & !is.na(cb$variable)]),
-               "NA: 12 (10%) ; 12 Ne sait pas")
+               "NA: 12 (10%) ; Ne sait pas")
+})
+
+test_that("C3f: single labelled missing level below na_n keeps its count + vide tail", {
+  vars <- list(
+    HOURS = list(var_label = "Heures", role = "double", r_class = "numeric",
+                 new_name = "HOURS", n_distinct_data = 30L, na_n = 20L, na_pct = 16.0,
+                 levels = list("99" = list(missing = TRUE, label = "Ne sait pas", n = 12L)),
+                 num_stats = list(mean = 20, sd = 8, min = 0, q1 = 10,
+                                  median = 18, q3 = 30, max = 60)))
+  cb <- .cb_build_tibble(.read_meta_json(cb_json(vars, n_individuals = 125L)))
+  # 12 labelled + (20 - 12 = 8) genuine blanks -> count kept, "vide" appended.
+  expect_equal(unique(cb$na[cb$variable %in% "HOURS" & !is.na(cb$variable)]),
+               "NA: 20 (16%) ; 12 Ne sait pas ; 8 vide")
+})
+
+test_that("C3g: no labelled missing level -> only 'NA: n (pct%)', no bare 'vide'", {
+  vars <- list(
+    CNT = list(var_label = "Compte", role = "integer_count", r_class = "numeric",
+               new_name = "CNT", n_distinct_data = 40L, na_n = 811L, na_pct = 7.0,
+               levels = list("999" = list(missing = TRUE, n = 1L)),
+               num_stats = list(mean = 6, sd = 5, min = 1, q1 = 3,
+                                median = 5, q3 = 8, max = 46)))
+  cb <- .cb_build_tibble(.read_meta_json(cb_json(vars, n_individuals = 11082L)))
+  expect_equal(unique(cb$na[cb$variable %in% "CNT" & !is.na(cb$variable)]), "NA: 811 (7%)")
 })
 
 
@@ -234,9 +259,8 @@ test_that("C4d: a #### group in `headers` renders a level-4 title row (not a bat
   # The #### group is a start-marker: a level-4 title row, "#"s stripped.
   expect_equal(titles$h, c("Sous-theme", "Groupe thematique"))
   expect_equal(titles$.h_level, c(3L, 4L))
-  # No battery field -> no boxed battery / no question_prefix, even with the column on.
-  cb2 <- .cb_build_tibble(jd, battery_column = TRUE)
-  expect_true(all(is.na(cb2$question_prefix)))
+  # No battery field -> no selector column populated.
+  expect_true(all(is.na(cb$question_prefix)))
 })
 
 test_that("C4b: a `battery` title emits ONE #### header before the run's first member", {
@@ -284,18 +308,36 @@ test_that("C4b2: no closing spacer between two adjacent batteries (new #### sepa
   expect_equal(cb$.row_type[first_b1 - 1L], "title") # B's own #### header instead
 })
 
-test_that("C4c: battery_column adds a per-row question_prefix column", {
+test_that("C4c: a battery auto-adds a question_prefix selector (unique common prefix)", {
+  bin <- function(nm) list(var_label = nm, role = "factor_binary", r_class = "double",
+    new_name = nm, battery = "Batterie A",
+    levels = list("1" = list(order = 1L, label = "Oui", n = 6L, pct = 60L),
+                  "0" = list(order = 2L, label = "Non", n = 4L, pct = 40L)))
   vars <- list(
-    A_ONE = list(var_label = "q1", role = "factor_binary", r_class = "double", new_name = "A_ONE",
-                 battery = "Batterie A",
-                 levels = list("1" = list(order = 1L, label = "Oui", n = 6L, pct = 60L),
-                               "0" = list(order = 2L, label = "Non", n = 4L, pct = 40L)))
-  )
+    PAP_A = bin("PAP_A"), PAP_B = bin("PAP_B"),
+    OTHER = list(var_label = "x", role = "factor_nominal", r_class = "character",
+                 new_name = "OTHER",
+                 levels = list("1" = list(order = 1L, label = "a", n = 5L, pct = 50L),
+                               "2" = list(order = 2L, label = "b", n = 5L, pct = 50L))))
   jd <- .read_meta_json(cb_json(vars))
-  cb_on  <- .cb_build_tibble(jd, battery_column = TRUE)
-  cb_off <- .cb_build_tibble(jd, battery_column = FALSE)
-  expect_true("Batterie A" %in% cb_on$question_prefix)
-  expect_true(all(is.na(cb_off$question_prefix)))
+  cb <- .cb_build_tibble(jd)
+  qp <- unique(cb$question_prefix[!is.na(cb$question_prefix)])
+  expect_equal(qp, "PAP_")                                   # prefix unique to the battery
+  expect_true(all(is.na(cb$question_prefix[cb$variable %in% "OTHER"])))   # standalone: none
+  # .battery marks the members (for the red rectangle), not OTHER.
+  expect_true(all(cb$.battery[cb$variable %in% c("PAP_A", "PAP_B")] == "Batterie A"))
+  expect_true(all(is.na(cb$.battery[cb$variable %in% "OTHER"])))
+})
+
+test_that("C4e: .battery_selector prefers a unique prefix, else pipe-joins names", {
+  expect_equal(.battery_selector(c("PAP_A", "PAP_B"), c("PAP_A", "PAP_B", "OTHER")), "PAP_")
+  # prefix shared by a variable OUTSIDE the battery -> fall back to pipe list
+  expect_equal(.battery_selector(c("PAP_A", "PAP_B"), c("PAP_A", "PAP_B", "PAP_C")),
+               "PAP_A|PAP_B")
+  # no common prefix -> pipe list
+  expect_equal(.battery_selector(c("Q1", "Z2"), c("Q1", "Z2", "X")), "Q1|Z2")
+  # single member -> its own name
+  expect_equal(.battery_selector("SOLO", c("SOLO", "OTHER")), "SOLO")
 })
 
 
@@ -356,4 +398,82 @@ test_that("C7: generate_codebook(df) builds a temp JSON + xlsx silently", {
   expect_s3_class(cb, "tbl_df")
   expect_true(nrow(cb) > 0)
   expect_false(any(grepl("^\\.", names(cb))))     # internal cols dropped
+})
+
+
+# ---------------------------------------------------------------------------
+# C8. Regression: a level with no `n` must not coerce `new_label` (R `$` partial
+#     matching once made lv$n resolve to lv$new_label -> "NAs introduced by
+#     coercion"). Now [["n"]] is exact -> NULL -> blank n, no warning.
+# ---------------------------------------------------------------------------
+
+test_that("C8: factor level without `n` builds without warning and shows blank n", {
+  vars <- list(
+    DEC = list(var_label = "Décile", role = "factor_ordinal", r_class = "character",
+               new_name = "DEC",
+               levels = list(
+                 "01" = list(order = 1L, label = "d1", new_label = "1er décile"),
+                 "02" = list(order = 2L, label = "d2", new_label = "2e décile")))
+  )
+  jd <- .read_meta_json(cb_json(vars))
+  expect_no_warning(cb <- .cb_build_tibble(jd))
+  expect_true(all(is.na(cb$n[cb$variable %in% "DEC" & !is.na(cb$variable)])))
+})
+
+
+# ---------------------------------------------------------------------------
+# C9. Markdown -> rich text tokenising (front-matter cell)
+# ---------------------------------------------------------------------------
+
+test_that("C9: .md_tokens splits **bold** / *italic* / plain runs", {
+  tk <- .md_tokens("a **b** c *d*")
+  expect_equal(vapply(tk, `[[`, "", "text"),        c("a ", "b", " c ", "d"))
+  expect_equal(vapply(tk, `[[`, logical(1), "bold"),   c(FALSE, TRUE, FALSE, FALSE))
+  expect_equal(vapply(tk, `[[`, logical(1), "italic"), c(FALSE, FALSE, FALSE, TRUE))
+  plain <- .md_tokens("nothing here")
+  expect_equal(length(plain), 1L)
+  expect_false(plain[[1]]$bold || plain[[1]]$italic)
+})
+
+test_that("C9b: .md_to_fmt_txt returns a fmt_txt object", {
+  skip_if_not_installed("openxlsx2")
+  ft <- .md_to_fmt_txt("**Champ :** x")
+  expect_true(!is.null(ft))
+  expect_no_error(openxlsx2::fmt_txt(ft))
+})
+
+
+# ---------------------------------------------------------------------------
+# C10. Survey front-matter: level-1 title + one metadata row
+# ---------------------------------------------------------------------------
+
+test_that("C10: survey_* build a level-1 title + ONE frontmatter row per field", {
+  ml <- make_meta_list(cb_vars())
+  ml$config$n_individuals      <- 1000L
+  ml$config$survey_title       <- "Mon enquête"
+  ml$config$survey_description  <- "Une **enquête** de test"
+  ml$config$survey_population   <- "Les gens"
+  path <- tmp_json(); .write_meta_json(ml, path)
+  cb <- .cb_build_tibble(.read_meta_json(path))
+
+  t1 <- cb[cb$.row_type %in% "title" & cb$.h_level %in% 1L, ]
+  expect_equal(nrow(t1), 1L)
+  expect_match(t1$h, "Dictionnaire des codes")
+  expect_match(t1$h, "Mon enquête")
+
+  fm <- cb[cb$.row_type %in% "frontmatter", ]
+  expect_equal(nrow(fm), 2L)                                       # description + population
+  expect_true(any(grepl("enquête", fm$description)))              # survey_description row
+  pop <- fm[grepl("Champ", fm$description), ]
+  expect_equal(nrow(pop), 1L)
+  expect_true(grepl("Les gens", pop$description))
+  expect_equal(pop$n, 1000)                                        # n_individuals on the Champ row
+  expect_true(all(is.na(fm$n[!grepl("Champ", fm$description)])))   # other rows: no n
+})
+
+test_that("C10b: no survey_title/description -> no title/frontmatter rows", {
+  jd <- .read_meta_json(cb_json(cb_vars()))
+  cb <- .cb_build_tibble(jd)
+  expect_equal(nrow(cb[cb$.row_type %in% "frontmatter", ]), 0L)
+  expect_equal(nrow(cb[cb$.row_type %in% "title" & cb$.h_level %in% 1L, ]), 0L)
 })

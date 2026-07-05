@@ -1131,15 +1131,20 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
 
   # ---- config section -------------------------------------------------------
   cfg        <- meta_list$config
+  # survey_* are free-text scalar strings describing the survey (rendered in the
+  # codebook front-matter); survey_title is also the codebook's level-1 heading.
+  .survey_scalars <- c("survey_title", "survey_description", "survey_population",
+                       "survey_source", "survey_producer", "survey_distributor",
+                       "survey_methodology")
   cfg_fields <- c("dataset", "n_individuals", "missing_num", "missing_chr",
-                  "yes_labels", "no_labels", "survey_description")
+                  "yes_labels", "no_labels", .survey_scalars)
   cfg_lines  <- c('  "config": {')
   cfg_keys   <- intersect(cfg_fields, names(cfg))   # only present keys, in order
   for (i in seq_along(cfg_keys)) {
     k   <- cfg_keys[[i]]
     val <- cfg[[k]]
-    # dataset / n_individuals / survey_description are scalars; the rest are arrays
-    v_str <- if (k %in% c("dataset", "n_individuals", "survey_description")) {
+    # dataset / n_individuals / survey_* are scalars; the rest are arrays
+    v_str <- if (k %in% c("dataset", "n_individuals", .survey_scalars)) {
       scalar_str(val[[1]])
     } else if (length(val) > 1 || k %in% c("missing_num", "missing_chr", "yes_labels", "no_labels")) {
       arr_str(unlist(val))
@@ -1363,7 +1368,13 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
     '      "config.missing_chr"              : "Libell\u00e9s textuels trait\u00e9s comme valeurs manquantes ou non-r\u00e9ponses",\n',
     '      "config.yes_labels"               : "Libell\u00e9s qui d\u00e9signent la modalit\u00e9 positive des variables binaires (ex : Oui, Choisi)",\n',
     '      "config.no_labels"                : "Libell\u00e9s qui d\u00e9signent la modalit\u00e9 n\u00e9gative des variables binaires (ex : Non, Non choisi)",\n',
-    '      "config.survey_description"       : "Texte libre d\u00e9crivant l\'enqu\u00eate (th\u00e8me, plan document\u00e9) \u2014 contexte global lu par ai_build_outline()",\n',
+    '      "config.survey_title"             : "Titre de l\'enqu\u00eate \u2014 sert de titre principal (niveau 1) du codebook, pr\u00e9fix\u00e9 \'Dictionnaire des codes \u2013 \'",\n',
+    '      "config.survey_description"       : "Texte libre d\u00e9crivant l\'enqu\u00eate (th\u00e8me, plan document\u00e9) \u2014 contexte global lu par ai_build_outline() et affich\u00e9 en t\u00eate du codebook. Markdown ** gras et * italique support\u00e9s.",\n',
+    '      "config.survey_population"        : "Champ de l\'enqu\u00eate (population enqu\u00eat\u00e9e) \u2014 affich\u00e9 en t\u00eate du codebook, pr\u00e9fixe \'Champ\u00a0:\'",\n',
+    '      "config.survey_producer"          : "Producteur de l\'enqu\u00eate \u2014 affich\u00e9 en t\u00eate du codebook, pr\u00e9fixe \'Producteur\u00a0:\'",\n',
+    '      "config.survey_source"            : "Source \u00e0 citer \u2014 affich\u00e9e en t\u00eate du codebook, pr\u00e9fixe \'Source\u00a0:\'",\n',
+    '      "config.survey_distributor"       : "Diffuseur des donn\u00e9es \u2014 affich\u00e9 en t\u00eate du codebook, pr\u00e9fixe \'Diffuseur\u00a0:\'",\n',
+    '      "config.survey_methodology"       : "M\u00e9thodologie (\u00e9chantillonnage, collecte, pond\u00e9ration\u2026) \u2014 affich\u00e9e en t\u00eate du codebook, pr\u00e9fixe \'M\u00e9thodologie\u00a0:\'. Markdown ** gras et * italique support\u00e9s.",\n',
     '      "variables.VAR.var_label"              : "Intitul\u00e9 original de la question dans le questionnaire (peut \u00eatre modifi\u00e9 pour la documentation)",\n',
     '      "variables.VAR.role"                   : "Type de variable : factor_binary = binaire, factor_ordinal = ordinale (ordre significatif), factor_nominal = nominale (cat\u00e9gories sans ordre), integer_scale = \u00e9chelle num\u00e9rique, integer_count = comptage, double = continu, identifier = identifiant, integer = entier, other = autre",\n',
     '      "variables.VAR.new_name"               : "Nom de la variable dans le fichier de donn\u00e9es final \u2014 c\'est ce nom qu\'il faut utiliser pour conseiller les \u00e9tudiant\u00b7es",\n',
@@ -2128,10 +2139,26 @@ apply_nomenclatures <- function(
 #'                        Additive: sets the per-variable \code{keep_codes} flag,
 #'                        preserved on re-extract. See \code{\link{set_keep_codes}}
 #'                        and \code{\link{suggest_keep_codes}}.
+#' @param recreate        Logical. When \code{TRUE}, build the JSON \strong{from
+#'                        scratch}, ignoring any existing \code{meta_json} content
+#'                        (no role/order/battery/headers/keep_codes preservation, no
+#'                        config carry-over). The old file is still backed up before
+#'                        being overwritten. Use it when an incremental re-extract
+#'                        has left stale state. Default \code{FALSE} (preserve +
+#'                        merge, as before).
 #' @param survey_description Optional free text (survey topic, documented outline)
 #'                        stored in \code{config.survey_description} and read by
-#'                        \code{ai_build_outline()} as global context. Source of
-#'                        truth when supplied; preserved on re-extract otherwise.
+#'                        \code{ai_build_outline()} as global context. Also shown
+#'                        in the codebook front-matter. Source of truth when
+#'                        supplied; preserved on re-extract otherwise.
+#' @param survey_title,survey_population,survey_producer,survey_source,survey_distributor,survey_methodology
+#'                        Optional free-text survey metadata stored in the matching
+#'                        \code{config.survey_*} field and displayed in the codebook
+#'                        front-matter (\code{survey_title} is also its level-1
+#'                        heading). \code{survey_description} / \code{survey_methodology}
+#'                        support markdown \code{**bold**} / \code{*italic*}. Each is
+#'                        source of truth when supplied and preserved on re-extract
+#'                        otherwise (same rule as \code{survey_description}).
 #'
 #' @return A tibble with columns:
 #'   var_name, var_label, r_class, n_distinct, detected_role, order,
@@ -2158,7 +2185,14 @@ extract_survey_metadata <- function(
     sas_format_file = NULL,
     headers         = NULL,
     keep_codes      = character(0),
-    survey_description = NULL
+    recreate        = FALSE,
+    survey_title       = NULL,
+    survey_description = NULL,
+    survey_population  = NULL,
+    survey_producer    = NULL,
+    survey_source      = NULL,
+    survey_distributor = NULL,
+    survey_methodology = NULL
 ) {
   # `headers`: optional named vector c("## Titre" = "VARNAME", ...) — the survey
   # outline. When supplied it is the SOURCE OF TRUTH: re-applied (replacing) each
@@ -2179,7 +2213,11 @@ extract_survey_metadata <- function(
   # ---- Read config/variables from meta_json (if exists) ---------------------
   .meta_json_existed <- !missing(meta_json) && !is.null(meta_json) &&
                         nzchar(meta_json) && file.exists(meta_json)
-  .meta_json_data <- .read_meta_json(meta_json)
+  # recreate = TRUE builds from scratch: keep the physical-existence flag (for the
+  # backup below) but do NOT reuse the old content for preservation/merge.
+  .reuse_meta <- .meta_json_existed && !isTRUE(recreate)
+  .meta_json_data <- if (.reuse_meta) .read_meta_json(meta_json)
+                     else list(config = list(), variables = list())
   .cfg            <- .meta_json_data$config
   .json_vars      <- .meta_json_data$variables
 
@@ -2557,7 +2595,7 @@ extract_survey_metadata <- function(
       result$levels <- meta$levels[[i]]
       # Preserve existing JSON fields (new_name, desc, new_label, order, n/pct)
       # that were set in previous runs or manually edited
-      if (.meta_json_existed && !is.null(.json_vars[[vname]])) {
+      if (.reuse_meta && !is.null(.json_vars[[vname]])) {
         old <- .json_vars[[vname]]
         # Preserve role override (manually set or by AI)
         if (!is.null(old$role) && nzchar(old$role))
@@ -2613,20 +2651,25 @@ extract_survey_metadata <- function(
     meta$var_name
   )
 
-  .cfg_new <- if (.meta_json_existed) .meta_json_data$config else list()
+  .cfg_new <- if (.reuse_meta) .meta_json_data$config else list()
   if (!is.null(attr(df, "path"))) .cfg_new$dataset <- basename(attr(df, "path"))
   .cfg_new$n_individuals <- nrow(df)
   .cfg_new$missing_num <- as.list(.missing_num_used)
   .cfg_new$missing_chr <- as.list(.missing_chr_used)
   if (!is.null(.yes_labels_used)) .cfg_new$yes_labels <- as.list(.yes_labels_used)
   if (!is.null(.no_labels_used))  .cfg_new$no_labels  <- as.list(.no_labels_used)
-  # survey_description: source of truth when supplied, preserved (from .cfg_new) otherwise.
-  if (!is.null(survey_description) && nzchar(trimws(survey_description)))
-    .cfg_new$survey_description <- trimws(survey_description)
+  # survey_* free text: source of truth when supplied, preserved (from .cfg_new) otherwise.
+  for (.sk in c("survey_title", "survey_description", "survey_population",
+                "survey_source", "survey_producer", "survey_distributor",
+                "survey_methodology")) {
+    .sv <- get(.sk)
+    if (!is.null(.sv) && nzchar(trimws(.sv))) .cfg_new[[.sk]] <- trimws(.sv)
+  }
 
   if (.meta_json_existed) {
-    .backup_meta_json(meta_json, "reextract")
-    message("extract_survey_metadata: updated ", meta_json)
+    .backup_meta_json(meta_json, if (.reuse_meta) "reextract" else "recreate")
+    message("extract_survey_metadata: ",
+            if (.reuse_meta) "updated " else "recreated (from scratch) ", meta_json)
   } else {
     message("extract_survey_metadata: created ", meta_json)
   }
@@ -6866,7 +6909,7 @@ ai_suggest_varnames <- function(
           missing_lvls[[length(missing_lvls) + 1]] <- list(
             code       = code,
             orig_label = lv$label %||% "",
-            n          = lv$n
+            n          = lv[["n"]]
           )
         } else {
           # First non-empty of new_label / label / code (empty labels come from
@@ -6877,8 +6920,8 @@ ai_suggest_varnames <- function(
             order         = lv$order %||% NA_integer_,
             display_label = display,
             orig_label    = lv$label %||% "",
-            n             = lv$n,
-            pct           = lv$pct
+            n             = lv[["n"]],
+            pct           = lv[["pct"]]
           )
         }
       }
@@ -6948,16 +6991,13 @@ ai_suggest_varnames <- function(
   # negative level a shared all-nines sentinel (99), so the battery reads as one
   # multi-answer nomenclature. Runs AFTER keep_codes so battery wins if both set.
   batt_titles <- vapply(entries, function(e) e$battery %||% "", character(1))
-  mixed_batteries <- character(0)
   for (title in unique(batt_titles[nzchar(batt_titles)])) {
     idx     <- which(batt_titles == title)
     members <- entries[idx]
     all_binary <- all(vapply(members,
       function(e) identical(e$role, "factor_binary") && e$n_non_missing == 2L, logical(1)))
-    if (!all_binary) {
-      mixed_batteries <- c(mixed_batteries, title)
-      next
-    }
+    # Mixed batteries keep normal numbering (positive levels not renumbered).
+    if (!all_binary) next
     sentinel <- .nines_sentinel(length(idx))
     for (k in seq_along(idx)) {
       e <- entries[[idx[[k]]]]
@@ -6969,10 +7009,6 @@ ai_suggest_varnames <- function(
       entries[[idx[[k]]]] <- e
     }
   }
-  if (length(mixed_batteries) > 0)
-    message("Binary-battery numbering skipped ", length(mixed_batteries),
-            " non-binary batter", if (length(mixed_batteries) == 1L) "y" else "ies",
-            " (kept normal numbering): ", paste(mixed_batteries, collapse = " ; "))
 
   entries
 }
@@ -7014,7 +7050,7 @@ ai_suggest_varnames <- function(
 
   if (length(renames) > 0) {
     lines <- c(lines, "",
-      "## Rename variables",
+      "# Rename variables ----",
       paste0(df_name, " <- dplyr::rename(", df_name, ","))
 
     # Padding for rename lines
@@ -7029,7 +7065,7 @@ ai_suggest_varnames <- function(
   }
 
   # --- Step 2: Per-variable formatting blocks ---
-  lines <- c(lines, "", "## Format variables")
+  lines <- c(lines, "", "# Format variables ----")
 
   # `"<label>" -> varlab` line (escaped), or NULL when the variable has no label.
   # The label is then applied to the *final* converted object via
@@ -7039,7 +7075,35 @@ ai_suggest_varnames <- function(
     paste0('"', gsub('"', '\\\\"', vl), '" -> varlab')
   }
 
-  for (e in entries) {
+  prev_battery <- ""            # last rendered battery title (for #### boundaries)
+
+  for (i in seq_along(entries)) {
+    e <- entries[[i]]
+
+    # --- Outline headers + question-battery section comments -------------
+    # DESIGN: mirrors the codebook's data-driven outline (.cb_build_tibble,
+    #   the header/battery logic ~7462-7477): headers (##/###/####) and true
+    #   batteries become RStudio/Positron foldable section comments (trailing
+    #   " ----", nesting by leading-# count) so the script reads with the same
+    #   table-of-contents as the codebook.
+    cur_batt <- e$battery %||% ""
+    # Close the previous battery when its contiguous run just ended.
+    if (nzchar(prev_battery) && !identical(cur_batt, prev_battery))
+      lines <- c(lines, .gfs_battery_close())
+    # Outline headers on this variable (stored outermost-first), one section each.
+    for (raw in e$headers) lines <- c(lines, "", .gfs_section_comment(raw))
+    # Battery #### section, opened once at the first member of the run.
+    if (nzchar(cur_batt) && !identical(cur_batt, prev_battery)) {
+      n_batt <- 1L
+      j <- i + 1L
+      while (j <= length(entries) &&
+             identical(entries[[j]]$battery %||% "", cur_batt)) {
+        n_batt <- n_batt + 1L; j <- j + 1L
+      }
+      lines <- c(lines, "", .gfs_battery_open(cur_batt, n_batt))
+    }
+    prev_battery <- cur_batt
+
     renamed_suffix <- if (e$orig_name != e$new_name) paste0(" (", e$orig_name, ")") else ""
     role_short  <- sub("^factor_", "", e$role)
     var_expr    <- paste0(df_name, "$", e$new_name)
@@ -7164,6 +7228,9 @@ ai_suggest_varnames <- function(
     }
   }
 
+  # Close a battery that runs to the end of the variable list.
+  if (nzchar(prev_battery)) lines <- c(lines, .gfs_battery_close())
+
   lines
 }
 
@@ -7186,6 +7253,45 @@ ai_suggest_varnames <- function(
 .gfs_missing_comment <- function(e) {
   s <- .format_missing_summary(e$na_n, e$na_pct, e$missing_levels)
   if (nzchar(s)) paste0("# Valeurs manquantes \u2014 ", s) else character(0)
+}
+
+# --- Outline / battery section comments for the format script -----------
+# Turn one stored header ("## Bloc", "### Sous-th\u00e8me", "#### Groupe") into an
+# RStudio/Positron foldable section comment (returns a character VECTOR). Same
+# #-depth rule as the codebook (.cb_build_tibble ~7468-7470): level = leading-#
+# count clamped 2..4, #s stripped for display; a trailing " ----" makes the TITLE
+# line a foldable section, nested by depth.
+# DESIGN: the decorative bars use box-drawing chars (\u2550 / \u2500), NOT ASCII #/=/-,
+#   so they can never match the "#+ <label> [-=#]{4,}$" section rule and thus add
+#   visual weight WITHOUT creating empty outline nodes (a pure "####..." rule line
+#   WOULD register as an empty-labelled section). Only the "## Title ----" line is
+#   an outline entry. Level 2 (survey blocs) get a full heavy banner box; level 3
+#   (subthemes) a single light rule above; level 4 (groups) stay a plain title.
+.gfs_section_comment <- function(raw) {
+  lvl   <- attr(regexpr("^#+", raw), "match.length")
+  lvl   <- if (lvl < 0L) 2L else min(max(lvl, 2L), 4L)
+  disp  <- trimws(sub("^#+\\s*", "", raw))
+  title <- paste0(strrep("#", lvl), " ", disp, " ----")
+  if (lvl <= 2L) {
+    bar <- paste0("# ", strrep("\u2550", 65L))   # heavy double bar (\u2550)
+    c(bar, title, bar)
+  } else if (lvl == 3L) {
+    c(paste0("# ", strrep("\u2500", 65L)), title) # light rule above (\u2500)
+  } else {
+    title
+  }
+}
+
+# Opening #### section for a true question battery (foldable, flagged + counted).
+.gfs_battery_open <- function(title, n) {
+  paste0("#### \u25c6 Batterie \u2014 ", title, "  (", n, " variable",
+         if (n > 1L) "s" else "", ") ----")
+}
+
+# Closing rule for a battery run: a plain "#" comment (no trailing " ----") so it
+# stays *inside* the battery's #### fold and vanishes when the battery collapses.
+.gfs_battery_close <- function() {
+  paste0("# \u2514", strrep("\u2500", 5L), " fin batterie ", strrep("\u2500", 5L))
 }
 
 
@@ -7255,12 +7361,16 @@ generate_format_script <- function(meta_json,
 
   # Header
   dataset_name <- config$dataset %||% basename(meta_json)
+  # Box-drawing rule (U+2550), NOT ASCII "=" -- an ASCII "# ====" line registers as an
+  # empty-labelled RStudio/Positron section and pollutes the outline (see
+  # .gfs_section_comment). Box chars never match the "#+ ... [-=#]{4,}$" rule.
+  banner_bar <- paste0("# ", strrep("\u2550", 65L))
   header <- c(
-    "# ============================================================",
+    banner_bar,
     paste0("# Formatting script: ", dataset_name),
     paste0("# Generated: ", Sys.Date(), " from ", basename(meta_json)),
     "# Dependencies: haven, dplyr, forcats",
-    "# ============================================================",
+    banner_bar,
     "#",
     '# Usage:',
     '#   source("this_script.R")',
@@ -7364,12 +7474,16 @@ generate_format_script <- function(meta_json,
 # Compose the missing-value summary (codebook cell AND format-script comment):
 #   "NA: <na_n> (<na_pct>%) ; <n1> <label1> ; <n2> <label2> ; <n_blank> vide"
 # `missing_levels` = the level entries flagged missing (from .gfs_build_entries():
-# each has $code, $orig_label, $n). Coded missing levels are sorted biggest→smallest
-# by count; genuine original blanks (na_n − Σ counts) are appended LAST as "<n> vide".
+# each has $code, $orig_label, $n). Only LABELLED coded levels are listed, sorted
+# biggest→smallest by count; genuine original blanks (na_n − Σ counts) are appended
+# LAST as "<n> vide". Two redundancy guards keep the cell terse:
+#   - no labelled level at all → just "NA: n (pct%)" (a lone "<n> vide" adds nothing);
+#   - a single labelled level whose count == na_n → "NA: n (pct%) ; <label>" (drop the
+#     repeated count, e.g. a factor_binary "Non concerné(e)" covering all the NA).
 # Graceful degradation: if any coded missing level lacks a count (e.g. the JSON
 # never went through metadata_add_level_stats()), fall back to a plain label list
-# ("NA: n (pct%) ; label1 ; label2") with no counts and no blank tail — byte-
-# compatible with the previous output. Returns "" when na_n is not computable.
+# ("NA: n (pct%) ; label1 ; label2") with no counts and no blank tail. Returns ""
+# when na_n is not computable.
 .format_missing_summary <- function(na_n, na_pct, missing_levels = list()) {
   if (is.null(na_n) || length(na_n) != 1L || is.na(na_n)) return("")
   prefix <- paste0("NA: ", format(round(na_n), trim = TRUE, scientific = FALSE),
@@ -7396,13 +7510,20 @@ generate_format_script <- function(meta_json,
   disp   <- vapply(missing_levels, function(ml) ml$orig_label %||% "", character(1))
   kept   <- which(counts > 0L & nzchar(disp))
   kept   <- kept[order(counts[kept], decreasing = TRUE)]
-  # length guard: with no kept level, paste0() would recycle to a stray " ".
-  parts  <- if (length(kept)) paste0(counts[kept], " ", disp[kept]) else character(0)
 
-  genuine <- as.integer(round(na_n)) - sum(counts)
+  # No labelled missing level → the "NA: n (pct%)" prefix already says everything;
+  # don't append a bare "<n> vide" or unlabelled coded sentinels (redundant with NA).
+  if (length(kept) == 0L) return(prefix)
+
+  na_tot <- as.integer(round(na_n))
+  # A single labelled level that accounts for ALL the NA → its count merely repeats
+  # na_n (e.g. "9804 Non concerné(e)" under "NA: 9804 (88%)"); show the label alone.
+  if (length(kept) == 1L && counts[[kept]] == na_tot)
+    return(paste0(prefix, " ; ", disp[[kept]]))
+
+  parts   <- paste0(counts[kept], " ", disp[kept])
+  genuine <- na_tot - sum(counts)
   if (genuine > 0L) parts <- c(parts, paste0(genuine, " vide"))
-
-  if (length(parts) == 0L) return(prefix)
   paste0(prefix, " ; ", paste(parts, collapse = " ; "))
 }
 
@@ -7412,6 +7533,7 @@ generate_format_script <- function(meta_json,
     .row_type = "value", .h_level = NA_integer_, .block_id = NA_integer_,
     .block_kind = NA_character_, .is_double = FALSE, .stat_rule = FALSE,
     .is_binary = FALSE, .is_first = FALSE, .is_block_last = FALSE,
+    .battery = NA_character_,
     h = NA_character_, variable = NA_character_, type = NA_character_,
     role = NA_character_, description = NA_character_, na = NA_character_,
     val = NA_character_, n = NA_real_, pct = NA_real_,
@@ -7419,6 +7541,91 @@ generate_format_script <- function(meta_json,
     question_prefix = NA_character_
   )
   utils::modifyList(base, list(...))
+}
+
+# Ready-to-use dplyr selector for a battery's variables (their final `new_name`s):
+# the longest common prefix when it is UNIQUE to the battery (use with
+# starts_with(), e.g. "PAP_"); otherwise the pipe-joined member names (use with
+# matches(), e.g. "V1|V2|V3"). `all_names` = every variable's final name, so the
+# prefix is rejected if any variable OUTSIDE the battery also starts with it.
+.battery_selector <- function(members, all_names) {
+  members <- unique(members[nzchar(members)])
+  if (length(members) == 0L) return(NA_character_)
+  if (length(members) == 1L) return(members)
+  chars <- strsplit(members, "", fixed = TRUE)
+  n_min <- min(lengths(chars))
+  lcp   <- ""
+  if (n_min > 0L) for (k in seq_len(n_min)) {
+    ck <- vapply(chars, `[[`, character(1), k)
+    if (length(unique(ck)) == 1L) lcp <- paste0(lcp, ck[[1]]) else break
+  }
+  outsiders <- setdiff(all_names, members)
+  if (nzchar(lcp) && !any(startsWith(outsiders, lcp))) lcp
+  else paste(members, collapse = "|")
+}
+
+# Front-matter fields for the codebook, one entry per non-empty survey_* config
+# scalar (each becomes its OWN row). Returns list(key, text); text is a markdown
+# string (bold prefix + value). fr = FALSE switches the prefixes to English.
+.cb_frontmatter_fields <- function(config, fr = TRUE) {
+  g <- function(k) trimws(as.character(config[[k]] %||% ""))
+  spec <- list(                                  # field, fr prefix, en prefix
+    c("survey_description", "",            ""),
+    c("survey_population",  "Champ",       "Population"),
+    c("survey_source",      "Source",      "Source"),
+    c("survey_producer",    "Producteur",  "Producer"),
+    c("survey_distributor", "Diffuseur",   "Distributor"),
+    c("survey_methodology", "Méthodologie", "Methodology"))
+  out <- list()
+  for (s in spec) {
+    v <- g(s[[1]]); if (!nzchar(v)) next
+    pre <- if (fr) s[[2]] else s[[3]]
+    out[[length(out) + 1L]] <- list(key = s[[1]], text = if (nzchar(pre)) paste0("**", pre," :** ", v) else v)
+  }
+  out
+}
+
+# Tokenise a small markdown string into (text, bold, italic) runs. `**bold**` is
+# matched before `*italic*` (alternation order); markers do not cross newlines.
+.md_tokens <- function(text) {
+  pat <- "\\*\\*(.+?)\\*\\*|\\*(.+?)\\*"
+  m   <- gregexpr(pat, text, perl = TRUE)[[1]]
+  if (m[[1]] == -1L) return(list(list(text = text, bold = FALSE, italic = FALSE)))
+  starts <- as.integer(m); lens <- attr(m, "match.length")
+  toks <- list(); pos <- 1L
+  for (j in seq_along(starts)) {
+    s <- starts[[j]]; len <- lens[[j]]
+    if (s > pos)
+      toks[[length(toks) + 1L]] <- list(text = substr(text, pos, s - 1L),
+                                        bold = FALSE, italic = FALSE)
+    matched <- substr(text, s, s + len - 1L)
+    if (startsWith(matched, "**"))
+      toks[[length(toks) + 1L]] <- list(text = substr(matched, 3L, nchar(matched) - 2L),
+                                        bold = TRUE, italic = FALSE)
+    else
+      toks[[length(toks) + 1L]] <- list(text = substr(matched, 2L, nchar(matched) - 1L),
+                                        bold = FALSE, italic = TRUE)
+    pos <- s + len
+  }
+  if (pos <= nchar(text))
+    toks[[length(toks) + 1L]] <- list(text = substr(text, pos, nchar(text)),
+                                      bold = FALSE, italic = FALSE)
+  toks
+}
+
+# Convert a markdown string to an openxlsx2 rich-text object: `**` -> bold,
+# `*` -> italic, newlines kept. Runs concatenated with `+` (the pattern the NA
+# prefix cell already uses). Returns a single plain run if there is no markup.
+.md_to_fmt_txt <- function(text, font = "DejaVu Sans", size = 10) {
+  ft <- NULL
+  for (tk in .md_tokens(text)) {
+    if (!nzchar(tk$text)) next
+    piece <- openxlsx2::fmt_txt(tk$text, bold = tk$bold, italic = tk$italic,
+                                font = font, size = size)
+    ft <- if (is.null(ft)) piece else ft + piece
+  }
+  if (is.null(ft)) ft <- openxlsx2::fmt_txt(text, font = font, size = size)
+  ft
 }
 
 #' Build the long codebook tibble (internal).
@@ -7429,8 +7636,7 @@ generate_format_script <- function(meta_json,
 #'
 #' @return A tibble with display columns + internal (dot-prefixed) columns used
 #'   by \code{.cb_write_xlsx()}. Carries attribute \code{"any_new_label"}.
-.cb_build_tibble <- function(json_data, lang = "fr", natural_order = FALSE,
-                             battery_column = FALSE) {
+.cb_build_tibble <- function(json_data, lang = "fr", natural_order = FALSE) {
   entries   <- .gfs_build_entries(json_data$variables)
   json_vars <- json_data$variables
   config    <- json_data$config
@@ -7448,6 +7654,29 @@ generate_format_script <- function(meta_json,
   prev_battery <- ""            # last rendered battery title (for #### boundaries)
 
   push <- function(r) rows[[length(rows) + 1L]] <<- r
+
+  # --- Per-battery selection helper (final `new_name`s) -------------------
+  # One ready-to-use dplyr selector per true battery, so the codebook's
+  # question_prefix column lets an advanced user reselect a whole battery.
+  all_names   <- vapply(entries, function(e) e$new_name %||% "", character(1))
+  batt_of     <- vapply(entries, function(e) e$battery  %||% "", character(1))
+  batt_select <- list()
+  for (title in unique(batt_of[nzchar(batt_of)]))
+    batt_select[[title]] <- .battery_selector(all_names[batt_of == title], all_names)
+
+  # --- Survey front-matter: level-1 title + ONE row per survey_* field ---
+  fr_lang   <- !identical(lang, "en")
+  title_txt <- trimws(as.character(config$survey_title %||% ""))
+  if (nzchar(title_txt)) {
+    lead <- if (fr_lang) "Dictionnaire des codes – " else "Codebook – "
+    push(.cb_row(.row_type = "title", .h_level = 1L, h = paste0(lead, title_txt)))
+  }
+  for (f in .cb_frontmatter_fields(config, fr_lang))
+    # description holds the field markdown; the survey_population row also carries
+    # the survey's total individual count (config.n_individuals) in the n column.
+    push(.cb_row(.row_type = "frontmatter", description = f$text,
+                 n = if (identical(f$key, "survey_population") && is.finite(n_ind))
+                       n_ind else NA_real_))
 
   for (i in seq_along(entries)) {
     e  <- entries[[i]]
@@ -7492,7 +7721,7 @@ generate_format_script <- function(meta_json,
     if (is.na(na_n_val)) {
       if (is_factor) {
         ns <- vapply(e$levels_sorted,
-                     function(lv) if (is.null(lv$n)) NA_real_ else as.numeric(lv$n),
+                     function(lv) if (is.null(lv[["n"]])) NA_real_ else as.numeric(lv[["n"]]),
                      numeric(1))
         if (!anyNA(ns) && !is.na(n_ind)) {
           na_n_val   <- n_ind - sum(ns)
@@ -7507,9 +7736,13 @@ generate_format_script <- function(meta_json,
     na_str <- .format_missing_summary(na_n_val, na_pct_val, e$missing_levels)
 
     block_kind <- if (is_factor) "factor" else if (is_num) "numeric" else "char"
-    qp <- if (isTRUE(battery_column) && nzchar(cur_batt)) cur_batt else NA_character_
+    # question_prefix now carries a ready-to-use battery selector (not the title);
+    # .battery marks the run for the red rectangle. Both only for true batteries.
+    qp <- if (nzchar(cur_batt)) batt_select[[cur_batt]] %||% NA_character_ else NA_character_
+    bt_tag <- if (nzchar(cur_batt)) cur_batt else NA_character_
     mk <- function(...) .cb_row(
       .block_id = block_id, .block_kind = block_kind, .is_double = is_double,
+      .battery = bt_tag,
       variable = var_disp, type = type_lab, role = role_lab,
       description = e$var_label, na = na_str, question_prefix = qp, ...)
 
@@ -7526,8 +7759,8 @@ generate_format_script <- function(meta_json,
       block_rows <- lapply(lv_list, function(lv) {
         if (!identical(lv$display_label, lv$orig_label)) any_new_label <<- TRUE
         mk(val = lv$display_label,
-           n   = if (is.null(lv$n))   NA_real_ else as.numeric(lv$n),
-           pct = if (is.null(lv$pct)) NA_real_ else as.numeric(lv$pct),
+           n   = if (is.null(lv[["n"]]))   NA_real_ else as.numeric(lv[["n"]]),
+           pct = if (is.null(lv[["pct"]])) NA_real_ else as.numeric(lv[["pct"]]),
            orig_val = lv$orig_label, orig_code = lv$code)
       })
 
@@ -7541,8 +7774,8 @@ generate_format_script <- function(meta_json,
                          collapse = " / ")
       block_rows <- list(mk(
         .is_binary = TRUE,
-        val = disp, n = if (is.null(lv$n)) NA_real_ else as.numeric(lv$n),
-        pct = if (is.null(lv$pct)) NA_real_ else as.numeric(lv$pct),
+        val = disp, n = if (is.null(lv[["n"]])) NA_real_ else as.numeric(lv[["n"]]),
+        pct = if (is.null(lv[["pct"]])) NA_real_ else as.numeric(lv[["pct"]]),
         orig_val = orig_pair, orig_code = lv$code))
 
     } else if (is_factor) {
@@ -7552,8 +7785,8 @@ generate_format_script <- function(meta_json,
       block_rows <- lapply(e$levels_sorted, function(lv) {
         if (!identical(lv$display_label, lv$orig_label)) any_new_label <<- TRUE
         mk(val = .gfs_level_label(lv, e$max_order),
-           n   = if (is.null(lv$n))   NA_real_ else as.numeric(lv$n),
-           pct = if (is.null(lv$pct)) NA_real_ else as.numeric(lv$pct),
+           n   = if (is.null(lv[["n"]]))   NA_real_ else as.numeric(lv[["n"]]),
+           pct = if (is.null(lv[["pct"]])) NA_real_ else as.numeric(lv[["pct"]]),
            orig_val = lv$orig_label, orig_code = lv$code)
       })
 
@@ -7617,13 +7850,16 @@ generate_format_script <- function(meta_json,
 #' Write the styled Excel codebook (internal, openxlsx2).
 #'
 #' Column order: h | variable | description | type | role | na | val | n | freq |
-#' sep (empty) | orig_val | orig_code. All borders are black, thin. Each variable
-#' block is boxed (top+bottom, skipping h + the empty sep column) so battery runs
-#' separated by spacer rows keep their upper border. The empty sep column carries
-#' only vertical borders; orig_val gets a left border, orig_code a right border
-#' (also the rightmost column). Header/empty/title rows carry no block borders.
+#' sep (empty) | orig_val | orig_code | question_prefix (last, only when the JSON
+#' has ≥1 true battery). All per-block borders are black, thin. Each variable block
+#' is boxed (top+bottom, skipping h + the empty sep column) so battery runs keep
+#' their upper border. The empty sep column carries only vertical borders; orig_val
+#' gets a left border, orig_code a right border. Header/empty/title/front-matter
+#' rows carry no block borders. A top level-1 title + a rich-text front-matter cell
+#' (survey metadata) precede the variables. Each true battery gets a dark-red medium
+#' rectangle around its valeur|n|freq block, and its selector cell (question_prefix)
+#' merged across the whole battery.
 .cb_write_xlsx <- function(cb, path, lang = "fr", orig_val_kept = TRUE,
-                           battery_column = FALSE,
                            title_mode = c("overflow", "merge"),
                            freeze = TRUE) {
   if (!requireNamespace("openxlsx2", quietly = TRUE))
@@ -7636,11 +7872,20 @@ generate_format_script <- function(meta_json,
   cm_to_pt <- function(cm) cm * 28.3465
   RED   <- "FFA10D2E"
   black <- openxlsx2::wb_color("black")
+  red   <- openxlsx2::wb_color(hex = RED)
+
+  # The battery selector column + red rectangle are added iff the JSON has any
+  # true battery (a non-NA .battery run) — no argument needed. Batteries are
+  # contiguous, so each is a single row range (reused for the merge + the box).
+  has_battery <- any(!is.na(cb$.battery))
+  batt_titles <- unique(cb$.battery[!is.na(cb$.battery)])
+  batt_ranges <- lapply(batt_titles,
+                        function(t) range(which(!is.na(cb$.battery) & cb$.battery == t)))
 
   disp_cols <- c("h", "variable", "description", "type", "role", "na",
                  "val", "n", "pct", "sep",
                  if (orig_val_kept) "orig_val", "orig_code",
-                 if (isTRUE(battery_column)) "question_prefix")
+                 if (has_battery) "question_prefix")
   ci   <- setNames(seq_along(disp_cols), disp_cols)
   K    <- length(disp_cols)
   hdr  <- .cb_headers(lang)
@@ -7652,10 +7897,19 @@ generate_format_script <- function(meta_json,
   # --- data frame to write: add empty sep col, blank var-level on non-first rows
   cb$sep <- NA_character_
   dat <- as.data.frame(cb[disp_cols], stringsAsFactors = FALSE)
-  var_lvl <- intersect(c("variable", "description", "type", "role", "na", "question_prefix"),
-                       disp_cols)
+  # question_prefix is merged per BATTERY (not per variable), so it is handled
+  # separately below — keep it out of the per-block var-level blanking/merge.
+  var_lvl <- intersect(c("variable", "description", "type", "role", "na"), disp_cols)
   non_first <- !(cb$.is_first %in% TRUE)
   for (cc in var_lvl) dat[non_first, cc] <- NA
+
+  # Battery selector: keep the value on the battery's FIRST row only; the rest are
+  # blanked and the whole run is merged into one (wrapped) cell further below.
+  if (has_battery && "question_prefix" %in% disp_cols) {
+    keep_rows <- vapply(batt_ranges, `[`, integer(1), 1L)
+    blank <- setdiff(which(!is.na(cb$.battery)), keep_rows)
+    if (length(blank)) dat$question_prefix[blank] <- NA
+  }
 
   # Factor frequencies are stored as 0-100 percentages; store the 0-1 fraction so
   # Excel's "0%" number format renders them (numeric sd on mean rows is untouched).
@@ -7704,7 +7958,7 @@ generate_format_script <- function(meta_json,
             sep = "", h = "")
   al_wrap <- c(variable = TRUE, description = TRUE, type = TRUE, role = TRUE, na = TRUE,
                val = TRUE, n = FALSE, pct = FALSE, orig_val = FALSE, orig_code = FALSE,
-               question_prefix = TRUE, sep = FALSE, h = FALSE)
+               question_prefix = TRUE, sep = FALSE, h = FALSE)  # merged per battery -> wrap
   sd_fmt <- "\"σ\"0.0"
 
   # Accumulate (excel row, excel col, style key) for every value cell.
@@ -7839,8 +8093,8 @@ generate_format_script <- function(meta_json,
   title_idx <- which(cb$.row_type == "title")
   for (i in title_idx) {
     lvl  <- cb$.h_level[i]
-    size <- c(`2` = 16, `3` = 14, `4` = 10)[[as.character(lvl)]]
-    hcm  <- c(`2` = 5,  `3` = 2,  `4` = 1)[[as.character(lvl)]]
+    size <- c(`1` = 18, `2` = 16, `3` = 14, `4` = 10)[[as.character(lvl)]]
+    hcm  <- c(`1` = 2,  `2` = 5,  `3` = 2,  `4` = 1)[[as.character(lvl)]]
     row_dims <- openxlsx2::wb_dims(rows = xr(i), cols = seq_len(K))
     if (identical(title_mode, "merge"))
       wb <- openxlsx2::wb_merge_cells(wb, "Codebook", dims = row_dims)
@@ -7853,6 +8107,37 @@ generate_format_script <- function(meta_json,
     wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i), heights = cm_to_pt(hcm))
   }
 
+  # Survey front-matter: ONE row per survey_* field. The metadata text (bold
+  # prefixes + markdown ** / * converted) fills a cell spanning description..valeur
+  # (merged for width); the survey_population row also shows the total individual
+  # count in the n column. Merged cells don't auto-fit, so set an explicit height
+  # from an estimate (~118 chars/line over the merged width).
+  fm_chars <- 118
+  for (i in which(cb$.row_type == "frontmatter")) {
+    md <- cb$description[[i]]
+    wb <- openxlsx2::wb_merge_cells(wb, "Codebook",
+            dims = openxlsx2::wb_dims(rows = xr(i), cols = ci[["description"]]:ci[["val"]]))
+    d    <- openxlsx2::wb_dims(rows = xr(i), cols = ci[["description"]])
+    rich <- tryCatch(.md_to_fmt_txt(md), error = function(e) NULL)
+    wb   <- openxlsx2::wb_add_data(wb, "Codebook",
+              x = if (is.null(rich)) md else rich, dims = d, col_names = FALSE)
+    wb   <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
+              horizontal = "left", vertical = "top", wrap_text = TRUE)
+    segs    <- strsplit(md, "\n", fixed = TRUE)[[1]]; if (!length(segs)) segs <- ""
+    n_lines <- sum(pmax(1L, ceiling(nchar(segs) / fm_chars)))
+    wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i),
+            heights = min(max(n_lines * 14.5 + 6, 16), 4000))
+    # Total individual count (config.n_individuals) in the n column, top-aligned.
+    if (!is.na(cb$n[[i]])) {
+      dn <- openxlsx2::wb_dims(rows = xr(i), cols = ci[["n"]])
+      wb <- openxlsx2::wb_add_numfmt(wb, "Codebook", dims = dn, numfmt = "#,##0")
+      wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = dn, name = "DejaVu Sans",
+              size = 10, bold = TRUE)
+      wb <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = dn,
+              horizontal = "right", vertical = "top")
+    }
+  }
+
   # Empty battery-closing rows: a genuinely blank 2 cm row that visually detaches
   # the variables below a battery from it.
   spacer_idx <- which(cb$.row_type == "spacer")
@@ -7860,12 +8145,31 @@ generate_format_script <- function(meta_json,
     wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(spacer_idx),
                                         heights = cm_to_pt(2))
 
+  # Per battery: (1) a striking dark-red rectangle around its summary table,
+  # columns valeur | n | freq only (update = TRUE layers over the black
+  # per-variable borders without disturbing numfmt/fill); (2) merge the selector
+  # column into one wrapped cell spanning the whole (contiguous) battery.
+  if (has_battery) {
+    qp_col <- "question_prefix" %in% disp_cols
+    for (rg in batt_ranges) {
+      rows_ex <- xr(rg[[1]]):xr(rg[[2]])
+      wb <- openxlsx2::wb_add_border(wb, "Codebook", update = TRUE,
+              dims = openxlsx2::wb_dims(rows = rows_ex, cols = ci[["val"]]:ci[["pct"]]),
+              top_border = "medium", bottom_border = "medium",
+              left_border = "medium", right_border = "medium",
+              top_color = red, bottom_color = red, left_color = red, right_color = red)
+      if (qp_col && rg[[2]] > rg[[1]])
+        wb <- openxlsx2::wb_merge_cells(wb, "Codebook",
+                dims = openxlsx2::wb_dims(rows = rows_ex, cols = ci[["question_prefix"]]))
+    }
+  }
+
   # Column widths (description + na wider; variable widened only when names wrap).
   var_maxlen <- suppressWarnings(max(nchar(cb$variable), na.rm = TRUE))
   var_w      <- if (is.finite(var_maxlen) && var_maxlen > 16) 27 else 18
-  widths <- c(h = 2.5, variable = var_w, description = 72, type = 12, role = 12,
-              na = 30, val = 30, n = 9, pct = 10, sep = 2, orig_val = 60,
-              orig_code = 12, question_prefix = 26)
+  widths <- c(h = 2.5, variable = var_w, description = 60, type = 9.2, role = 8,
+              na = 20, val = 25, n = 9, pct = 8, sep = 2, orig_val = 50,
+              orig_code = 10, question_prefix = 26)
   wb <- openxlsx2::wb_set_col_widths(wb, "Codebook", cols = seq_len(K),
                                      widths = unname(widths[disp_cols]))
 
@@ -7905,10 +8209,6 @@ generate_format_script <- function(meta_json,
 #'                     df-first mode).
 #' @param lang         \code{"fr"} (default) or \code{"en"} for column headers,
 #'                     type/role and summary-statistic labels.
-#' @param battery_column Logical. When \code{TRUE}, add a last column
-#'                     (\code{prefixe_question} / \code{question}) repeating each
-#'                     variable's \code{battery} title per row — a flat, filterable
-#'                     view. Off by default (the \code{####} header already shows it).
 #' @param keep_original Logical. When \code{TRUE}, factor value labels are shown
 #'                     exactly as stored, sorted by original code, with no numeric
 #'                     ordering prefix (and no binary 1-row collapse). Forced
@@ -7931,7 +8231,6 @@ generate_format_script <- function(meta_json,
 generate_codebook <- function(meta_json,
                               output_path      = NULL,
                               lang             = "fr",
-                              battery_column   = FALSE,
                               keep_original    = FALSE,
                               ...) {
   lang <- match.arg(lang, c("fr", "en"))
@@ -7962,14 +8261,12 @@ generate_codebook <- function(meta_json,
 
   json_data <- .read_meta_json(json_path)
   cb <- .cb_build_tibble(json_data, lang = lang,
-                         natural_order = isTRUE(keep_original),
-                         battery_column = isTRUE(battery_column))
+                         natural_order = isTRUE(keep_original))
 
   orig_val_kept <- isTRUE(attr(cb, "any_new_label"))
   if (!orig_val_kept) cb$orig_val <- NULL
 
-  .cb_write_xlsx(cb, output_path, lang = lang, orig_val_kept = orig_val_kept,
-                 battery_column = isTRUE(battery_column))
+  .cb_write_xlsx(cb, output_path, lang = lang, orig_val_kept = orig_val_kept)
   message(sprintf("Codebook written to %s (%d variables, %d rows)",
                   output_path, length(unique(stats::na.omit(cb$.block_id))), nrow(cb)))
 

@@ -79,9 +79,24 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
    → Simplified: no codebook / no "## Variable list" / no "# Select and reorder" sections;
      each block applies its var label inline via
      "label" -> varlab  then  ... |> `attr<-`("label", varlab)  (survives conversion)
+   → Emits the JSON outline as RStudio/Positron FOLDABLE section comments (same headers/battery
+     source as generate_codebook): each var's `headers` (##/###/####) → a "<##> Title ----" section
+     (level = leading-# count clamped 2..4, #s kept so nesting matches the codebook); the "Rename
+     variables"/"Format variables" banners are single-# level-1 containers. True batteries render a
+     foldable "#### ◆ Batterie — <title>  (N variables) ----" opener (via `.gfs_battery_open`, N =
+     contiguous run length) closed by a plain "# └── fin batterie ──" rule (`.gfs_battery_close`,
+     no trailing ----, so it lives inside the fold). Injected at the top of `.gfs_format_blocks()`'s
+     per-var loop via `prev_battery`, mirroring `.cb_build_tibble()`; `.gfs_section_comment()` does
+     the #-count/clamp/strip. The per-var "# \"VAR\" role" comment stays a plain (non-section) comment.
+   → Section titles get DECORATIVE bars for visibility: level 2 (survey blocs) a heavy "# ═…═" box
+     above+below, level 3 (subthemes) a light "# ─…─" rule above, level 4 plain. KEY: the bars (and
+     the top file banner, now `banner_bar`) use BOX-DRAWING chars (═ ═ / ─ ─), NOT ASCII
+     #/=/- — a pure "# ====" / "####…" rule line matches the "#+ <label> [-=#]{4,}$" section rule with
+     an EMPTY label and pollutes the Positron/RStudio outline; box chars can't match, so only the
+     "## Title ----" line is ever an outline node. `.gfs_section_comment()` returns a char VECTOR.
+     All new box/marker glyphs are \u-escaped (Windows source-encoding safety, file convention).
 
-7. generate_codebook(meta_json, output_path = NULL, lang = "fr",
-                      battery_column = FALSE, keep_original = FALSE, ...)
+7. generate_codebook(meta_json, output_path = NULL, lang = "fr", keep_original = FALSE, ...)
    → Styled .xlsx codebook (openxlsx2): one row per level / numeric stat, variable
      info merged over rows, headers, frozen panes, selective borders.
    → Headers are DATA-DRIVEN from the JSON (no more titles/binary_batteries args): each
@@ -89,7 +104,19 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
      `battery` field the #### question-battery title (one header per run). A battery is CLOSED
      by an empty 2 cm row, unless the next variable already carries a header (a new #### battery
      or a ##/### outline) — so standalone variables never read as part of the battery above them.
-     Optional battery_column adds a last prefixe_question column (per-row battery title).
+   → TOP MATTER (config-driven): config.survey_title → a level-1 `# ` title row
+     "Dictionnaire des codes – <title>" (fr) / "Codebook – …" (en); then ONE row PER non-empty
+     survey_* field (survey_description + Champ / Producteur / Diffuseur / Source / Méthodologie,
+     from `.cb_frontmatter_fields()`), each spanning columns description..valeur (merged for width),
+     bold prefixes + markdown ** / * converted to Excel bold/italic via `.md_to_fmt_txt()`
+     (`.md_tokens()` splits the runs). The survey_population row also shows config.n_individuals in
+     the `n` column. Merged rows get an explicit height (est. lines), since merges don't auto-fit.
+   → BATTERIES: when the JSON has ≥1 true battery, a last `prefixe_question` column is added
+     AUTOMATICALLY (no arg) holding a ready-to-use dplyr SELECTOR of the battery's final
+     `new_name`s — the unique common prefix (use starts_with(), e.g. "PAP_") or, failing that,
+     the pipe-joined names (use matches(), "V1|V2"), from `.battery_selector()`; merged into one
+     wrapped cell across the (contiguous) battery. Each true battery also gets a dark-red MEDIUM
+     rectangle around its valeur|n|freq block (`wb_add_border(update=TRUE)`, numfmt preserved).
    → Reads JSON only — NO df param (examples/NA now stored in the JSON by
      metadata_add_level_stats). NA cell = missing-value summary (see below), all types.
    → meta_json may be a DATA FRAME: runs extract + metadata_add_level_stats silently on a
@@ -117,14 +144,22 @@ Users can (and do) manually edit the JSON between AI steps. Key fields per varia
 - `levels.{code}.order`: integer for ordinal level ordering (missing levels have none)
 - `config.n_individuals`: total row count (written by extract_survey_metadata / backfilled by
   metadata_add_level_stats).
+- `config.survey_*` (scalar free text, all optional): `survey_title` (codebook level-1 heading),
+  `survey_description` (also read by ai_build_outline), `survey_population`, `survey_producer`,
+  `survey_source`, `survey_distributor`, `survey_methodology`. Set via extract_survey_metadata()
+  args (source of truth when supplied, preserved on re-extract) or by editing the JSON. `_description`
+  / `_methodology` support markdown ** / *. Each new scalar MUST be in the `cfg_fields` allow-list AND
+  the scalar-branch list in `.write_meta_json()` (both extended together as `.survey_scalars`), else
+  it is dropped on write.
 - `na_n` / `na_pct` (top-level, per variable, ALL types): count/percent of individuals NA after
   formatting = NA + missing-coded. Written by metadata_add_level_stats. Codebook prefers these;
   falls back to n_individuals − Σ(non-missing level n) for factors on older JSONs.
 - `examples` (top-level, text/"other" vars only): first 5 distinct raw values, for the codebook.
 - `battery` (top-level, per variable): title of the TRUE question battery the variable belongs to
   (membership + header text in one field, deliberately REPEATED on every member). Only true
-  multi-answer batteries use this field — they alone get the boxed rendering + optional
-  prefixe_question column. Written by ai_build_outline(); preserved on re-extract.
+  multi-answer batteries use this field — they alone get the boxed rendering, the dark-red valeur|n|freq
+  rectangle, and the auto-added prefixe_question SELECTOR column. Written by ai_build_outline();
+  preserved on re-extract.
 - `keep_codes` (top-level, per variable, boolean): TRUE keeps the ORIGINAL level codes as the final
   numbering (prefix = the code's LEADING number `^\s*(\d+)`, zero-padded to the widest code; levels
   sorted by that number) instead of clean sequential numbering — for nomenclatures (region, month, PCS,
@@ -200,9 +235,16 @@ empty thin `sep` column separates the value block from the original-label block)
 are drawn **only for factor blocks** — the only ones that fill them; non-factor blocks are boxed
 `variable → pct` with just the `val` left separator. Each factor block is boxed top+bottom (skipping
 `h` + `sep`), independently, so adjacent battery members (now under one `####` header, no blank
-spacers) keep their own box; `orig_val` a left border, `orig_code` a right border (rightmost). An
-optional `battery_column` adds a rightmost `prefixe_question`/`question` column (styled, outside the
-box). Header/title rows carry no block borders.
+spacers) keep their own box; `orig_val` a left border, `orig_code` a right border (rightmost). When the
+JSON has ≥1 true battery, a rightmost `prefixe_question`/`question` column is added AUTOMATICALLY (no
+arg) holding a `.battery_selector()` string (unique common prefix → `starts_with()`, else pipe-joined
+names → `matches()`), merged into one wrapped cell per (contiguous) battery, styled outside the box.
+Each true battery also gets a dark-red MEDIUM rectangle around its `valeur|n|freq` block
+(`wb_add_border(update=TRUE)` overlay, after the xf palette — numfmt/fill preserved; `.battery` internal
+col drives it). A top level-1 `# ` title (`config.survey_title`) + ONE front-matter row per survey_*
+field (each merging `description..valeur`, rich text via `.md_to_fmt_txt()`; `config.n_individuals` in
+the `n` column of the survey_population row; explicit row height since merges don't auto-fit) precede the
+variables. Header/title/front-matter rows carry no block borders.
 `description` is always bold. Widths: `description` 72, `missing_values` 30, `orig_val` 60; `variable`
 is 18 but widens to 27 only when the longest name would wrap. Section titles sit in column `h` and
 **overflow** into the empty cells to their right: the data write uses `na = NULL` so trailing cells are
@@ -214,7 +256,9 @@ format-script `# Valeurs manquantes` comment): `NA: <na_n> (<na_pct>%) ; <n1> <l
 vide` — **only missing levels with a real label** are listed (biggest→smallest); unlabelled coded
 sentinels (e.g. numeric 999) fold into the `NA:` total, never shown by code; this applies to numeric
 vars too. Genuine blanks (`na_n − Σ all counts`) appended last as `<n> vide`; only `NA: <n>` (front)
-is bolded. Graceful (any missing level lacks `n`): plain labelled-only list (no counts / no `vide`).
+is bolded. TWO redundancy guards: NO labelled level → just `NA: n (pct%)` (no bare `<n> vide`); a SINGLE
+labelled level whose count == na_n → `NA: n (pct%) ; <label>` (drop the repeated count). Graceful (any
+missing level lacks `n`): plain labelled-only list (no counts / no `vide`).
 It wraps for all types EXCEPT factor binaries (kept on one row). `orig_val`/`orig_code` never wrap;
 text/other `valeur` = `Ex. : "v1", "v2", "v3", "v4", …` (4 values).
 
@@ -241,7 +285,8 @@ reads as a table of contents. A `#### ` is either a **battery** or a **thematic 
 they leave nothing loose. Two storage concerns, deliberately split: `headers` holds the outline as
 **start-markers** (`## `/`### ` user anchors + non-battery `#### ` groups, rendered once, level = `#`
 count clamped 2..4), and `battery` (REPEATED on every member) flags a **true multi-answer battery** —
-which alone gets the boxed rendering + closing spacer + optional prefixe_question column. The codebook
+which alone gets the boxed rendering + closing spacer + the auto-added prefixe_question selector column
+and a dark-red valeur|n|freq rectangle. The codebook
 renderer already treats a `#### ` in `headers` as a size-10 title, so non-battery groups need **no
 renderer change**. Input to the model = every var in order with the fixed `## `/`### ` sections
 interleaved as `{"section":"..."}` rows + `config.survey_description` + a deterministic candidate
@@ -408,6 +453,8 @@ assign("ai_call_claude", mock_ai(response_text), envir = globalenv())
 - French accented characters use `\uXXXX` escapes in test data (e.g., `\u00e9` for é)
 - Variable names in data are always turned UPPER_CASE in `import_survey()`
 - R function names are snake_case with dots for internal helpers (e.g., `.detect_role_v3`)
+- Read JSON level fields with EXACT `lv[["n"]]` / `lv[["pct"]]`, never `lv$n` — R `$` partial-matches
+  and would resolve `lv$n` to `lv$new_label` on a level that has no `n` (silent NA-coercion warnings)
 
 ---
 

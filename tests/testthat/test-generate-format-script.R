@@ -140,7 +140,7 @@ test_that("D2: 10-member battery -> positives 01..10, negative 99 (width tracks 
   expect_equal(.gfs_level_label(entries[[1]]$levels_sorted[[2]], entries[[1]]$max_order), "99-Pas item1")
 })
 
-test_that("D3: a battery with a non-binary member is left untouched + reports", {
+test_that("D3: a battery with a non-binary member is left untouched (silently)", {
   vars <- batt_vars(2)
   vars$B3 <- list(var_label = "Nominal", role = "factor_nominal", new_name = "B3",
     battery = "Batterie",
@@ -148,7 +148,7 @@ test_that("D3: a battery with a non-binary member is left untouched + reports", 
       "1" = list(order = 1L, label = "a", new_label = "a", n = 1L, pct = 33),
       "2" = list(order = 2L, label = "b", new_label = "b", n = 1L, pct = 33),
       "3" = list(order = 3L, label = "c", new_label = "c", n = 1L, pct = 34)))
-  expect_message(entries <- .gfs_build_entries(vars), "skipped")
+  expect_no_message(entries <- .gfs_build_entries(vars))   # no more "skipped" chatter
   # Members keep their normal per-variable numbering (max_order == 2), not the sentinel.
   expect_equal(entries[[1]]$max_order, 2L)
   expect_equal(entries[[1]]$levels_sorted[[2]]$order, 2L)
