@@ -7775,6 +7775,93 @@ generate_format_script <- function(meta_json,
   paste0(prefix, " ; ", paste(parts, collapse = " ; "))
 }
 
+# --- "How to read" legend content (§ top-matter) --------------------------
+# One markdown line ("**Term** : plain explanation") per PRESENT display column
+# / role / type, written just below the survey front-matter so a non-specialist
+# reader can decode the table. Only items that actually occur in the sheet are
+# emitted (the caller passes the present keys). fr = default, en via lang.
+
+.cb_howto_columns <- function(lang, cols) {
+  fr <- !identical(lang, "en")
+  d <- list(  # key = c(fr_label, fr_text, en_label, en_text)
+    variable        = c("variable", "le nom de code de la variable dans le fichier de données",
+                        "variable", "the variable's code name in the data file"),
+    description     = c("description", "ce que mesure la variable, en clair",
+                        "description", "what the variable measures, in plain words"),
+    type            = c("type", "le type informatique (catégorielle, nombre, texte…)",
+                        "type", "the storage type (factor, number, text…)"),
+    role            = c("role", "le rôle statistique de la variable (voir ci-dessous)",
+                        "role", "the statistical role of the variable (see below)"),
+    na              = c("valeurs_manquantes", "nombre et part de non-réponses (NA), avec le détail des codes manquants",
+                        "missing_values", "count and share of non-responses (NA), with the missing codes"),
+    val             = c("valeur", "les modalités (réponses possibles) ou, pour un nombre, les statistiques résumées",
+                        "value", "the categories (possible answers) or, for a number, summary statistics"),
+    n               = c("n", "le nombre d'individus concernés par chaque modalité",
+                        "n", "the number of individuals in each category"),
+    pct             = c("freq", "la fréquence (part en %) de chaque modalité — la barre bleue la représente",
+                        "freq", "the frequency (% share) of each category — shown by the blue bar"),
+    orig_val        = c("libellé_origine", "le libellé d'origine de la modalité, avant simplification",
+                        "original_label", "the original category label, before simplification"),
+    orig_code       = c("code_origine", "le code d'origine de la modalité dans les données brutes",
+                        "original_code", "the original category code in the raw data"),
+    question_prefix = c("prefixe_question", "un sélecteur dplyr prêt à l'emploi pour toute la batterie de questions",
+                        "question_prefix", "a ready-to-use dplyr selector for the whole question battery"))
+  out <- character(0)
+  for (k in cols) {
+    v <- d[[k]]; if (is.null(v)) next
+    out <- c(out, if (fr) paste0("**", v[[1]], "** : ", v[[2]])
+                  else    paste0("**", v[[3]], "** : ", v[[4]]))
+  }
+  out
+}
+
+.cb_howto_roles <- function(lang, role_keys) {
+  fr <- !identical(lang, "en")
+  d <- list(
+    factor_binary  = c("binaire", "deux réponses possibles (ex. oui / non)",
+                       "binary", "two possible answers (e.g. yes / no)"),
+    factor_nominal = c("nominale", "catégories sans ordre (ex. région, sexe)",
+                       "nominal", "unordered categories (e.g. region, sex)"),
+    factor_ordinal = c("ordinale", "catégories ordonnées (ex. jamais < parfois < souvent)",
+                       "ordinal", "ordered categories (e.g. never < sometimes < often)"),
+    integer_count  = c("comptage", "un nombre entier qui dénombre (ex. nombre d'activités)",
+                       "count", "a whole number counting something (e.g. number of activities)"),
+    integer        = c("discret", "un nombre entier",
+                       "discrete", "a whole number"),
+    integer_scale  = c("échelle", "une échelle numérique",
+                       "scale", "a numeric scale"),
+    double         = c("continue", "un nombre à décimales (ex. un montant, une durée)",
+                       "continuous", "a number with decimals (e.g. an amount, a duration)"),
+    identifier     = c("identifiant", "un code identifiant chaque individu (non analysable)",
+                       "identifier", "a code identifying each individual (not analysable)"))
+  out <- character(0)
+  for (k in role_keys) {
+    v <- d[[k]]; if (is.null(v)) next
+    out <- c(out, if (fr) paste0("**", v[[1]], "** : ", v[[2]])
+                  else    paste0("**", v[[3]], "** : ", v[[4]]))
+  }
+  out
+}
+
+# Types glossary, keyed by the DISPLAY label .cb_type_label() produces (so the
+# key set matches per language). Only the labels present in the sheet are passed.
+.cb_howto_types <- function(lang, type_labels) {
+  g <- if (identical(lang, "en")) list(
+    factor = "a categorical variable (a factor)", integer = "a whole number",
+    double = "a number with decimals", chr = "free text",
+    logical = "true or false", date = "a date"
+  ) else list(
+    "catégorielle" = "une variable à catégories (un facteur)", "nb entier" = "un nombre entier",
+    "nb décimal" = "un nombre à décimales", "texte" = "du texte libre",
+    "booléenne" = "vrai ou faux", "date" = "une date")
+  out <- character(0)
+  for (t in type_labels) {
+    v <- g[[t]]; if (is.null(v)) next
+    out <- c(out, paste0("**", t, "** : ", v))
+  }
+  out
+}
+
 # One empty codebook row (all fields blank / typed NA).
 .cb_row <- function(...) {
   base <- list(
@@ -7782,6 +7869,7 @@ generate_format_script <- function(meta_json,
     .block_kind = NA_character_, .is_double = FALSE, .stat_rule = FALSE,
     .is_binary = FALSE, .is_first = FALSE, .is_block_last = FALSE,
     .battery = NA_character_, .orig_name = NA_character_,
+    .role_key = NA_character_, .toc_target = NA_character_,
     h = NA_character_, variable = NA_character_, type = NA_character_,
     role = NA_character_, description = NA_character_, na = NA_character_,
     val = NA_character_, n = NA_real_, pct = NA_real_,
@@ -7913,19 +8001,13 @@ generate_format_script <- function(meta_json,
   for (title in unique(batt_of[nzchar(batt_of)]))
     batt_select[[title]] <- .battery_selector(all_names[batt_of == title], all_names)
 
-  # --- Survey front-matter: level-1 title + ONE row per survey_* field ---
-  fr_lang   <- !identical(lang, "en")
-  title_txt <- trimws(as.character(config$survey_title %||% ""))
-  if (nzchar(title_txt)) {
-    lead <- if (fr_lang) "Dictionnaire des codes – " else "Codebook – "
-    push(.cb_row(.row_type = "title", .h_level = 1L, h = paste0(lead, title_txt)))
-  }
-  for (f in .cb_frontmatter_fields(config, fr_lang))
-    # description holds the field markdown; the survey_population row also carries
-    # the survey's total individual count (config.n_individuals) in the n column.
-    push(.cb_row(.row_type = "frontmatter", description = f$text,
-                 n = if (identical(f$key, "survey_population") && is.finite(n_ind))
-                       n_ind else NA_real_))
+  # The top matter (level-1 title, survey front-matter, "how to read" legend and
+  # the clickable table of contents) is assembled AFTER the variable loop and
+  # PREPENDED to `rows` — the legend needs the roles/columns actually present and
+  # the TOC needs the ordered list of ## / ### sections, both known only afterwards.
+  fr_lang      <- !identical(lang, "en")
+  title_txt    <- trimws(as.character(config$survey_title %||% ""))
+  toc_sections <- list()   # ordered ## / ### sections, for the clickable TOC
 
   for (i in seq_along(entries)) {
     e  <- entries[[i]]
@@ -7941,17 +8023,23 @@ generate_format_script <- function(meta_json,
       push(.cb_row(.row_type = "spacer"))
 
     # --- Outline headers (## / ###) stored on this variable ---------------
-    # The markdown depth sets the level; the "#"s are stripped for display.
+    # The markdown depth sets the level; the "#" markers are KEPT in the display
+    # text (normalised to one space) so the header hierarchy is readable straight
+    # from the xlsx without style detection. ## / ### also feed the TOC.
     for (raw in e$headers) {
-      lvl  <- attr(regexpr("^#+", raw), "match.length")
-      lvl  <- if (lvl < 0) 2L else min(max(lvl, 2L), 4L)
-      disp <- trimws(sub("^#+\\s*", "", raw))
+      lvl   <- attr(regexpr("^#+", raw), "match.length")
+      lvl   <- if (lvl < 0) 2L else min(max(lvl, 2L), 4L)
+      clean <- trimws(sub("^#+\\s*", "", raw))
+      disp  <- paste0(strrep("#", lvl), " ", clean)
       push(.cb_row(.row_type = "title", .h_level = as.integer(lvl), h = disp))
+      if (lvl %in% c(2L, 3L))
+        toc_sections[[length(toc_sections) + 1L]] <-
+          list(target = disp, label = clean, level = lvl)
     }
 
     # --- Battery #### header, emitted when the battery title changes -------
     if (nzchar(cur_batt) && !identical(cur_batt, prev_battery))
-      push(.cb_row(.row_type = "title", .h_level = 4L, h = cur_batt))
+      push(.cb_row(.row_type = "title", .h_level = 4L, h = paste0("#### ", cur_batt)))
     prev_battery <- cur_batt
 
     # --- Variable-level fields (repeated on every row of the block) --------
@@ -7991,7 +8079,7 @@ generate_format_script <- function(meta_json,
     bt_tag <- if (nzchar(cur_batt)) cur_batt else NA_character_
     mk <- function(...) .cb_row(
       .block_id = block_id, .block_kind = block_kind, .is_double = is_double,
-      .battery = bt_tag, .orig_name = e$orig_name,
+      .battery = bt_tag, .orig_name = e$orig_name, .role_key = e$role,
       variable = var_disp, type = type_lab, role = role_lab,
       description = e$var_label, na = na_str, question_prefix = qp, ...)
 
@@ -8091,6 +8179,54 @@ generate_format_script <- function(meta_json,
             "factor_nominal/ordinal): ", paste(binary_anomalies, collapse = ", "))
   }
 
+  # --- Top matter (prepended): level-1 title, survey front-matter, "how to
+  #     read" legend, clickable table of contents. Built here so the legend can
+  #     list only the columns/types/roles that are actually present. -----------
+  has_batt   <- any(nzchar(batt_of))
+  cols_pres  <- c("variable", "description", "type", "role", "na", "val", "n", "pct",
+                  if (any_new_label) "orig_val", "orig_code",
+                  if (has_batt) "question_prefix")
+  types_pres <- unique(vapply(entries, function(e) .cb_type_label(e$role, e$r_class, lang),
+                              character(1)))
+  roles_pres <- unique(vapply(entries, function(e) e$role %||% "", character(1)))
+
+  top_rows <- list()
+  tpush <- function(r) top_rows[[length(top_rows) + 1L]] <<- r
+  if (nzchar(title_txt)) {
+    lead <- if (fr_lang) "Dictionnaire des codes – " else "Codebook – "
+    tpush(.cb_row(.row_type = "title", .h_level = 1L, h = paste0("# ", lead, title_txt)))
+  }
+  for (f in .cb_frontmatter_fields(config, fr_lang))
+    tpush(.cb_row(.row_type = "frontmatter", description = f$text,
+                  n = if (identical(f$key, "survey_population") && is.finite(n_ind))
+                        n_ind else NA_real_))
+
+  tpush(.cb_row(.row_type = "howto_head",
+                h = if (fr_lang) "Comment lire ce dictionnaire" else "How to read this codebook"))
+  tpush(.cb_row(.row_type = "howto", description = if (fr_lang)
+    "Ce dictionnaire décrit chaque variable de l'enquête, une ligne par modalité de réponse."
+    else "This codebook describes every survey variable, one row per answer category."))
+  tpush(.cb_row(.row_type = "howto",
+                description = if (fr_lang) "**Les colonnes :**" else "**Columns:**"))
+  for (ln in .cb_howto_columns(lang, cols_pres))
+    tpush(.cb_row(.row_type = "howto", description = ln))
+  tr_lines <- c(.cb_howto_types(lang, types_pres), .cb_howto_roles(lang, roles_pres))
+  if (length(tr_lines)) {
+    tpush(.cb_row(.row_type = "howto",
+                  description = if (fr_lang) "**Types et rôles :**" else "**Types and roles:**"))
+    for (ln in tr_lines) tpush(.cb_row(.row_type = "howto", description = ln))
+  }
+
+  if (length(toc_sections)) {
+    tpush(.cb_row(.row_type = "toc_head", h = if (fr_lang) "Sommaire" else "Contents"))
+    for (s in toc_sections) {
+      lbl <- if (s$level == 3L) paste0("    ", s$label) else s$label
+      tpush(.cb_row(.row_type = "toc", description = lbl,
+                    .toc_target = s$target, .h_level = as.integer(s$level)))
+    }
+  }
+  rows <- c(top_rows, rows)
+
   cb <- tibble::as_tibble(data.table::rbindlist(rows, fill = TRUE))
   attr(cb, "any_new_label") <- any_new_label
   cb
@@ -8122,6 +8258,29 @@ generate_format_script <- function(meta_json,
   RED   <- "FFA10D2E"
   black <- openxlsx2::wb_color("black")
   red   <- openxlsx2::wb_color(hex = RED)
+  # Fill palette (ARGB). GREY = zebra stripe; ROSE = battery valeur|n|freq block;
+  # BAND2/BAND3 = ## / ### section bands; role chips per statistical role.
+  GREY  <- "FFF2F2F2"
+  ROSE  <- "FFFDE9ED"
+  BAND2 <- "FFB4C7E7"
+  BAND3 <- "FFD6E0F0"
+  BAR   <- "#7EA6CE"                 # data-bar blue (CF colors use "#RRGGBB")
+  role_fill <- c(
+    factor_binary = "FFDCE6F1", factor_nominal = "FFE2EFDA", factor_ordinal = "FFFCE4D6",
+    integer_count = "FFEDEDED", integer = "FFEDEDED", integer_scale = "FFEDEDED",
+    double = "FFE1E7EF", identifier = "FFF2F2F2", other = "FFF7F7F7", unclear = "FFF7F7F7")
+  # Zebra shade per VARIABLE block, resetting to white after every section header:
+  # a value block is white/grey alternately; frontmatter/legend/toc/spacer stay
+  # white (never entered the block loop). Held constant across a block's rows.
+  stripe_grey <- logical(nrow(cb))
+  { p <- 0L; cur <- 0L
+    for (i in seq_len(length(stripe_grey))) {
+      rt <- cb$.row_type[[i]]
+      if (identical(rt, "value")) {
+        if (isTRUE(cb$.is_first[[i]])) { cur <- p; p <- 1L - p }
+        stripe_grey[[i]] <- (cur == 1L)
+      } else if (identical(rt, "title")) p <- 0L
+    } }
 
   # The battery selector column + red rectangle are added iff the JSON has any
   # true battery (a non-NA .battery run) — no argument needed. Batteries are
@@ -8219,8 +8378,11 @@ generate_format_script <- function(meta_json,
     if (length(b) == 0) next
     kind      <- cb$.block_kind[b[1]]
     is_binary <- isTRUE(cb$.is_binary[b[1]])
+    in_batt   <- !is.na(cb$.battery[b[1]])
+    rk        <- cb$.role_key[b[1]]
     ex        <- xr(b)
     r1 <- min(ex); r2 <- max(ex); m <- length(ex)
+    sgrey <- stripe_grey[b]                # per-row zebra shade (constant per block)
 
     # merge repeated variable-level cells (top-aligned) when >1 row
     if (m > 1) for (cc in var_lvl)
@@ -8255,7 +8417,8 @@ generate_format_script <- function(meta_json,
       hh <- al_h[[nm]]
       vv <- if (nzchar(hh)) "top" else ""
       ww <- if (isTRUE(al_wrap[[nm]])) (if (nm == "na") !is_binary else TRUE) else FALSE
-      ff <- if (nm == "description") "bold" else "reg"
+      ff <- if (nm == "description") "bold"
+            else if (nm %in% c("variable", "question_prefix")) "mono" else "reg"
       nf <- rep("", m)
       if (nm == "n") {
         if (kind == "factor") nf[] <- "#,##0"
@@ -8272,9 +8435,22 @@ generate_format_script <- function(meta_json,
       bb <- (ex == r2) & inhbc
       if (kind == "numeric" && nm %in% c("val", "n", "pct")) bb <- bb | (ex %in% mean_ex)
       bl <- (nm == "val") || (kind == "factor" && nm %in% c("sep", "orig_val"))
-      br <- (kind == "factor" && nm %in% c("sep", "orig_code"))
+      # freq (pct) closes on the right for NON-battery blocks; batteries get the
+      # dark-red rectangle's right edge instead.
+      br <- (kind == "factor" && nm %in% c("sep", "orig_code")) || (nm == "pct" && !in_batt)
+      # Fill token (priority: role chip > battery rose > zebra stripe > none). The
+      # sentinel "none" keeps it a non-empty LAST field so strsplit never drops it.
+      fillv <- rep("none", m)
+      if (nm == "role") {
+        fc <- if (!is.na(rk) && rk %in% names(role_fill)) role_fill[[rk]] else NA_character_
+        if (!is.na(fc)) fillv[] <- fc
+      } else if (in_batt && nm %in% c("val", "n", "pct")) {
+        fillv[] <- ROSE
+      } else if (nm %in% c("variable", "description", "type", "role", "na", "val", "n", "pct")) {
+        fillv[sgrey] <- GREY
+      }
       keys <- paste(ff, hh, vv, if (ww) "1" else "0", nf,
-                    bt + 0L, bb + 0L, bl + 0L, br + 0L, sep = "|")
+                    bt + 0L, bb + 0L, bl + 0L, br + 0L, fillv, sep = "|")
       ai <- ai + 1L
       acc_r[[ai]] <- ex
       acc_c[[ai]] <- rep.int(ci[[nm]], m)
@@ -8292,9 +8468,23 @@ generate_format_script <- function(meta_json,
   # wb_set_cell_style() reassigns wb again — otherwise later registrations would
   # land on an orphaned manager and be lost on save.
   mgr <- wb$styles_mgr
-  mgr$add(openxlsx2::create_font(sz = 10, name = "DejaVu Sans"),           "cb_font_reg")
-  mgr$add(openxlsx2::create_font(sz = 10, name = "DejaVu Sans", b = TRUE), "cb_font_bold")
-  fid <- c(reg = mgr$get_font_id("cb_font_reg"), bold = mgr$get_font_id("cb_font_bold"))
+  mgr$add(openxlsx2::create_font(sz = 10, name = "DejaVu Sans"),            "cb_font_reg")
+  mgr$add(openxlsx2::create_font(sz = 10, name = "DejaVu Sans", b = TRUE),  "cb_font_bold")
+  mgr$add(openxlsx2::create_font(sz = 10, name = "DejaVu Sans Mono"),       "cb_font_mono")
+  fid <- c(reg  = mgr$get_font_id("cb_font_reg"),
+           bold = mgr$get_font_id("cb_font_bold"),
+           mono = mgr$get_font_id("cb_font_mono"))
+  fill_cache <- new.env(parent = emptyenv())
+  get_fill_id <- function(code) {                 # "none" / "" -> no fill
+    if (!nzchar(code) || identical(code, "none")) return("")
+    nm <- paste0("cb_fill_", code)
+    if (!exists(nm, envir = fill_cache, inherits = FALSE)) {
+      mgr$add(openxlsx2::create_fill(pattern_type = "solid",
+                fg_color = openxlsx2::wb_color(hex = code)), nm)
+      assign(nm, mgr$get_fill_id(nm), envir = fill_cache)
+    }
+    get(nm, envir = fill_cache)
+  }
   border_cache <- new.env(parent = emptyenv())
   get_border_id <- function(bt, bb, bl, br) {
     if (!(bt || bb || bl || br)) return("")
@@ -8330,6 +8520,7 @@ generate_format_script <- function(meta_json,
       font_id    = fid[[p[1]]],
       border_id  = get_border_id(p[6] == "1", p[7] == "1", p[8] == "1", p[9] == "1"),
       num_fmt_id = get_numfmt_id(p[5]),
+      fill_id    = get_fill_id(p[10]),
       horizontal = p[2], vertical = p[3], wrap_text = (p[4] == "1"))
     mgr$add(xf, paste0("cb_xf_", i))
     sel <- all_k == ukeys[i]
@@ -8340,22 +8531,29 @@ generate_format_script <- function(meta_json,
     wb <- openxlsx2::wb_set_cell_style(wb, "Codebook", dims = dstrs[i],
                                        style = paste0("cb_xf_", i))
 
-  # Title rows: colored/underlined heading text + tall rows. Text lives in the h
-  # column and (with na = NULL above) overflows into the empty cells to its right.
+  # Title rows: bold heading text (no underline), text in the h column overflowing
+  # into the empty cells to its right. ## / ### get a full-width colored band (dark
+  # navy text on it); the level-1 survey title and #### battery headers keep the
+  # red accent with no band. Bands only for the two user-owned outline levels.
   title_idx <- which(cb$.row_type == "title")
   for (i in title_idx) {
-    lvl  <- cb$.h_level[i]
-    size <- c(`1` = 18, `2` = 16, `3` = 14, `4` = 10)[[as.character(lvl)]]
-    hcm  <- c(`1` = 2,  `2` = 5,  `3` = 2,  `4` = 1)[[as.character(lvl)]]
+    lvl  <- cb$.h_level[i]; lc <- as.character(lvl)
+    size <- c(`1` = 18, `2` = 13, `3` = 12, `4` = 10)[[lc]]
+    hcm  <- c(`1` = 1.4, `2` = 1.0, `3` = 0.85, `4` = 0.8)[[lc]]
+    banded  <- lc %in% c("2", "3")
+    band    <- if (identical(lc, "2")) BAND2 else BAND3
+    txt_col <- if (banded) "FF1F3864" else RED           # navy on band, else red
     row_dims <- openxlsx2::wb_dims(rows = xr(i), cols = seq_len(K))
-    if (identical(title_mode, "merge"))
+    if (banded)
+      wb <- openxlsx2::wb_add_fill(wb, "Codebook", dims = row_dims,
+              color = openxlsx2::wb_color(hex = band))
+    else if (identical(title_mode, "merge"))
       wb <- openxlsx2::wb_merge_cells(wb, "Codebook", dims = row_dims)
     d <- openxlsx2::wb_dims(rows = xr(i), cols = ci[["h"]])
     wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = d, name = "DejaVu Sans",
-            size = size, bold = TRUE, underline = "single",
-            color = openxlsx2::wb_color(hex = RED))
+            size = size, bold = TRUE, color = openxlsx2::wb_color(hex = txt_col))
     wb <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
-            horizontal = "left", vertical = "bottom", wrap_text = FALSE)
+            horizontal = "left", vertical = "center", wrap_text = FALSE)
     wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i), heights = cm_to_pt(hcm))
   }
 
@@ -8390,6 +8588,53 @@ generate_format_script <- function(meta_json,
     }
   }
 
+  # "How to read" legend + clickable table of contents (top matter, below the
+  # survey front-matter). Legend headings: bold text + a thin bottom rule (no
+  # band — bands are reserved for the ## / ### outline). Legend body rows render
+  # like front-matter (one merged rich-text line). TOC rows are INTERNAL
+  # hyperlinks to each section's row, resolved from the final tibble positions.
+  section_txt <- cb$h                            # title text per row (incl. # markers)
+  for (i in which(cb$.row_type %in% c("howto_head", "toc_head"))) {
+    d <- openxlsx2::wb_dims(rows = xr(i), cols = ci[["h"]])
+    wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = d, name = "DejaVu Sans",
+            size = 12, bold = TRUE, color = openxlsx2::wb_color(hex = "FF1F3864"))
+    wb <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
+            horizontal = "left", vertical = "center", wrap_text = FALSE)
+    wb <- openxlsx2::wb_add_border(wb, "Codebook",
+            dims = openxlsx2::wb_dims(rows = xr(i), cols = seq_len(K)),
+            top_border = NULL, left_border = NULL, right_border = NULL,
+            bottom_border = "thin", bottom_color = black)
+    wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i), heights = cm_to_pt(0.75))
+  }
+  for (i in which(cb$.row_type == "howto")) {
+    md   <- cb$description[[i]]
+    wb <- openxlsx2::wb_merge_cells(wb, "Codebook",
+            dims = openxlsx2::wb_dims(rows = xr(i), cols = ci[["description"]]:ci[["pct"]]))
+    d    <- openxlsx2::wb_dims(rows = xr(i), cols = ci[["description"]])
+    rich <- tryCatch(.md_to_fmt_txt(md), error = function(e) NULL)
+    wb   <- openxlsx2::wb_add_data(wb, "Codebook",
+              x = if (is.null(rich)) md else rich, dims = d, col_names = FALSE)
+    wb   <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
+              horizontal = "left", vertical = "top", wrap_text = TRUE)
+  }
+  title_rows <- which(cb$.row_type == "title")
+  for (i in which(cb$.row_type == "toc")) {
+    tgt <- cb$.toc_target[[i]]
+    j   <- if (!is.na(tgt)) title_rows[match(tgt, section_txt[title_rows])] else NA_integer_
+    d   <- openxlsx2::wb_dims(rows = xr(i), cols = ci[["description"]])
+    # The bulk write blanked description on non-first rows, so (re)write the label
+    # here; the hyperlink then jumps to the section's row in this sheet.
+    wb <- openxlsx2::wb_add_data(wb, "Codebook", x = cb$description[[i]], dims = d,
+            col_names = FALSE)
+    if (!is.na(j))
+      wb <- openxlsx2::wb_add_hyperlink(wb, "Codebook", dims = d,
+              target = paste0("Codebook!A", xr(j)), is_external = FALSE)
+    wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = d, name = "DejaVu Sans", size = 10,
+            color = openxlsx2::wb_color(hex = "FF0563C1"), underline = "single")
+    wb <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
+            horizontal = "left", vertical = "center", wrap_text = FALSE)
+  }
+
   # Empty battery-closing rows: a genuinely blank 2 cm row that visually detaches
   # the variables below a battery from it.
   spacer_idx <- which(cb$.row_type == "spacer")
@@ -8414,6 +8659,25 @@ generate_format_script <- function(meta_json,
         wb <- openxlsx2::wb_merge_cells(wb, "Codebook",
                 dims = openxlsx2::wb_dims(rows = rows_ex, cols = ci[["question_prefix"]]))
     }
+  }
+
+  # Data bars in the freq column for FACTOR value rows: one flat blue bar on a
+  # FIXED 0..1 scale (comparable across variables), value kept on top. Numeric
+  # blocks store sd in freq (would render a bogus full bar), so only factor rows
+  # are included; contiguous factor-row runs are each formatted in one call. The
+  # blue reads over white, the grey stripe AND the rose battery fill.
+  fac_pct <- sort(xr(which(cb$.row_type == "value" & cb$.block_kind == "factor")))
+  if (length(fac_pct) && "pct" %in% disp_cols) {
+    pcol <- openxlsx2::int2col(ci[["pct"]])
+    brk  <- c(0L, which(diff(fac_pct) != 1L), length(fac_pct))
+    runs <- vapply(seq_len(length(brk) - 1L), function(k) {
+      r <- fac_pct[(brk[k] + 1L):brk[k + 1L]]
+      paste0(pcol, min(r), ":", pcol, max(r))
+    }, character(1))
+    wb <- openxlsx2::wb_add_conditional_formatting(wb, "Codebook",
+            dims = paste(runs, collapse = ","), type = "dataBar",
+            style = c(BAR, BAR), rule = c(0, 1),
+            params = list(showValue = TRUE, gradient = FALSE, border = FALSE))
   }
 
   # Column widths (description + na wider; variable widened only when names wrap).
@@ -8655,7 +8919,7 @@ generate_codebook <- function(meta_json,
 
   i <- 1L
   front <- integer(0)
-  while (i <= n && (identical(rt[[i]], "frontmatter") ||
+  while (i <= n && (rt[[i]] %in% c("frontmatter", "howto_head", "howto", "toc_head", "toc") ||
                     (identical(rt[[i]], "title") && !is.na(hl[[i]]) && hl[[i]] == 1L))) {
     front <- c(front, i); i <- i + 1L
   }

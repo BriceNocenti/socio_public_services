@@ -83,7 +83,11 @@ test_that("NV1c: .cb_segment_by_variable keys blocks by .orig_name in order", {
   cb  <- .cb_build_tibble(.read_meta_json(nv_json()))
   seg <- .cb_segment_by_variable(cb)
   expect_equal(seg$order, c("AGE_ORIG", "SEX_ORIG", "REG_ORIG"))
-  expect_length(seg$front, 0L)                       # no survey_title / front-matter
+  # The always-on "how to read" legend occupies the front segment now; there is
+  # still no survey_title / front-matter row for this minimal JSON.
+  front_types <- cb$.row_type[seg$front]
+  expect_true(all(front_types %in% c("howto_head", "howto", "toc_head", "toc")))
+  expect_false(any(front_types %in% c("title", "frontmatter")))
   expect_true(all(cb$.orig_name[seg$segs[["AGE_ORIG"]]] == "AGE_ORIG"))
 })
 

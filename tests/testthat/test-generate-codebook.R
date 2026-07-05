@@ -236,15 +236,16 @@ test_that("C3g: no labelled missing level -> only 'NA: n (pct%)', no bare 'vide'
 # C4. Outline headers (## / ###) + battery (####) headers, from the JSON
 # ---------------------------------------------------------------------------
 
-test_that("C4: `headers` on a variable insert markdown title rows (stripped) before it", {
+test_that("C4: `headers` on a variable insert markdown title rows (# kept) before it", {
   vars <- cb_vars()
   vars$FREQ$headers <- list("## Bloc", "### Détail")
   jd <- .read_meta_json(cb_json(vars))
   cb <- .cb_build_tibble(jd)
   titles <- cb[cb$.row_type == "title", ]
   expect_equal(nrow(titles), 2L)
-  # Markdown "#"s set the level and are stripped from the displayed text.
-  expect_equal(titles$h, c("Bloc", "Détail"))
+  # Markdown "#"s set the level and are KEPT in the displayed text (normalised to
+  # one space) so the header hierarchy is machine-readable from the xlsx.
+  expect_equal(titles$h, c("## Bloc", "### Détail"))
   expect_equal(titles$.h_level, c(2L, 3L))
   first_freq <- min(which(cb$variable %in% "FREQ"))
   expect_equal(cb$.row_type[first_freq - 1L], "title")
@@ -256,8 +257,8 @@ test_that("C4d: a #### group in `headers` renders a level-4 title row (not a bat
   jd <- .read_meta_json(cb_json(vars))
   cb <- .cb_build_tibble(jd)
   titles <- cb[cb$.row_type == "title", ]
-  # The #### group is a start-marker: a level-4 title row, "#"s stripped.
-  expect_equal(titles$h, c("Sous-theme", "Groupe thematique"))
+  # The #### group is a start-marker: a level-4 title row, "#" markers kept.
+  expect_equal(titles$h, c("### Sous-theme", "#### Groupe thematique"))
   expect_equal(titles$.h_level, c(3L, 4L))
   # No battery field -> no selector column populated.
   expect_true(all(is.na(cb$question_prefix)))
@@ -280,9 +281,9 @@ test_that("C4b: a `battery` title emits ONE #### header before the run's first m
   jd <- .read_meta_json(cb_json(vars))
   cb <- .cb_build_tibble(jd)
   titles <- cb[cb$.row_type == "title", ]
-  # Exactly one #### header, carrying the battery title, at level 4.
+  # Exactly one #### header, carrying the battery title, at level 4 (# kept).
   expect_equal(nrow(titles), 1L)
-  expect_equal(titles$h, "Batterie A")
+  expect_equal(titles$h, "#### Batterie A")
   expect_equal(titles$.h_level, 4L)
   # It sits immediately before A_ONE, and there is no header before A_TWO.
   first_a1 <- min(which(cb$variable %in% "A_ONE"))
@@ -498,4 +499,67 @@ test_that("C10b: no survey_title/description -> no title/frontmatter rows", {
   cb <- .cb_build_tibble(jd)
   expect_equal(nrow(cb[cb$.row_type %in% "frontmatter", ]), 0L)
   expect_equal(nrow(cb[cb$.row_type %in% "title" & cb$.h_level %in% 1L, ]), 0L)
+})
+
+
+# ---------------------------------------------------------------------------
+# C11. Visual layer (2026-07): battery rose fill, role chips, freq right border
+#      on non-battery blocks, data bars in factor freq, hyperlinked TOC.
+# ---------------------------------------------------------------------------
+
+test_that("C11: xlsx cell fills/borders + data bars + TOC map to the right cells", {
+  skip_if_not_installed("openxlsx2")
+  lv <- function(o, lab, n, p) list(order = o, label = lab, n = n, pct = p)
+  vars <- list(
+    FRUIT = list(var_label = "Fruit", role = "factor_nominal", r_class = "character",
+                 new_name = "FRUIT", headers = list("## Bloc A"),
+                 levels = list("1" = lv(1, "Pomme", 6, 60), "2" = lv(2, "Poire", 4, 40))),
+    B1 = list(var_label = "aime x", role = "factor_binary", r_class = "double", new_name = "B1",
+              battery = "Bat B",
+              levels = list("1" = lv(1, "Oui", 6, 60), "0" = lv(2, "Non", 4, 40))),
+    B2 = list(var_label = "aime y", role = "factor_binary", r_class = "double", new_name = "B2",
+              battery = "Bat B",
+              levels = list("1" = lv(1, "Oui", 5, 50), "0" = lv(2, "Non", 5, 50)))
+  )
+  path <- tmp_json(); .write_meta_json(list(config = list(), variables = vars), path)
+  out  <- tempfile(fileext = ".xlsx")
+  on.exit(unlink(c(path, out)), add = TRUE)
+  suppressMessages(generate_codebook(path, output_path = out))
+
+  wb <- openxlsx2::wb_load(out)
+  sm <- wb$styles_mgr$styles
+  a_of <- function(xml, nm) {
+    m <- regmatches(xml, regexpr(paste0(nm, '="[^"]*"'), xml))
+    if (!length(m)) NA_character_ else sub(paste0(nm, '="([^"]*)"'), "\\1", m)
+  }
+  fill_hex <- function(cell) {
+    xf  <- sm$cellXfs[[as.integer(openxlsx2::wb_get_cell_style(wb, 1, cell)) + 1L]]
+    fid <- suppressWarnings(as.integer(a_of(xf, "fillId"))); if (is.na(fid)) return(NA_character_)
+    fx  <- sm$fills[[fid + 1L]]
+    m   <- regmatches(fx, regexpr('fgColor[^/]*rgb="[0-9A-Fa-f]{8}"', fx))
+    if (!length(m)) NA_character_ else toupper(sub('.*rgb="([0-9A-Fa-f]{8})".*', "\\1", m))
+  }
+  right_border <- function(cell) {
+    xf  <- sm$cellXfs[[as.integer(openxlsx2::wb_get_cell_style(wb, 1, cell)) + 1L]]
+    bid <- suppressWarnings(as.integer(a_of(xf, "borderId"))); if (is.na(bid)) return(FALSE)
+    grepl("<right[^>]*style=", sm$borders[[bid + 1L]])
+  }
+  d <- openxlsx2::wb_to_df(wb, sheet = 1, col_names = FALSE, skip_empty_rows = FALSE,
+                           na.strings = NULL)
+  rF <- which(d[[7]] == "1-Pomme")[1]                 # FRUIT val row (col G = 7)
+  rB <- which(d[[2]] == "B1")[1]                       # B1 row (col B = 2)
+
+  # Battery B1: valeur|n|freq (G,H,I) are rose; role (E) is the binary chip, not rose.
+  expect_equal(fill_hex(paste0("G", rB)), "FFFDE9ED")
+  expect_equal(fill_hex(paste0("H", rB)), "FFFDE9ED")
+  expect_equal(fill_hex(paste0("I", rB)), "FFFDE9ED")
+  expect_equal(fill_hex(paste0("E", rB)), "FFDCE6F1")
+  # Non-battery FRUIT: role chip (nominal green), val not rose, freq has a right border.
+  expect_equal(fill_hex(paste0("E", rF)), "FFE2EFDA")
+  expect_false(identical(fill_hex(paste0("G", rF)), "FFFDE9ED"))
+  expect_true(right_border(paste0("I", rF)))
+
+  # Data bars over the factor freq column, and one internal TOC hyperlink (## Bloc A).
+  expect_true(any(grepl("dataBar", unlist(wb$worksheets[[1]]$conditionalFormatting))))
+  expect_gte(length(unlist(wb$worksheets[[1]]$hyperlinks)), 1L)
 })

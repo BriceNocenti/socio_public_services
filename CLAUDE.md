@@ -122,10 +122,15 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
    → Styled .xlsx codebook (openxlsx2): one row per level / numeric stat, variable
      info merged over rows, headers, frozen panes, selective borders.
    → Headers are DATA-DRIVEN from the JSON (no more titles/binary_batteries args): each
-     var's `headers` array holds its ##/### outline titles (## stripped for display); its
-     `battery` field the #### question-battery title (one header per run). A battery is CLOSED
-     by an empty 2 cm row, unless the next variable already carries a header (a new #### battery
-     or a ##/### outline) — so standalone variables never read as part of the battery above them.
+     var's `headers` array holds its ##/### outline titles; its `battery` field the ####
+     question-battery title (one header per run). Title text KEEPS its # markers (machine-readable
+     hierarchy), no underline; ##/### render as full-width colored bands, ####/level-1 stay red.
+     A battery is CLOSED by an empty 2 cm row, unless the next variable already carries a header
+     (a new #### battery or a ##/### outline) — so standalone variables never read as part of the
+     battery above them.
+   → VISUAL LAYER (see Key Design Decisions): zebra stripe per variable (reset at each header),
+     pastel role chips, data bars in factor `freq`, mono `variable`/`prefixe_question`, an always-on
+     "how to read" legend + a hyperlinked table of contents below the front-matter.
    → TOP MATTER (config-driven): config.survey_title → a level-1 `# ` title row
      "Dictionnaire des codes – <title>" (fr) / "Codebook – …" (en); then ONE row PER non-empty
      survey_* field (survey_description + Champ / Producteur / Diffuseur / Source / Méthodologie,
@@ -138,7 +143,8 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
      `new_name`s — the unique common prefix (use starts_with(), e.g. "PAP_") or, failing that,
      the pipe-joined names (use matches(), "V1|V2"), from `.battery_selector()`; merged into one
      wrapped cell across the (contiguous) battery. Each true battery also gets a dark-red MEDIUM
-     rectangle around its valeur|n|freq block (`wb_add_border(update=TRUE)`, numfmt preserved).
+     rectangle + a rose `#FDE9ED` fill around its valeur|n|freq block (`wb_add_border(update=TRUE)`,
+     numfmt/fill preserved); non-battery blocks get a `freq` right border instead.
    → Reads JSON only — NO df param (examples/NA now stored in the JSON by
      metadata_add_level_stats). NA cell = missing-value summary (see below), all types.
    → meta_json may be a DATA FRAME: runs extract + metadata_add_level_stats silently on a
@@ -285,12 +291,21 @@ spacers) keep their own box; `orig_val` a left border, `orig_code` a right borde
 JSON has ≥1 true battery, a rightmost `prefixe_question`/`question` column is added AUTOMATICALLY (no
 arg) holding a `.battery_selector()` string (unique common prefix → `starts_with()`, else pipe-joined
 names → `matches()`), merged into one wrapped cell per (contiguous) battery, styled outside the box.
-Each true battery also gets a dark-red MEDIUM rectangle around its `valeur|n|freq` block
-(`wb_add_border(update=TRUE)` overlay, after the xf palette — numfmt/fill preserved; `.battery` internal
-col drives it). A top level-1 `#` title (`config.survey_title`) + ONE front-matter row per survey_*
-field (each merging `description..valeur`, rich text via `.md_to_fmt_txt()`; `config.n_individuals` in
-the `n` column of the survey_population row; explicit row height since merges don't auto-fit) precede the
-variables. Header/title/front-matter rows carry no block borders.
+Non-battery blocks also get a `pct` (freq) **right border** (closes the stats block). Each true battery
+gets a dark-red MEDIUM rectangle around its `valeur|n|freq` block (`wb_add_border(update=TRUE)` overlay,
+after the xf palette — numfmt/fill preserved; `.battery` internal col drives it) PLUS the rose `#FDE9ED`
+fill (in the palette). **Data bars** (blue, fixed 0–1 scale, `wb_add_conditional_formatting` type
+`dataBar` over contiguous factor-`pct` runs) visualise `freq` for factor rows only (numeric `pct` holds
+σ). Title rows KEEP their `#` markers (machine-readable hierarchy) and render underline-free; `##`/`###`
+get a full-width colored band (`BAND2`/`BAND3`, navy text), `#### `/level-1 stay red, no band. A top
+level-1 `# ` title (`config.survey_title`) + ONE front-matter row per survey_* field (each merging
+`description..valeur`, rich text via `.md_to_fmt_txt()`; `config.n_individuals` in the `n` column of the
+survey_population row) then an always-on **"how to read" legend** (`howto_head`/`howto` rows: one line per
+PRESENT column + type + role, via `.cb_howto_columns/_types/_roles`) then a hyperlinked **table of
+contents** (`toc_head`/`toc` rows → internal `wb_add_hyperlink` to each `##`/`###` section's row,
+resolved by matching `.toc_target` against title `h`) precede the variables. New row types
+`howto_head`/`howto`/`toc_head`/`toc` join `.cb_segment_by_variable`'s front group; new internal fields
+`.role_key` (chips) + `.toc_target`. Header/title/front-matter/legend/toc rows carry no block borders.
 `description` is always bold. Widths: `description` 72, `missing_values` 30, `orig_val` 60; `variable`
 is 18 but widens to 27 only when the longest name would wrap. Section titles sit in column `h` and
 **overflow** into the empty cells to their right: the data write uses `na = NULL` so trailing cells are
@@ -310,10 +325,15 @@ text/other `valeur` = `Ex. : "v1", "v2", "v3", "v4", …` (4 values).
 
 **Key Design Decision** — Codebook styling uses a **fixed xf palette** (openxlsx2 low-level), not
 per-block `wb_add_*`. `.cb_write_xlsx()` computes each value cell's full appearance as a key
-(`font | h | v | wrap | numfmt | top bot left right`), registers **one** `create_cell_style()` xf per
-distinct key via `wb$styles_mgr$add()` (fonts/borders/numfmts deduped through `create_font`/
-`create_border`/`create_numfmt` caches), then stamps it with a single `wb_set_cell_style(dims = comma-
-joined cells, style = name)` per xf. This cut the ~500-var export from ~116 s to ~22 s and the style
+(`font | h | v | wrap | numfmt | top bot left right | fill`), registers **one** `create_cell_style()` xf
+per distinct key via `wb$styles_mgr$add()` (fonts/borders/numfmts/**fills** deduped through
+`create_font`/`create_border`/`create_numfmt`/`create_fill` caches — `get_fill_id()` sentinel `"none"`
+kept as the LAST, non-empty key field so `strsplit` never drops it), then stamps it with a single
+`wb_set_cell_style(dims = comma-joined cells, style = name)` per xf. The `font` token is
+`reg`/`bold`/**`mono`** (DejaVu Sans Mono for `variable` + `question_prefix`). The `fill` token
+priority: **role chip** (`role` cell, pastel by `.role_key`) > **battery rose** `#FDE9ED`
+(`valeur|n|freq` of a `.battery` row) > **zebra** `#F2F2F2` (per-variable-block stripe over
+`variable→freq`, reset white after every title row) > none. This cut the ~500-var export from ~116 s to ~22 s and the style
 catalog from ~1600 xfs to ~46 — with byte-identical appearance (verified by a per-cell border/numfmt/
 bold/alignment diff). **Ordering constraint**: the merge + NA-rich-text calls clone the workbook, so the
 styles manager is captured AFTER the block loop and the whole palette is registered BEFORE any
