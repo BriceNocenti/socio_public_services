@@ -2773,6 +2773,11 @@ extract_survey_metadata <- function(
       pos_idx <- .find_binary_desc(lbls_clean, yes_kw, no_kw)
       return(list(role = "factor_binary", pos_idx = pos_idx))
     }
+    # An R `ordered` factor carries its ordinality in the object itself: honour it
+    # (raw survey columns are never `ordered`, so existing extracts are unchanged;
+    # this only fires on factors deliberately built with as.ordered()/ordered=TRUE,
+    # e.g. script-created ordinal recodes).
+    if (is.ordered(col)) return(list(role = "factor_ordinal", pos_idx = NA_integer_))
     return(list(role = "factor_nominal", pos_idx = NA_integer_))
   }
 
@@ -7776,7 +7781,7 @@ generate_format_script <- function(meta_json,
     .row_type = "value", .h_level = NA_integer_, .block_id = NA_integer_,
     .block_kind = NA_character_, .is_double = FALSE, .stat_rule = FALSE,
     .is_binary = FALSE, .is_first = FALSE, .is_block_last = FALSE,
-    .battery = NA_character_,
+    .battery = NA_character_, .orig_name = NA_character_,
     h = NA_character_, variable = NA_character_, type = NA_character_,
     role = NA_character_, description = NA_character_, na = NA_character_,
     val = NA_character_, n = NA_real_, pct = NA_real_,
@@ -7986,7 +7991,7 @@ generate_format_script <- function(meta_json,
     bt_tag <- if (nzchar(cur_batt)) cur_batt else NA_character_
     mk <- function(...) .cb_row(
       .block_id = block_id, .block_kind = block_kind, .is_double = is_double,
-      .battery = bt_tag,
+      .battery = bt_tag, .orig_name = e$orig_name,
       variable = var_disp, type = type_lab, role = role_lab,
       description = e$var_label, na = na_str, question_prefix = qp, ...)
 
@@ -8519,6 +8524,342 @@ generate_codebook <- function(meta_json,
 
   # Return the display tibble (drop internal dot-columns).
   invisible(cb[, !grepl("^\\.", names(cb)), drop = FALSE])
+}
+
+
+# ============================================================
+# 9c. add_new_variables_to_codebook_from_df()
+#     Codebook that also documents variables CREATED IN THE FINAL df
+#     (recodes, indicators…) that are absent from meta_json.
+# ============================================================
+# Approach: build the ORIGINALS tibble exactly like generate_codebook() (from the
+# JSON, natural_order = keep_original), build a SEPARATE tibble for the new df
+# columns (natural_order = TRUE — their factor labels are already final), then
+# segment the originals tibble per variable and reassemble with each new-var block
+# spliced at its real df position (inline after its source var, or a trailing
+# "## Nouvelles variables" section). meta_json is never written; the df is the
+# source of truth for the new variables.
+
+# Final display name per JSON variable (new_name if set, else the key).
+.cb_final_names <- function(json_vars) {
+  setNames(vapply(names(json_vars),
+                  function(k) json_vars[[k]]$new_name %||% k, character(1)),
+           names(json_vars))
+}
+
+# The shared original variables must keep the SAME relative order in df as in
+# meta_json, otherwise anchoring the new variables is unreliable — abort clearly.
+.cb_assert_shared_order <- function(df_names, final_of) {
+  final_vals  <- unname(final_of)
+  shared_meta <- final_vals[final_vals %in% df_names]   # meta (JSON) order
+  shared_df   <- df_names[df_names %in% final_vals]      # df column order
+  if (identical(shared_meta, shared_df)) return(invisible(TRUE))
+  m     <- min(length(shared_meta), length(shared_df))
+  d     <- which(shared_meta[seq_len(m)] != shared_df[seq_len(m)])
+  first <- if (length(d)) d[[1L]] else m + 1L
+  g     <- function(x, i) if (i <= length(x)) x[[i]] else "(fin)"
+  stop("add_new_variables_to_codebook_from_df : l'ordre des variables originales ",
+       "dans df diffère de meta_json (le placement des nouvelles variables ne peut ",
+       "pas être déterminé de façon fiable).\n",
+       "  Première divergence en position ", first, " : df a « ", g(shared_df, first),
+       " » là où meta_json a « ", g(shared_meta, first), " ».\n",
+       "  Réordonner df pour suivre l'ordre de meta_json (ou régénérer meta_json).",
+       call. = FALSE)
+}
+
+# Console warning (never aborts): new variables that lack a variable label, or
+# whose label duplicates another variable's label (usually a copy-paste leftover).
+.cb_check_new_var_labels <- function(df, new_vars, json_vars, lang = "fr") {
+  fr <- !identical(lang, "en")
+  new_lbl <- vapply(new_vars, function(v) {
+    a <- attr(df[[v]], "label", exact = TRUE)
+    if (is.null(a)) "" else trimws(as.character(a)[[1L]])
+  }, character(1))
+  orig_lbl <- setNames(
+    vapply(names(json_vars), function(k) trimws(json_vars[[k]]$var_label %||% ""),
+           character(1)),
+    vapply(names(json_vars), function(k) json_vars[[k]]$new_name %||% k, character(1)))
+  all_lbl  <- c(orig_lbl, setNames(new_lbl, new_vars))
+  no_label <- new_vars[!nzchar(new_lbl)]
+  dup <- character(0)
+  for (i in seq_along(new_vars)) {
+    l <- new_lbl[[i]]
+    if (!nzchar(l)) next
+    others <- all_lbl[names(all_lbl) != new_vars[[i]]]
+    if (any(others == l, na.rm = TRUE)) dup <- c(dup, new_vars[[i]])
+  }
+  if (!length(no_label) && !length(dup)) return(invisible(TRUE))
+  parts <- character(0)
+  if (length(no_label))
+    parts <- c(parts,
+      if (fr) paste0(length(no_label), " nouvelle(s) variable(s) sans label — ",
+                     "ajouter |> `attr<-`(\"label\", \"...\") dans le script :")
+      else    paste0(length(no_label), " new variable(s) without a label — ",
+                     "add |> `attr<-`(\"label\", \"...\"):"),
+      paste0("  • ", no_label))
+  if (length(dup))
+    parts <- c(parts,
+      if (fr) paste0(length(dup), " nouvelle(s) variable(s) avec un label déjà ",
+                     "utilisé par une autre variable (corriger le label) :")
+      else    paste0(length(dup), " new variable(s) whose label duplicates ",
+                     "another variable's (fix the label):"),
+      paste0("  • ", dup, "  \"", new_lbl[match(dup, new_vars)], "\""))
+  message("add_new_variables_to_codebook_from_df : ", paste(parts, collapse = "\n"))
+  invisible(FALSE)
+}
+
+# Extract + stat the new df columns into a THROWAWAY temp JSON (never meta_json),
+# reusing the survey's missing/yes-no config so detection stays consistent.
+.cb_new_vars_json <- function(new_df, config, ...) {
+  tmp <- tempfile(pattern = "newvars_", fileext = ".survey_meta.json")
+  on.exit(unlink(tmp), add = TRUE)
+  mn <- suppressWarnings(as.numeric(unlist(config$missing_num %||% numeric(0))))
+  mc <- as.character(unlist(config$missing_chr %||% character(0)))
+  yl <- as.character(unlist(config$yes_labels  %||% character(0)))
+  nl <- as.character(unlist(config$no_labels   %||% character(0)))
+  suppressMessages(extract_survey_metadata(
+    new_df, meta_json = tmp,
+    missing_num = mn, missing_chr = mc,
+    yes_labels  = if (length(yl)) yl else NULL,
+    no_labels   = if (length(nl)) nl else NULL,
+    ...))
+  suppressMessages(metadata_add_level_stats(tmp, df = new_df))
+  .read_meta_json(tmp)
+}
+
+# Turn the user's per-column `question_prefix` attribute into a battery title on
+# the new-var JSON: each attribute value becomes the #### battery title (members
+# sharing it render as one boxed battery, with an auto-derived selector column).
+.cb_inject_new_batteries <- function(new_json, new_df) {
+  for (v in names(new_json$variables)) {
+    a <- attr(new_df[[v]], "question_prefix", exact = TRUE)
+    if (is.null(a)) next
+    t <- trimws(as.character(a)[[1L]])
+    if (nzchar(t)) new_json$variables[[v]]$battery <- t
+  }
+  new_json
+}
+
+# Split a codebook tibble into: front (survey title + front-matter rows) and one
+# per-variable segment (leading ## / ### / #### title rows + the value block +
+# a trailing battery-closing spacer), keyed by `.orig_name`. Relies on the
+# invariant that a spacer is emitted only when the next var has NO header, so a
+# block boundary carries EITHER a lone spacer OR title rows, never both.
+.cb_segment_by_variable <- function(tib) {
+  n  <- nrow(tib)
+  rt <- tib$.row_type
+  hl <- tib$.h_level
+  isf <- tib$.is_first     %in% TRUE
+  isl <- tib$.is_block_last %in% TRUE
+  orig <- tib$.orig_name
+
+  i <- 1L
+  front <- integer(0)
+  while (i <= n && (identical(rt[[i]], "frontmatter") ||
+                    (identical(rt[[i]], "title") && !is.na(hl[[i]]) && hl[[i]] == 1L))) {
+    front <- c(front, i); i <- i + 1L
+  }
+
+  segs <- list(); ord <- character(0)
+  while (i <= n) {
+    seg <- integer(0)
+    while (i <= n && identical(rt[[i]], "title")) { seg <- c(seg, i); i <- i + 1L }
+    if (i > n) break                                   # trailing titles w/o block
+    key <- orig[[i]]                                   # first value row of the block
+    v1  <- i
+    while (i <= n && !(identical(rt[[i]], "value") && isl[[i]])) i <- i + 1L
+    seg <- c(seg, v1:i); i <- i + 1L
+    if (i <= n && identical(rt[[i]], "spacer")) { seg <- c(seg, i); i <- i + 1L }
+    segs[[key]] <- seg; ord <- c(ord, key)
+  }
+  list(front = front, segs = segs, order = ord)
+}
+
+# If an anchor original is a NON-LAST member of a battery, bump it to that
+# battery's last member so a new var never splits the battery's contiguous run.
+.cb_bump_anchor <- function(key, batt_of_key) {
+  t <- batt_of_key[[key]]
+  if (is.null(t) || !nzchar(t)) return(key)
+  members <- names(batt_of_key)[batt_of_key == t]      # meta order
+  members[[length(members)]]
+}
+
+# Decide each new variable's slot from the df column order: inline after its
+# nearest preceding original (anchor key), or trailing (after the last original).
+.cb_new_positioning <- function(df_names, final_of, batt_of_key) {
+  final_vals <- unname(final_of)
+  key_of     <- setNames(names(final_of), final_vals)
+  orig_mask  <- df_names %in% final_vals
+  last_orig  <- if (any(orig_mask)) max(which(orig_mask)) else 0L
+
+  inline <- list(); trailing <- character(0); last_final <- NA_character_
+  for (pos in seq_along(df_names)) {
+    nm <- df_names[[pos]]
+    if (orig_mask[[pos]]) { last_final <- nm; next }
+    if (pos > last_orig)      { trailing <- c(trailing, nm); next }
+    if (is.na(last_final)) {   # new var before the first original
+      inline[["__front__"]] <- c(inline[["__front__"]], nm); next
+    }
+    ak <- .cb_bump_anchor(unname(key_of[[last_final]]), batt_of_key)
+    inline[[ak]] <- c(inline[[ak]], nm)
+  }
+  list(inline = inline, trailing = trailing)
+}
+
+# Reassemble the final codebook rows: front, leading new vars, then each original
+# segment followed by its inline new-var segment(s), then a "## Nouvelles
+# variables" title + the trailing new-var segments.
+.cb_reassemble <- function(seg_o, seg_n, pos, tib_orig, tib_new, lang) {
+  parts <- list()
+  add <- function(tib, idx) if (length(idx)) parts[[length(parts) + 1L]] <<- tib[idx, , drop = FALSE]
+  add_new_group <- function(names_vec)
+    for (nm in names_vec) add(tib_new, seg_n$segs[[nm]])
+
+  add(tib_orig, seg_o$front)
+  add_new_group(pos$inline[["__front__"]] %||% character(0))
+  for (key in seg_o$order) {
+    add(tib_orig, seg_o$segs[[key]])
+    add_new_group(pos$inline[[key]] %||% character(0))
+  }
+  if (length(pos$trailing)) {
+    ttl <- if (identical(lang, "en")) "New variables" else "Nouvelles variables"
+    parts[[length(parts) + 1L]] <-
+      tibble::as_tibble(data.table::rbindlist(
+        list(.cb_row(.row_type = "title", .h_level = 2L, h = ttl)), fill = TRUE))
+    add_new_group(pos$trailing)
+  }
+  tibble::as_tibble(data.table::rbindlist(parts, fill = TRUE))
+}
+
+# Final safety net: every battery title must occupy a CONTIGUOUS run of rows in
+# the reassembled tibble (.check_battery_contiguity only sees each tibble's
+# entries, not the combined order).
+.cb_assert_battery_contiguity_rows <- function(final) {
+  b <- final$.battery
+  for (t in unique(b[!is.na(b)])) {
+    w <- which(b == t)
+    if (length(w) > 1L && any(diff(w) != 1L))
+      stop("add_new_variables_to_codebook_from_df : la batterie « ", t,
+           " » n'est pas contiguë dans le codebook final — vérifier le placement ",
+           "des variables (une nouvelle variable coupe-t-elle la batterie ?).",
+           call. = FALSE)
+  }
+  invisible(TRUE)
+}
+
+#' Codebook including new variables created in the final data frame
+#'
+#' Like \code{generate_codebook()}, but also documents variables that exist in the
+#' final \code{df} (recodes, indicators…) yet are absent from \code{meta_json}.
+#' Original variables render exactly as \code{generate_codebook(meta_json)}; the
+#' new columns are read straight from \code{df} (their factor labels are already
+#' final) and inserted at their real df position — inline right after the original
+#' they follow, or, when they sit after the last original, in a trailing
+#' \strong{"## Nouvelles variables"} section. \code{meta_json} is never modified:
+#' the \code{df} is the source of truth for the new variables (edit the recode to
+#' change a new variable's role/labels; make it an \code{ordered} factor for an
+#' ordinal one).
+#'
+#' New variables missing a variable label, or whose label duplicates another
+#' variable's, are reported for manual correction. To box a group of new
+#' variables as a battery, tag each member with
+#' \code{|> `attr<-`("question_prefix", "Titre de la batterie")}; the shared value
+#' becomes the battery's \code{####} title and the \code{prefixe_question} selector
+#' column is derived automatically.
+#'
+#' @param meta_json Path to the survey_meta JSON, or a \code{survey_meta} object
+#'   (documents the ORIGINAL variables). Not a data frame — pass the final data as
+#'   \code{df}.
+#' @param df The final data frame, containing the original variables (unchanged
+#'   order) plus the new variables.
+#' @param output_path Output \code{.xlsx} path. Default derives from the JSON stem.
+#' @param lang \code{"fr"} (default) or \code{"en"}.
+#' @param keep_original Passed through for the ORIGINAL variables (see
+#'   \code{generate_codebook()}); new variables always render verbatim.
+#' @param ... Forwarded to \code{extract_survey_metadata()} for the new variables.
+#' @return Invisibly, the combined display tibble (internal dot-columns dropped).
+#' @export
+add_new_variables_to_codebook_from_df <- function(meta_json, df,
+                                                   output_path   = NULL,
+                                                   lang          = "fr",
+                                                   keep_original = FALSE,
+                                                   ...) {
+  lang <- match.arg(lang, c("fr", "en"))
+  if (!is.data.frame(df))
+    stop("add_new_variables_to_codebook_from_df : `df` doit être un data frame.",
+         call. = FALSE)
+
+  json_path <- .resolve_json_path(meta_json)
+  stopifnot(file.exists(json_path))
+  json_data <- .read_meta_json(json_path)
+  json_vars <- json_data$variables
+
+  final_of   <- .cb_final_names(json_vars)
+  final_vals <- unname(final_of)
+  new_vars   <- names(df)[!(names(df) %in% final_vals)]
+
+  if (is.null(output_path)) {
+    output_path <- sub("\\.survey_meta\\.json$", "_codebook.xlsx", json_path)
+    if (output_path == json_path)
+      output_path <- paste0(tools::file_path_sans_ext(json_path), "_codebook.xlsx")
+  }
+
+  # Originals: identical to generate_codebook(meta_json, keep_original = ...).
+  tib_orig <- .cb_build_tibble(json_data, lang = lang,
+                               natural_order = isTRUE(keep_original))
+
+  write_out <- function(final) {
+    final$.block_id <- as.integer(ifelse(
+      final$.row_type == "value", cumsum(final$.is_first %in% TRUE), NA_integer_))
+    .cb_assert_battery_contiguity_rows(final)
+    orig_val_kept <- isTRUE(attr(tib_orig, "any_new_label"))
+    if (!orig_val_kept) final$orig_val <- NULL
+    .cb_write_xlsx(final, output_path, lang = lang, orig_val_kept = orig_val_kept)
+    invisible(final[, !grepl("^\\.", names(final)), drop = FALSE])
+  }
+
+  if (length(new_vars) == 0L) {
+    message("add_new_variables_to_codebook_from_df : aucune nouvelle variable dans ",
+            "df (toutes déjà dans meta_json) — codebook standard généré.")
+    out <- write_out(tib_orig)
+    message(sprintf("Codebook written to %s (%d variables, %d rows)",
+                    output_path, length(unique(stats::na.omit(tib_orig$.block_id))),
+                    nrow(tib_orig)))
+    return(invisible(out))
+  }
+
+  # -- validations ------------------------------------------------------------
+  .cb_assert_shared_order(names(df), final_of)
+  n_meta <- suppressWarnings(as.numeric(json_data$config$n_individuals %||% NA_real_))
+  if (is.finite(n_meta) && n_meta != nrow(df))
+    message("add_new_variables_to_codebook_from_df : attention, meta_json déclare ",
+            n_meta, " individus mais df en a ", nrow(df), " — les % de NA des ",
+            "variables originales et nouvelles n'ont pas le même dénominateur.")
+  .cb_check_new_var_labels(df, new_vars, json_vars, lang)
+
+  # -- new-variable tibble (verbatim from df) ---------------------------------
+  new_df   <- df[new_vars]
+  new_json <- .cb_new_vars_json(new_df, json_data$config, ...)
+  new_json <- .cb_inject_new_batteries(new_json, new_df)
+  tib_new  <- .cb_build_tibble(new_json, lang = lang, natural_order = TRUE)
+  vrow <- tib_new$.row_type == "value"                 # new vars have no origin
+  tib_new$orig_val[vrow]  <- NA_character_
+  tib_new$orig_code[vrow] <- NA_character_
+
+  # -- reassemble at df positions ---------------------------------------------
+  seg_o <- .cb_segment_by_variable(tib_orig)
+  seg_n <- .cb_segment_by_variable(tib_new)
+  batt_of_key <- setNames(
+    vapply(json_vars, function(v) v$battery %||% "", character(1)), names(json_vars))
+  pos   <- .cb_new_positioning(names(df), final_of, batt_of_key)
+  final <- .cb_reassemble(seg_o, seg_n, pos, tib_orig, tib_new, lang)
+
+  out <- write_out(final)
+  message(sprintf(paste0("add_new_variables_to_codebook_from_df : %d nouvelle(s) ",
+                         "variable(s) ajoutée(s) — %s (%d variables, %d lignes)"),
+                  length(new_vars), output_path,
+                  length(unique(stats::na.omit(final$.block_id))), nrow(final)))
+  invisible(out)
 }
 
 

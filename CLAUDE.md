@@ -146,6 +146,28 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
      `...` forwarded to extract_survey_metadata.
    → val labels/order reuse .gfs_build_entries()/.gfs_level_label() → identical to
      generate_format_script(). Run metadata_add_level_stats() first for n/pct/NA.
+
+7b. add_new_variables_to_codebook_from_df(meta_json, df, output_path = NULL, lang, keep_original, ...)
+   → Codebook that ALSO documents variables created in the final df (recodes, indicators) and
+     absent from meta_json. NEVER writes meta_json (df is the source of truth for new vars).
+   → Builds the ORIGINALS tibble exactly like generate_codebook(meta_json) (natural_order =
+     keep_original), builds a SEPARATE tibble for the new df columns (natural_order = TRUE — their
+     factor labels are already final), then SEGMENTS the originals tibble per variable
+     (`.cb_segment_by_variable`, keyed by the new `.orig_name` row field) and REASSEMBLES with each
+     new-var block spliced at its real df position: inline right after its source var, or (when it
+     sits after the last original) in a trailing "## Nouvelles variables" section
+     (`.cb_new_positioning` + `.cb_reassemble`). Anchoring a new var onto a non-last battery member
+     bumps it to the battery's last member (no split). `.block_id` recomputed from `.is_first`.
+   → New-var metadata via a THROWAWAY temp JSON (`.cb_new_vars_json`: extract_survey_metadata +
+     metadata_add_level_stats on df[new_vars], reusing meta_json's missing/yes-no config); their
+     orig_val/orig_code cells are blanked (no origin). Role comes from the R class: an `ordered`
+     factor → factor_ordinal (see `.detect_role_v3`), 2-level → binary, 3+ → nominal.
+   → Validations: aborts if the shared originals' relative order in df ≠ meta (`.cb_assert_shared_order`);
+     warns (never stops) on a new var with no label or a label duplicating another var's
+     (`.cb_check_new_var_labels`); final row-level battery-contiguity guard
+     (`.cb_assert_battery_contiguity_rows`). New-var battery: tag each member with
+     `|> \`attr<-\`("question_prefix", "Titre")` → that string becomes the #### battery title
+     (`.cb_inject_new_batteries`); the prefixe_question selector column is auto-derived.
 ```
 
 All functions take `meta_json` (path string or `survey_meta` object) as their first argument.
@@ -375,7 +397,9 @@ prints auto-flagged labelled codes; override with `"missing": false` for a rare 
 `.detect_role_v3()` uses the same label COVERAGE gate (`max_levels_cat`): a numeric column whose labels
 cover only a few of many observed values is a partially-labelled numeric, not a factor. A bare numeric with
 exactly 2 distinct values ⊆ {0,1} and NO value labels → `factor_binary` (Non/Oui synthesized, positive=code
-"1"). Value-label codes sort NUMERICALLY when all integer-like (else lexical → "10" between "1" and "2");
+"1"). An R `ordered` factor (≥3 levels) → `factor_ordinal` (raw survey columns are never `ordered`, so this
+only fires on deliberately-ordered factors, e.g. script-created ordinal recodes). Value-label codes sort
+NUMERICALLY when all integer-like (else lexical → "10" between "1" and "2");
 same numeric sort for observed-but-undeclared codes in `metadata_add_level_stats()`. NOTE: `order` and
 `role` are PRESERVED across re-extract (and `ai_classify_roles` skips binary order once a level has
 `order:1`), so a stale order set before the missing-config was complete stays frozen — finalize
@@ -484,6 +508,7 @@ Each dummy has matching configs:
 | `test-ai-merge-levels.R`        | M      | `ai_merge_levels()` logic                                  |
 | `test-generate-format-script.R` | G/CV/H | `generate_format_script()` + level-label / stats-comment   |
 | `test-generate-codebook.R`      | C      | `generate_codebook()` tibble build + xlsx write            |
+| `test-add-new-vars-codebook.R`  | NV     | `add_new_variables_to_codebook_from_df()` splice/positioning |
 | `test-outline-seed.R`           | D      | `.batt_seed_candidates()` seed + precision gate + preview  |
 | `test-ai-build-outline.R`       | OU     | `ai_build_outline()` #### spans → headers/battery (mock)   |
 | `test-keep-codes.R`             | KC     | keep_codes numbering + set_keep_codes / suggest_keep_codes |
