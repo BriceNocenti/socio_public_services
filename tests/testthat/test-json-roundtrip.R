@@ -620,7 +620,7 @@ test_that("special characters in labels survive JSON round-trip", {
 })
 
 # ---------------------------------------------------------------------------
-# H. Key/join soundness: val_labs inner-join against observed unique values
+# H. Empty levels: keep/drop unobserved val_labs codes per `empty_levels`
 # ---------------------------------------------------------------------------
 
 # Helper: build a minimal haven_labelled column with given values and label map
@@ -636,8 +636,9 @@ make_survey_df <- function(col, var_label = "Test variable") {
   df
 }
 
-test_that("H1: val_labs codes absent from data are dropped — no n=0 keys in JSON", {
-  # Codes 1,2,3,9 defined in labels, but only 1 and 2 appear in the data
+test_that("H1: unobserved val_labs codes are KEPT as empty levels (n:0) by default", {
+  # Codes 1,2,3,9 defined; only 1,2 appear. Default empty_levels="small_factors"
+  # keeps 3 (empty category) and 9 (empty missing) as levels flagged n:0 at extract.
   col <- make_labelled_col(
     c(1, 2, 1, 2, 1),
     c("Oui" = 1, "Non" = 2, "Autre" = 3, "NSP" = 9)
@@ -649,15 +650,35 @@ test_that("H1: val_labs codes absent from data are dropped — no n=0 keys in JS
     extract_survey_metadata(df, path, missing_num = c(9), missing_chr = character(0))
   )
   lvls <- .read_meta_json(path)$variables$Q1$levels
-  # Only codes actually in data (1, 2) should appear; 3 and 9 are absent
-  expect_false("3" %in% names(lvls))
-  expect_false("9" %in% names(lvls))
-  expect_true("1" %in% names(lvls))
-  expect_true("2" %in% names(lvls))
+  expect_true(all(c("1", "2", "3", "9") %in% names(lvls)))
+  # Unobserved codes flagged n:0 at extract; observed ones get no n until stats.
+  expect_equal(lvls[["3"]][["n"]], 0L)
+  expect_equal(lvls[["9"]][["n"]], 0L)
+  expect_null(lvls[["1"]][["n"]])
+  expect_true(isTRUE(lvls[["9"]]$missing))    # 9 is missing_num
+  expect_false(isTRUE(lvls[["3"]]$missing))   # 3 is a real (empty) category
 })
 
-test_that("H2: numeric-numeric match works for double column with integer val_labs codes", {
-  # Column stored as double (1.0, 2.0), val_labs use integer codes 1L, 2L
+test_that("H1b: empty_levels='none' drops unobserved codes (classic inner join)", {
+  col <- make_labelled_col(
+    c(1, 2, 1, 2, 1),
+    c("Oui" = 1, "Non" = 2, "Autre" = 3, "NSP" = 9)
+  )
+  df   <- make_survey_df(col)
+  path <- tmp_json()
+  on.exit(unlink(path))
+  suppressMessages(
+    extract_survey_metadata(df, path, missing_num = c(9), missing_chr = character(0),
+                            empty_levels = "none")
+  )
+  lvls <- .read_meta_json(path)$variables$Q1$levels
+  expect_false("3" %in% names(lvls))
+  expect_false("9" %in% names(lvls))
+  expect_true(all(c("1", "2") %in% names(lvls)))
+})
+
+test_that("H2: numeric-numeric match distinguishes observed codes from empty ones (double col)", {
+  # Column stored as double (1.0, 2.0), val_labs use integer codes 1L, 2L, 9L.
   col <- make_labelled_col(
     as.double(c(1, 2, 1, 2)),
     c("Oui" = 1L, "Non" = 2L, "NSP" = 9L)
@@ -669,15 +690,17 @@ test_that("H2: numeric-numeric match works for double column with integer val_la
     extract_survey_metadata(df, path, missing_num = c(9), missing_chr = character(0))
   )
   lvls <- .read_meta_json(path)$variables$Q1$levels
-  # Codes 1 and 2 must match despite double vs integer storage
-  expect_true("1" %in% names(lvls))
-  expect_true("2" %in% names(lvls))
-  # Code 9 not in data — must be absent
-  expect_false("9" %in% names(lvls))
+  expect_true(all(c("1", "2", "9") %in% names(lvls)))
+  # 1.0/2.0 matched integer codes 1L/2L → observed (no n:0); only 9 is truly empty.
+  expect_null(lvls[["1"]][["n"]])
+  expect_null(lvls[["2"]][["n"]])
+  expect_equal(lvls[["9"]][["n"]], 0L)
+  expect_true(isTRUE(lvls[["9"]]$missing))
 })
 
-test_that("H3: string fallback works for character column with text value labels", {
-  # Character column — numeric conversion of observed values and codes would fail
+test_that("H3: string fallback keeps unobserved text code 'Z' as an empty level", {
+  # Character column — numeric conversion of observed values and codes would fail,
+  # so the string fallback decides observedness; "Z" is kept as an empty category.
   col <- labelled::labelled(
     c("A", "B", "A", "B"),
     labels = c("Category A" = "A", "Category B" = "B", "Unknown" = "Z")
@@ -689,10 +712,9 @@ test_that("H3: string fallback works for character column with text value labels
     extract_survey_metadata(df, path, missing_num = numeric(0), missing_chr = character(0))
   )
   lvls <- .read_meta_json(path)$variables$Q1$levels
-  expect_true("A" %in% names(lvls))
-  expect_true("B" %in% names(lvls))
-  # "Z" is in labels but not in data — must be dropped
-  expect_false("Z" %in% names(lvls))
+  expect_true(all(c("A", "B", "Z") %in% names(lvls)))
+  expect_equal(lvls[["Z"]][["n"]], 0L)
+  expect_null(lvls[["A"]][["n"]])
 })
 
 test_that("H4: empty string in data is excluded from unique values after import_survey() na_if step", {
@@ -716,28 +738,37 @@ test_that("H4: empty string in data is excluded from unique values after import_
   expect_equal(length(labs), 2L)
 })
 
-test_that("H5: dropped val_labs codes do not appear as keys in the JSON", {
-  # codes 1, 2 observed; code 99 in labels but absent from data
-  col <- make_labelled_col(
-    c(1, 2, 1, 2),
-    c("Oui" = 1, "Non" = 2, "NSP" = 99)
-  )
+test_that("H5: over-declared label set (> max_levels_cat) drops unobserved codes; 'all' keeps them", {
+  # 25 declared codes, only 1,2 observed. small_factors: declared > max_levels_cat (20)
+  # → over-declared → unobserved dropped (avoids a wall of empty levels).
+  lab_map <- stats::setNames(1:25, paste0("L", 1:25))
+  col  <- make_labelled_col(c(1, 2, 1, 2), lab_map)
   df   <- make_survey_df(col)
   path <- tmp_json()
   on.exit(unlink(path))
   suppressMessages(
-    extract_survey_metadata(df, path, missing_num = c(99), missing_chr = character(0))
+    extract_survey_metadata(df, path, missing_num = numeric(0), missing_chr = character(0))
   )
-  q <- .read_meta_json(path)$variables[["Q1"]]
-  expect_false("99" %in% names(q$levels))
-  expect_true("1"  %in% names(q$levels))
-  expect_true("2"  %in% names(q$levels))
+  lvls <- .read_meta_json(path)$variables$Q1$levels
+  expect_true(all(c("1", "2") %in% names(lvls)))
+  expect_false("3"  %in% names(lvls))
+  expect_false("25" %in% names(lvls))
+
+  # empty_levels="all" keeps every declared code even when over-declared.
+  path2 <- tmp_json(); on.exit(unlink(path2), add = TRUE)
+  suppressMessages(
+    extract_survey_metadata(df, path2, missing_num = numeric(0), missing_chr = character(0),
+                            empty_levels = "all")
+  )
+  lvls2 <- .read_meta_json(path2)$variables$Q1$levels
+  expect_true("25" %in% names(lvls2))
+  expect_equal(lvls2[["25"]][["n"]], 0L)
 })
 
-test_that("H6: metadata_add_level_stats never produces n=0 for any key when join is sound", {
+test_that("H6: observed non-missing levels keep n>0; the unobserved missing code is n:0", {
   col <- make_labelled_col(
     c(1, 2, 1, 1, 2),
-    c("Oui" = 1, "Non" = 2, "NSP" = 9)
+    c("Oui" = 1, "Non" = 2, "NSP" = 9)   # 9 declared but never observed
   )
   df   <- make_survey_df(col)
   path <- tmp_json()
@@ -749,14 +780,16 @@ test_that("H6: metadata_add_level_stats never produces n=0 for any key when join
 
   raw <- .read_meta_json(path)
   q   <- raw$variables[["Q1"]]
-  # All non-missing levels must have n > 0
+  # Every OBSERVED non-missing level must have n > 0 (empty categories get n:0 instead).
   non_miss_lvls <- Filter(function(l) !isTRUE(l$missing), q$levels)
   for (lv in non_miss_lvls) {
-    if (!is.null(lv$n)) expect_true(lv$n > 0L)
+    if (!is.null(lv$n)) expect_true(lv$n >= 0L)
   }
-  # "1" and "2" should NOT be missing
-  expect_false(isTRUE(q$levels[["1"]]$missing))
-  expect_false(isTRUE(q$levels[["2"]]$missing))
+  expect_true(q$levels[["1"]]$n > 0L)
+  expect_true(q$levels[["2"]]$n > 0L)
+  # 9 is a kept-but-empty missing level → n:0.
+  expect_equal(q$levels[["9"]][["n"]], 0L)
+  expect_true(isTRUE(q$levels[["9"]]$missing))
 })
 
 test_that("H7: numeric sentinel becomes a missing level, excluded from stats", {

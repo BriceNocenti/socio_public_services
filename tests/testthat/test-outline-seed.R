@@ -87,7 +87,7 @@ test_that("D2: a no-prefix run with a common label stem is one candidate", {
 test_that("D3: a mis-typed single-level variable stays in its run + is flagged", {
   vars <- list(
     PAP_A   = d_bin("Tennis 12 mois", "PAP_A"),
-    PAP_ODD = list(var_label = "Autre glisse 12 mois", role = "factor_unique_value",
+    PAP_ODD = list(var_label = "Autre glisse 12 mois", role = "factor_nominal",
                    r_class = "double", new_name = "PAP_ODD",
                    levels = list("0" = list(order = 1L, label = "Non", n = 100L, pct = 100L))),
     PAP_B   = d_bin("Judo 12 mois", "PAP_B")

@@ -202,6 +202,69 @@ test_that("format: nominal does NOT get as.ordered()", {
   expect_false(grepl("as.ordered()", combined, fixed = TRUE))
 })
 
+# ---------------------------------------------------------------------------
+# C-empty. Empty levels (n:0) -> forcats fct_expand() so the pole survives
+# ---------------------------------------------------------------------------
+
+test_that("format: an empty level (n:0) emits fct_expand() for its code", {
+  vars <- list(
+    PAP_X = list(
+      var_label = "Autre glisse", role = "factor_binary", new_name = "PAP_X",
+      levels = list(
+        "1" = list(order = 1L, label = "Oui", n = 0L,  pct = 0L),   # empty pole
+        "0" = list(order = 2L, label = "Non", n = 30L, pct = 100L)
+      )
+    )
+  )
+  entries <- .gfs_build_entries(vars)
+  combined <- paste(.gfs_format_blocks(entries, "data"), collapse = "\n")
+  expect_match(combined, 'fct_expand("1")', fixed = TRUE)
+  expect_match(combined, "fct_recode", fixed = TRUE)
+})
+
+test_that("format: a fully-observed factor emits NO fct_expand()", {
+  vars <- list(
+    SEXE = list(
+      var_label = "Sexe", role = "factor_binary", new_name = "SEXE",
+      levels = list(
+        "1" = list(order = 1L, label = "Oui", n = 60L, pct = 60L),
+        "0" = list(order = 2L, label = "Non", n = 40L, pct = 40L)
+      )
+    )
+  )
+  entries <- .gfs_build_entries(vars)
+  combined <- paste(.gfs_format_blocks(entries, "data"), collapse = "\n")
+  expect_false(grepl("fct_expand", combined, fixed = TRUE))
+})
+
+test_that("format: the emitted factor keeps the empty pole as a real (empty) level", {
+  skip_if_not_installed("forcats")
+  vars <- list(
+    PAP_X = list(
+      var_label = "Autre glisse", role = "factor_binary", new_name = "PAP_X",
+      levels = list(
+        "1" = list(order = 1L, label = "Oui", n = 0L,  pct = 0L),
+        "0" = list(order = 2L, label = "Non", n = 30L, pct = 100L)
+      )
+    )
+  )
+  entries <- .gfs_build_entries(vars)
+  fmt <- paste(.gfs_format_blocks(entries, "data"), collapse = "\n")
+
+  # Evaluate the emitted block on data containing only "Non"; forcats fns injected.
+  fenv <- list2env(list(fct_recode  = forcats::fct_recode,
+                        fct_expand  = forcats::fct_expand,
+                        fct_relevel = forcats::fct_relevel),
+                   parent = globalenv())
+  env  <- new.env(parent = fenv)
+  env$data <- data.frame(PAP_X = rep(0, 5))
+  expect_warning(eval(parse(text = fmt), envir = env), NA)   # no "Unknown levels" warning
+  res <- env$data$PAP_X
+  expect_true("1-Oui" %in% levels(res))                       # empty pole is a real level
+  expect_equal(as.integer(sum(res == "1-Oui", na.rm = TRUE)), 0L)
+  expect_equal(as.integer(sum(res == "2-Non", na.rm = TRUE)), 5L)
+})
+
 test_that("format: missing levels recoded to NULL, placed last", {
   vars <- list(
     Q1 = list(

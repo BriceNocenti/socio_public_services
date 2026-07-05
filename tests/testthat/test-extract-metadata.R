@@ -376,3 +376,27 @@ test_that("E13: fully-labelled coded variable stays a factor (coverage rule)", {
   v <- .read_meta_json(path)$variables$NIVEAU
   expect_true(grepl("^factor_", v$role))
 })
+
+
+# ===========================================================================
+# E14: labelled 0/1 with only "Non" observed -> factor_binary with empty Oui pole
+#      (replaces the old factor_unique_value behaviour that broke binary batteries)
+# ===========================================================================
+test_that("E14: labelled 0/1 all-Non stays factor_binary; empty Oui pole flagged n:0", {
+  path <- tmp_json(); on.exit(unlink(path))
+  # A battery item nobody answered "Oui" to: code 1 is declared but never observed.
+  col <- labelled::labelled(rep(0, 30), labels = c("Non" = 0, "Oui" = 1))
+  df  <- tibble::tibble(PAP_X = col)
+
+  suppressMessages(extract_survey_metadata(df, path,
+    missing_num = c(-1, 99), missing_chr = character(0)))
+  v <- .read_meta_json(path)$variables$PAP_X
+
+  expect_equal(v$role, "factor_binary")                 # NOT factor_unique_value
+  expect_true(all(c("0", "1") %in% names(v$levels)))    # both poles kept
+  # Empty Oui pole: positive (order 1), flagged n:0 at extract; Non is order 2.
+  expect_equal(v$levels[["1"]]$order, 1L)
+  expect_equal(v$levels[["1"]][["n"]], 0L)
+  expect_equal(v$levels[["0"]]$order, 2L)
+  expect_null(v$levels[["0"]][["n"]])                   # observed pole: no n until stats
+})

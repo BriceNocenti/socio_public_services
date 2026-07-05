@@ -28,6 +28,14 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
    → Value-label codes sort NUMERICALLY when all integer-like (string codes "1".."10"
      otherwise sort lexically, "10" between "1" and "2"). A bare 0/1 numeric with no
      value labels → factor_binary with synthesized Non(0)/Oui(1), positive=order 1.
+   → empty_levels = c("small_factors","all","none") controls declared value-label codes
+     NOT observed in the data (EMPTY levels). Default "small_factors" keeps them as levels
+     when the var declares ≤ max_levels_cat codes (binaries, Likert, small nominal — keeps
+     every battery member on one level set), drops them from over-declared sets; "all"
+     always keeps, "none" drops (classic inner join). Kept empties are flagged n:0 AT
+     EXTRACT (visible in manual review). Empties are FACTOR-only (numeric roles keep only
+     observed special/missing codes). Consequence: a labelled 0/1 with only "Non" observed
+     stays factor_binary with an empty Oui pole (n:0) — no more factor_unique_value.
    → Returns invisible(survey_meta) — enables |> piping
 
 2. ai_classify_roles(meta_json, ...)
@@ -76,6 +84,10 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
 6. generate_format_script(meta_json, output_path = NULL)
    → Generates executable R script that applies all formatting
    → Reads numeric stats from JSON (run metadata_add_level_stats() first)
+   → Factor blocks: fct_recode(factor(as.character(x)) [|> fct_expand(<codes>)], ...). The
+     forcats fct_expand() step is inserted ONLY for codes with n==0 (empty levels), so the
+     empty level survives into the R factor (fully-observed vars emit no fct_expand → output
+     unchanged); if any level's n is unknown (stats not run) all declared codes are expanded.
    → Simplified: no codebook / no "## Variable list" / no "# Select and reorder" sections;
      each block applies its var label inline via
      "label" -> varlab  then  ... |> `attr<-`("label", varlab)  (survives conversion)
@@ -140,7 +152,9 @@ Users can (and do) manually edit the JSON between AI steps. Key fields per varia
 - `levels.{code}.new_label`: short display label suggested by AI
 - `levels.{code}.missing`: TRUE for missing-value levels (old `null_coded` field renamed). The set of
   missing:true level codes is the SINGLE source of truth for stats-exclusion + format-script NA-conversion.
-- `levels.{code}.n`: written for every level incl. missing (missing-value counts); `pct` non-missing only
+- `levels.{code}.n`: written for every level incl. missing (missing-value counts); `pct` non-missing only.
+  An `n: 0` on a level = an EMPTY level (declared value label with no observation); written at extract for
+  kept-unobserved codes (see `empty_levels`) and re-confirmed by metadata_add_level_stats().
 - `levels.{code}.order`: integer for ordinal level ordering (missing levels have none)
 - `config.n_individuals`: total row count (written by extract_survey_metadata / backfilled by
   metadata_add_level_stats).
@@ -171,11 +185,11 @@ Users can (and do) manually edit the JSON between AI steps. Key fields per varia
 - `headers` (top-level, per variable): array of markdown outline titles (`"## ..."`, `"### ..."`,
   and `"#### ..."` for a non-battery thematic GROUP) rendered ONCE before this variable in the
   codebook. Start-markers, not repeated; the level = the count of `#` (clamped 2..4). The USER owns
-  `## ` (and optionally `### `), set the named-vector way `c("## Titre" = "VARNAME", ...)` via
+  `##` (and optionally `###`), set the named-vector way `c("## Titre" = "VARNAME", ...)` via
   `extract_survey_metadata(df, meta_json, headers = titles)` OR `set_headers(meta_json, titles)`.
-  The argument is source of truth for the USER levels (`## `/`### `): it clears+rewrites them and
-  PRESERVES the AI `#### ` across re-extract (keeps only level-4 headers, then overlays the arg).
-  ai_build_outline() owns `#### ` only — it writes non-battery thematic groups here (batteries go to
+  The argument is source of truth for the USER levels (`##`/`###`): it clears+rewrites them and
+  PRESERVES the AI `####` across re-extract (keeps only level-4 headers, then overlays the arg).
+  ai_build_outline() owns `####` only — it writes non-battery thematic groups here (batteries go to
   the `battery` field). Survives the serializer (optional blocks after `examples` in
   `.write_meta_json`) and is carried onto codebook entries by `.gfs_build_entries()`.
 - `num_stats`: mean/sd/min/q1/median/q3/max (numeric vars), each rounded to 5 digits. Field order
@@ -219,13 +233,13 @@ non-missing levels renders one row (positive/order-1 level; `orig_val` shows bot
 "Oui / Non"); if it has ≠2 levels it falls back to showing all levels and is flagged. Numeric
 blocks: **mean+sd row first**, then max/Q3/median/Q1/min, thin rule between. The generated
 **format script** label form (`"label" -> varlab` … `|> \`attr<-\`("label", varlab)`) applies
-the label to the final converted object so it survives `factor(as.character())` /
-`as.integer(...)`. No `df` param: text example values + NA come from the JSON (stored by
+the label to the final converted object so it survives`factor(as.character())` /
+`as.integer(...)`. No`df` param: text example values + NA come from the JSON (stored by
 `metadata_add_level_stats`), so the codebook is fully JSON-driven.
 `keep_original = TRUE` (forced in df-first mode) shows factor labels as-is, sorted by numeric
 code, no ordering prefix and no binary 1-row collapse — via the `natural_order` path in
 `.cb_build_tibble()`. Passing a **data frame** as the first arg builds a temp JSON silently
-(extract + metadata_add_level_stats, `...` → extract) and sets `keep_original`.
+(extract + metadata_add_level_stats,`...` → extract) and sets `keep_original`.
 
 **Key Design Decision** — Codebook xlsx layout (`.cb_write_xlsx`): column order
 `h | variable | description | type | role | missing_values | valeur | n | freq | sep | orig_val | code`
@@ -241,7 +255,7 @@ arg) holding a `.battery_selector()` string (unique common prefix → `starts_wi
 names → `matches()`), merged into one wrapped cell per (contiguous) battery, styled outside the box.
 Each true battery also gets a dark-red MEDIUM rectangle around its `valeur|n|freq` block
 (`wb_add_border(update=TRUE)` overlay, after the xf palette — numfmt/fill preserved; `.battery` internal
-col drives it). A top level-1 `# ` title (`config.survey_title`) + ONE front-matter row per survey_*
+col drives it). A top level-1 `#` title (`config.survey_title`) + ONE front-matter row per survey_*
 field (each merging `description..valeur`, rich text via `.md_to_fmt_txt()`; `config.n_individuals` in
 the `n` column of the survey_population row; explicit row height since merges don't auto-fit) precede the
 variables. Header/title/front-matter rows carry no block borders.
@@ -278,31 +292,31 @@ block (they set values, not xf). `sd` numfmt is `"σ"0.0`.
 **Key Design Decision** — The whole codebook outline is **data-driven** (per-variable `headers`
 array + `battery` title in the JSON) and built in **one AI pass**, `ai_build_outline()`, replacing
 the old `detect_batteries()` + `ai_name_batteries()` two-step (and the `titles`/`binary_batteries`
-codebook args, long gone). The outline SECTIONS are user-provided and fixed — the **`## ` blocs**
-always (documentation), plus optional **`### ` subthemes** for big surveys. The AI owns a **single
-level**, the **`#### ` group**, and covers EVERY variable with one (full coverage), so the codebook
-reads as a table of contents. A `#### ` is either a **battery** or a **thematic group**; together
+codebook args, long gone). The outline SECTIONS are user-provided and fixed — the **`##` blocs**
+always (documentation), plus optional **`###` subthemes** for big surveys. The AI owns a **single
+level**, the **`####` group**, and covers EVERY variable with one (full coverage), so the codebook
+reads as a table of contents. A `####` is either a **battery** or a **thematic group**; together
 they leave nothing loose. Two storage concerns, deliberately split: `headers` holds the outline as
-**start-markers** (`## `/`### ` user anchors + non-battery `#### ` groups, rendered once, level = `#`
+**start-markers** (`##`/`###` user anchors + non-battery `####` groups, rendered once, level = `#`
 count clamped 2..4), and `battery` (REPEATED on every member) flags a **true multi-answer battery** —
 which alone gets the boxed rendering + closing spacer + the auto-added prefixe_question selector column
 and a dark-red valeur|n|freq rectangle. The codebook
-renderer already treats a `#### ` in `headers` as a size-10 title, so non-battery groups need **no
-renderer change**. Input to the model = every var in order with the fixed `## `/`### ` sections
+renderer already treats a `####` in `headers` as a size-10 title, so non-battery groups need **no
+renderer change**. Input to the model = every var in order with the fixed `##`/`###` sections
 interleaved as `{"section":"..."}` rows + `config.survey_description` + a deterministic candidate
 `batt` seed; output = **contiguous spans** `[{title, from, to, battery}]` (battery boolean, no level).
-Applied authoritatively: clears the AI-owned level (`#### ` in `headers`, all `battery`), validates each
-span (unknown/reversed/**crosses-## **/**crosses-### **/overlap rejected — a `#### ` stays inside one
-`## ` and one `### ` section). `#### ` groups have **no minimum size** (they tile every section); a
+Applied authoritatively: clears the AI-owned level (`####` in `headers`, all `battery`), validates each
+span (unknown/reversed/**crosses-##**/**crosses-###**/overlap rejected — a `####` stays inside one
+`##` and one `###` section). `####` groups have **no minimum size** (they tile every section); a
 `battery:true` below `min_size` is **demoted** to a thematic group (kept, not boxed) so coverage never
-breaks. Writes non-battery `#### ` to `headers` and true batteries (>=`min_size`) to `battery`,
-re-sorts headers outermost-first, and reports any variable left in no `#### ` (incomplete coverage);
+breaks. Writes non-battery `####` to `headers` and true batteries (>=`min_size`) to `battery`,
+re-sorts headers outermost-first, and reports any variable left in no `####` (incomplete coverage);
 JSON untouched on 0 valid spans. `seed=FALSE` → no seed. The internal `.batt_seed_candidates()` seed is
 just a HINT: same role + level-code signature with a **precision gate** (must share a name-token prefix
 OR a >=10-char label stem — role+codes alone is not a battery), prefix-cluster split, type-outlier heal
-+ flag; it does NOT persist and the prompt frames it as a candidate the AI overrides (and to keep
+- flag; it does NOT persist and the prompt frames it as a candidate the AI overrides (and to keep
 derived/recap variables OUT of batteries). `extract(headers=)` is source of truth for the USER levels
-(`## `/`### `): it clears+rewrites them and keeps only the AI `#### ` across re-extract.
+(`##`/`###`): it clears+rewrites them and keeps only the AI `####` across re-extract.
 `ai_suggest_labels()` chunking never cuts a battery in two.
 `preview_outline()` prints the full `##`/`###`/`####` markdown outline (batteries expanded). Prompt =
 `instructions/outline_prompt.md` — real pps20 examples that teach the seed-override (split an over-merged
@@ -332,6 +346,23 @@ same numeric sort for observed-but-undeclared codes in `metadata_add_level_stats
 `missing_chr`/yes-no labels BEFORE the first extract, or fix that variable's `order` in the JSON once.
 Separately, `ai_classify_roles()` never writes `factor_binary` without exactly 2 non-missing levels (→
 `factor_nominal`) — the single "born-consistent" guard.
+
+**Key Design Decision** — Empty levels & the removal of `factor_unique_value`. A declared value label
+whose code is never observed in the data is a legitimate EMPTY level, not an error (Stata/SPSS/SAS value
+labels are metadata independent of the data; `labelled::to_factor(drop_unused_labels = FALSE)` keeps
+them). `extract_survey_metadata(empty_levels = c("small_factors","all","none"))` decides: default
+`"small_factors"` keeps unobserved codes as levels when the var declares ≤ `max_levels_cat` codes (else
+drops them — over-declared shared label sets); `"all"` always keeps; `"none"` is the classic inner-join
+drop. Applied in the `has_val_labs` + `is.factor` branches via `.keep_empty_levels(observed, n_declared,
+mode, max_levels_cat)`; an `is_observed` mask is threaded to (a) confine empties to FACTORS (numeric-role
+pruning intersects with `is_observed`) and (b) flag each kept-unobserved level `n: 0` at creation
+(visible in manual review; re-confirmed by `metadata_add_level_stats`). Consequence: a labelled 0/1 with
+only "Non" observed keeps both poles → `factor_binary` (Oui `order 1`, empty, `n:0`), so binary batteries
+never lose a member's level set. `factor_unique_value` is **deleted** — the `ai_classify_roles()` auto-nd1
+`else` branch now leaves a genuine single-category factor as its detected `factor_nominal`.
+`generate_format_script()` emits `factor(as.character(x)) |> fct_expand(<empty codes>)` before
+`fct_recode` (only when an empty level exists) so the pole survives with no forcats warning. Q2 choice:
+unlabelled single-value numerics stay `integer_count` (no `.detect_role_v3` change).
 
 **Key Design Decision** — `metadata_add_level_stats(meta_json, df, add_observed_levels = TRUE,
 max_new_levels = 50L)` adds, for **factor** variables, value codes present in `df` but absent from the
@@ -365,10 +396,11 @@ commune names / generic geo codes are left to the name rule (unreliable by conte
 
 ### Running Tests
 
+Since this is not a package, directly source the test main script, which should internally use `testthat::test_dir`.
+
 ```r
 # In a temp .R file (outside tests/), then run:  Rscript that_file.R   (isolated; tests live source)
-devtools::test("d:/Statistiques/github/socio_public_services")                  # whole suite (~46s)
-devtools::test("d:/Statistiques/github/socio_public_services", filter = "tab")  # one/few files: regex on test-<name>.R
+source("tests/testthat.R", encoding="UTF-8")
 ```
 
 ### Shared Fixtures (`tests/testthat.R`)
@@ -405,22 +437,22 @@ Each dummy has matching configs:
 
 ### Test File Organization
 
-| File                            | Prefix | What it tests                                             |
-|---------------------------------|--------|-----------------------------------------------------------|
-| `test-extract-metadata.R`       | E      | Role detection for all 3 dummies + regression cases       |
-| `test-sas-format-parser.R`      | P      | `parse_sas_formats()` and `apply_sas_labels()` unit tests |
+| File                            | Prefix | What it tests                                              |
+|---------------------------------|--------|------------------------------------------------------------|
+| `test-extract-metadata.R`       | E      | Role detection for all 3 dummies + regression cases        |
+| `test-sas-format-parser.R`      | P      | `parse_sas_formats()` and `apply_sas_labels()` unit tests  |
 | `test-sas-value-labels.R`       | V      | `apply_sas_value_labels()` df-aware value-label apply      |
-| `test-pipeline-integration.R`   | INT    | End-to-end pipeline with mocked AI calls                  |
-| `test-ai-classify-roles.R`      | A/AC   | `ai_classify_roles()` logic + auto-classification         |
-| `test-ai-suggest-labels.R`      | L/B    | `ai_suggest_labels()` prompt building + JSON writing      |
-| `test-ai-merge-levels.R`        | M      | `ai_merge_levels()` logic                                 |
-| `test-generate-format-script.R` | G/CV/H | `generate_format_script()` + level-label / stats-comment  |
-| `test-generate-codebook.R`      | C      | `generate_codebook()` tibble build + xlsx write           |
-| `test-outline-seed.R`           | D      | `.batt_seed_candidates()` seed + precision gate + preview |
+| `test-pipeline-integration.R`   | INT    | End-to-end pipeline with mocked AI calls                   |
+| `test-ai-classify-roles.R`      | A/AC   | `ai_classify_roles()` logic + auto-classification          |
+| `test-ai-suggest-labels.R`      | L/B    | `ai_suggest_labels()` prompt building + JSON writing       |
+| `test-ai-merge-levels.R`        | M      | `ai_merge_levels()` logic                                  |
+| `test-generate-format-script.R` | G/CV/H | `generate_format_script()` + level-label / stats-comment   |
+| `test-generate-codebook.R`      | C      | `generate_codebook()` tibble build + xlsx write            |
+| `test-outline-seed.R`           | D      | `.batt_seed_candidates()` seed + precision gate + preview  |
 | `test-ai-build-outline.R`       | OU     | `ai_build_outline()` #### spans → headers/battery (mock)   |
 | `test-keep-codes.R`             | KC     | keep_codes numbering + set_keep_codes / suggest_keep_codes |
-| `test-json-roundtrip.R`         | J/K/BT | JSON roundtrip, backup, migration, battery/headers fields |
-| `test-nomenclatures-insee.R`    | O      | INSEE nomenclature helpers                                |
+| `test-json-roundtrip.R`         | J/K/BT | JSON roundtrip, backup, migration, battery/headers fields  |
+| `test-nomenclatures-insee.R`    | O      | INSEE nomenclature helpers                                 |
 
 ### Mocking AI Calls
 

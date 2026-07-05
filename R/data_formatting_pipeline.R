@@ -2094,6 +2094,18 @@ apply_nomenclatures <- function(
 # 2. extract_survey_metadata()
 # ============================================================
 
+# Which declared value-label codes to KEEP as levels, given `observed` (a logical,
+# one per declared code, TRUE = present in the data). Unobserved codes that are kept
+# become EMPTY levels (flagged n:0 at extract). See `empty_levels` in extract_survey_metadata().
+.keep_empty_levels <- function(observed, n_declared, mode, max_levels_cat) {
+  switch(mode,
+    all           = rep(TRUE, n_declared),
+    none          = observed,
+    small_factors = if (n_declared <= max_levels_cat) rep(TRUE, n_declared) else observed,
+    observed  # defensive default
+  )
+}
+
 #' Extract variable and value metadata from a labelled tibble
 #'
 #' Produces a "varmod" tibble. Iterate: run, review console output, run
@@ -2112,6 +2124,15 @@ apply_nomenclatures <- function(
 #' @param no_labels       Keywords for the "negative" level. NULL = built-in.
 #' @param max_levels_cat  Unlabelled numeric vars with ≤ this many distinct
 #'                        non-missing values are classed "integer" (not factor).
+#'                        Also the size cutoff for keeping empty levels under
+#'                        \code{empty_levels = "small_factors"}.
+#' @param empty_levels    How to treat declared value-label codes absent from the
+#'                        data: "small_factors" (default) keeps them as empty
+#'                        levels (flagged \code{n:0}) for factor-sized declared sets
+#'                        (≤ max_levels_cat codes) and drops them from over-declared
+#'                        sets; "all" always keeps them; "none" keeps only observed
+#'                        codes. Empty levels keep every member of a binary/Likert
+#'                        battery on the same level set.
 #' @param meta_json       Recommended. Path to the unified \code{*.survey_meta.json}
 #'                        file. If the file does not exist yet, it is created from
 #'                        the current extraction (with auto-detected roles and
@@ -2192,8 +2213,15 @@ extract_survey_metadata <- function(
     survey_producer    = NULL,
     survey_source      = NULL,
     survey_distributor = NULL,
-    survey_methodology = NULL
+    survey_methodology = NULL,
+    empty_levels       = c("small_factors", "all", "none")
 ) {
+  # `empty_levels`: how to treat declared value-label codes NOT observed in the data.
+  #   "small_factors" (default) keep them as EMPTY levels (flagged n:0) only when the
+  #     variable declares <= max_levels_cat codes (binaries, Likert, small nominal —
+  #     so every battery member shares one level set); drop them from over-declared sets.
+  #   "all"  keep every declared code as a level.  "none"  keep only observed codes.
+  empty_levels <- match.arg(empty_levels)
   # `headers`: optional named vector c("## Titre" = "VARNAME", ...) — the survey
   # outline. When supplied it is the SOURCE OF TRUTH: re-applied (replacing) each
   # run, so edit it in your script, not in the JSON. Omit it to instead preserve
@@ -2311,23 +2339,23 @@ extract_survey_metadata <- function(
       all_codes  <- unname(val_labs)[sorted_idx]   # value codes
       all_labels <- .normalize_text(names(val_labs)[sorted_idx], sanitize = TRUE)
 
-      # Inner join: keep only codes that are actually observed in the data.
-      # Strategy: try numeric-numeric match first (handles double/integer columns
-      # where the stored value may be 1.0 but the label code is 1L); fall back to
-      # string comparison when either side contains non-numeric codes (e.g. SPSS
-      # string variables with text value labels).
+      # Which declared codes are actually observed in the data. Strategy: try
+      # numeric-numeric match first (handles double/integer columns where the stored
+      # value may be 1.0 but the label code is 1L); fall back to string comparison
+      # when either side has non-numeric codes (SPSS string vars with text labels).
       obs_num  <- suppressWarnings(as.numeric(as.character(vals_present)))
       code_num <- suppressWarnings(as.numeric(as.character(all_codes)))
-      if (!anyNA(obs_num) && !anyNA(code_num)) {
-        keep <- code_num %in% obs_num
+      observed <- if (!anyNA(obs_num) && !anyNA(code_num)) {
+        code_num %in% obs_num
       } else {
-        obs_chr  <- as.character(vals_present)
-        keep     <- as.character(all_codes) %in% obs_chr
+        as.character(all_codes) %in% as.character(vals_present)
       }
+      # Unobserved codes are kept as EMPTY levels (n:0) or dropped, per `empty_levels`.
+      retain <- .keep_empty_levels(observed, length(all_codes), empty_levels, max_levels_cat)
 
-      # Collect dropped codes for a single summary message after the loop.
-      dropped_codes  <- all_codes[!keep]
-      dropped_labels <- all_labels[!keep]
+      # Collect genuinely dropped codes (unobserved AND not retained) for a summary.
+      dropped_codes  <- all_codes[!retain]
+      dropped_labels <- all_labels[!retain]
       if (length(dropped_codes) > 0) {
         dropped_lines <<- c(dropped_lines,
           purrr::map_chr(seq_along(dropped_codes), function(di) {
@@ -2339,15 +2367,21 @@ extract_survey_metadata <- function(
         )
       }
 
-      raw_values <- all_codes[keep]
-      raw_labels <- all_labels[keep]
+      raw_values  <- all_codes[retain]
+      raw_labels  <- all_labels[retain]
+      is_observed <- observed[retain]
     } else if (is.factor(col)) {
-      raw_values <- levels(col)
-      raw_labels <- .normalize_text(levels(col), sanitize = TRUE)
+      lev_all     <- levels(col)
+      observed    <- lev_all %in% as.character(vals_present)
+      retain      <- .keep_empty_levels(observed, length(lev_all), empty_levels, max_levels_cat)
+      raw_values  <- lev_all[retain]
+      raw_labels  <- .normalize_text(lev_all[retain], sanitize = TRUE)
+      is_observed <- observed[retain]
     } else {
       sorted_vals <- sort(vals_present)
       raw_values  <- as.character(sorted_vals)
       raw_labels  <- .normalize_text(as.character(sorted_vals), sanitize = TRUE)
+      is_observed <- rep(TRUE, length(raw_values))  # bare numeric: levels ARE observed values
     }
 
     # --- flag candidate missing values (unified: numeric code + label text) ---
@@ -2407,6 +2441,9 @@ extract_survey_metadata <- function(
       n_unlab_obs <- n_dist_total - n_labelled_obs     # observed values with NO label
       sparse_sentinels <- n_extra_lab <= 2L || n_unlab_obs > max_levels_cat
       keep <- if (sparse_sentinels) is_miss | is_labelled else is_miss
+      # Empty levels are a FACTOR-only concept: for numeric roles keep only special
+      # codes that actually occur, so unobserved sentinels don't linger as n:0 noise.
+      keep <- keep & is_observed
       # Report labelled codes auto-flagged missing without being in missing_num,
       # so a rare meaningful code (e.g. top-coding) can be un-flagged in the JSON.
       auto <- keep & is_labelled & !is_miss
@@ -2415,13 +2452,15 @@ extract_survey_metadata <- function(
           purrr::map_chr(which(auto), function(k)
             sprintf("  %-22s code=%-8s \"%s\"", vname, raw_values[[k]], raw_labels[[k]])))
       }
-      raw_values <- raw_values[keep]
-      raw_labels <- raw_labels[keep]
-      is_miss    <- rep(TRUE, length(raw_values))   # all kept numeric levels are missing/special
+      raw_values  <- raw_values[keep]
+      raw_labels  <- raw_labels[keep]
+      is_observed <- is_observed[keep]
+      is_miss     <- rep(TRUE, length(raw_values))   # all kept numeric levels are missing/special
     } else if (detected_role == "identifier") {
-      raw_values <- character(0)
-      raw_labels <- character(0)
-      is_miss    <- logical(0)
+      raw_values  <- character(0)
+      raw_labels  <- character(0)
+      is_observed <- logical(0)
+      is_miss     <- logical(0)
     }
 
     # --- order vector: initial sequential assignment for non-missing levels ---
@@ -2475,8 +2514,8 @@ extract_survey_metadata <- function(
     levels_list <- if (length(raw_values) > 0) {
       purrr::set_names(
         purrr::pmap(
-          list(raw_values, raw_labels, is_miss, order_init),
-          function(v, l, m, o) {
+          list(raw_values, raw_labels, is_miss, order_init, is_observed),
+          function(v, l, m, o, obs) {
             # For a missing level, drop a redundant label (empty, or label == code
             # as for plain numeric sentinels) to "" so the writer omits it:
             # `"999": { "missing": true }`. Non-missing levels keep their label.
@@ -2485,6 +2524,9 @@ extract_survey_metadata <- function(
             if (!isTRUE(m)) {
               entry$order <- if (!is.na(o)) o else NA_integer_
             }
+            # A kept-but-unobserved code is an EMPTY level: flag n:0 at creation so it
+            # shows in manual review (metadata_add_level_stats re-confirms it later).
+            if (!isTRUE(obs)) entry$n <- 0L
             entry
           }
         ),
@@ -4046,10 +4088,10 @@ ai_classify_roles <- function(
                    grepl(.opentext_re, vlbl, perl = TRUE)) {
           # Open-text / free-text field ("noter en clair", "précisez"…)
           existing_auto$variables[[vn]]$role <- "other"
-        } else {
-          # True single-category factor (e.g. question filtered to one answer)
-          existing_auto$variables[[vn]]$role <- "factor_unique_value"
         }
+        # else: a genuine single-category factor keeps its detected role (factor_nominal).
+        #   `factor_unique_value` is gone — an empty pole is now kept at extract (see the
+        #   `empty_levels` argument), so a binary never collapses to a single level.
       }
     }
 
@@ -7134,7 +7176,7 @@ ai_suggest_varnames <- function(
           new_label  = "NULL",
           code       = paste0('"', ml$code, '"'),
           pct        = NULL,
-          n          = NULL,
+          n          = ml$n,           # kept for fct_expand detection (not shown for missing)
           orig_label = ml$orig_label,
           is_missing = TRUE
         )
@@ -7151,8 +7193,24 @@ ai_suggest_varnames <- function(
       })
       w_pct_n <- max(nchar(pct_n_strs))
 
+      # forcats fct_expand(): declare codes that may be ABSENT from the data as levels
+      # BEFORE fct_recode, so empty levels (n:0) survive and fct_recode never warns
+      # "Unknown levels". Only codes with n==0 are expanded (a fully-observed variable
+      # emits no fct_expand → output unchanged); if any n is unknown (stats not run),
+      # expand every declared code as a safe fallback.
+      lvl_ns <- lapply(recode_entries, function(x) x$n)
+      expand_codes <- if (any(vapply(lvl_ns, is.null, logical(1)))) {
+        vapply(recode_entries, function(x) x$code, character(1))
+      } else {
+        vapply(recode_entries[vapply(lvl_ns, function(v) isTRUE(v == 0L), logical(1))],
+               function(x) x$code, character(1))
+      }
+      expand_pipe <- if (length(expand_codes) > 0)
+        paste0(" |> fct_expand(", paste(expand_codes, collapse = ", "), ")") else ""
+
       lines <- c(lines,
-        paste0(var_expr, " <- fct_recode(factor(as.character(", var_expr, ')), # "new" = "old"'))
+        paste0(var_expr, " <- fct_recode(factor(as.character(", var_expr, "))",
+               expand_pipe, ', # "new" = "old"'))
       for (ri in seq_along(recode_entries)) {
         re <- recode_entries[[ri]]
         rline <- paste0("  ", .gfs_rpad(re$new_label, w_lbl), " = ",
@@ -7462,12 +7520,12 @@ generate_format_script <- function(meta_json,
   if (identical(lang, "en"))
     c(h = "", variable = "variable", type = "type", role = "role",
       description = "description", na = "missing_values", val = "value", n = "n",
-      pct = "freq", orig_val = "original label", orig_code = "code",
-      question_prefix = "question")
+      pct = "freq", orig_val = "original_label", orig_code = "original_code",
+      question_prefix = "question_prefix")
   else
     c(h = "", variable = "variable", type = "type", role = "role",
       description = "description", na = "valeurs_manquantes", val = "valeur", n = "n",
-      pct = "freq", orig_val = "libellé d'origine", orig_code = "code",
+      pct = "freq", orig_val = "libellé_origine", orig_code = "code_origine",
       question_prefix = "prefixe_question")
 }
 

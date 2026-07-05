@@ -513,7 +513,7 @@ test_that("A1: nd:0 integer vars auto-classified as integer_count without API ca
   expect_equal(res$role, "integer_count")
 })
 
-test_that("A2: nd:1 factor vars auto-classified as factor_unique_value without API call", {
+test_that("A2: nd:1 factor var keeps its detected role (factor_nominal) without API call", {
   withr::local_dir(.test_proj_root)
   path <- tmp_json()
   vars <- list(
@@ -535,8 +535,9 @@ test_that("A2: nd:1 factor vars auto-classified as factor_unique_value without A
     ai_classify_roles(path)
   )
 
+  # factor_unique_value is gone: a genuine single-category factor stays factor_nominal.
   res <- .read_meta_json(path)$variables$CONST
-  expect_equal(res$role, "factor_unique_value")
+  expect_equal(res$role, "factor_nominal")
 })
 
 test_that("A3: mixed nd:0 + nd:1 + normal vars — auto + API classification", {
@@ -577,7 +578,7 @@ test_that("A3: mixed nd:0 + nd:1 + normal vars — auto + API classification", {
 
   res <- .read_meta_json(path)$variables
   expect_equal(res$AGE_Q$role, "integer_count")
-  expect_equal(res$CONST$role, "factor_unique_value")
+  expect_equal(res$CONST$role, "factor_nominal")   # nd:1 factor keeps its detected role
   expect_equal(res$SATISF$role, "factor_ordinal")
 })
 
@@ -804,10 +805,10 @@ test_that("M1: AI returns miss field → message printed with flagged label", {
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# I. Pre-AI nd:1 disambiguation — integer_count / other / factor_unique_value
+# I. Pre-AI nd:1 disambiguation — integer_count / other / (else) keep detected role
 # ---------------------------------------------------------------------------
 
-test_that("I1: nd:1 + detected_role=integer → integer_count (not factor_unique_value)", {
+test_that("I1: nd:1 + detected_role=integer → integer_count", {
   withr::local_dir(.test_proj_root)
   path <- tmp_json()
   vars <- list(
@@ -930,7 +931,7 @@ test_that("I3b: nd:1 + 'preciser' in var_label → other (open-text detected via
                label = "'precisez' in var_label → other")
 })
 
-test_that("I4: nd:1 + small n_distinct_data + normal label → factor_unique_value", {
+test_that("I4: nd:1 + small n_distinct_data + normal label → keeps factor_nominal", {
   withr::local_dir(.test_proj_root)
   path <- tmp_json()
   vars <- list(
@@ -949,7 +950,7 @@ test_that("I4: nd:1 + small n_distinct_data + normal label → factor_unique_val
 
   .orig <- get("ai_call_claude", envir = globalenv())
   assign("ai_call_claude",
-    function(...) stop("API should not be called for true factor_unique_value"),
+    function(...) stop("API should not be called for a genuine single-category factor"),
     envir = globalenv())
   on.exit(assign("ai_call_claude", .orig, envir = globalenv()), add = TRUE)
 
@@ -957,9 +958,10 @@ test_that("I4: nd:1 + small n_distinct_data + normal label → factor_unique_val
     ai_classify_roles(path)
   )
 
+  # No factor_unique_value: a genuine single-category factor keeps its detected role.
   res <- .read_meta_json(path)$variables$Q15A
-  expect_equal(res$role, "factor_unique_value",
-               label = "True single-category factor → factor_unique_value")
+  expect_equal(res$role, "factor_nominal",
+               label = "True single-category factor keeps factor_nominal")
 })
 
 test_that("I5: nd:0 + large n_distinct_data + factor_nominal → integer_count", {
@@ -1055,7 +1057,7 @@ test_that("AC1: edge dummy ALL_MISS (nd:0) auto-classified without API call", {
               info = paste("ALL_MISS role:", res$role))
 })
 
-test_that("AC2: edge dummy SINGLE_VAL (nd:1) auto-classified as factor_unique_value", {
+test_that("AC2: edge dummy SINGLE_VAL (nd:1) keeps detected role factor_nominal", {
   withr::local_dir(.test_proj_root)
   path <- tmp_json()
   on.exit(unlink(path))
@@ -1084,8 +1086,8 @@ test_that("AC2: edge dummy SINGLE_VAL (nd:1) auto-classified as factor_unique_va
   )
 
   res <- .read_meta_json(path)$variables$SINGLE_VAL
-  # nd:1 → auto-classified as factor_unique_value (no API needed)
-  expect_equal(res$role, "factor_unique_value",
+  # nd:1 → keeps its detected role factor_nominal (no API needed, no factor_unique_value)
+  expect_equal(res$role, "factor_nominal",
                info = paste("SINGLE_VAL role:", res$role))
 })
 
