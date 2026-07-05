@@ -294,18 +294,25 @@ names → `matches()`), merged into one wrapped cell per (contiguous) battery, s
 Non-battery blocks also get a `pct` (freq) **right border** (closes the stats block). Each true battery
 gets a dark-red MEDIUM rectangle around its `valeur|n|freq` block (`wb_add_border(update=TRUE)` overlay,
 after the xf palette — numfmt/fill preserved; `.battery` internal col drives it) PLUS the rose `#FDE9ED`
-fill (in the palette). **Data bars** (blue, fixed 0–1 scale, `wb_add_conditional_formatting` type
-`dataBar` over contiguous factor-`pct` runs) visualise `freq` for factor rows only (numeric `pct` holds
-σ). Title rows KEEP their `#` markers (machine-readable hierarchy) and render underline-free; `##`/`###`
-get a full-width colored band (`BAND2`/`BAND3`, navy text), `#### `/level-1 stay red, no band. A top
+fill (in the palette). **Data bars** (color `#F47474`, fixed 0–1 scale) visualise `freq` for factor rows
+only (numeric `pct` holds σ). CRITICAL: emit ONE `dataBar` rule then widen its `sqref` (the object's
+`$conditionalFormatting$sqref` + the x14 `extLst` `<xm:sqref>`) to a MULTI-AREA list of the factor runs —
+Excel's native form; separate per-run rules render only the FIRST range in Excel/LibreOffice. Title rows
+KEEP their `#` markers (machine-readable hierarchy), render underline-free, RED text at every level;
+`##` gets a darker-rose band (`BAND2`), `###` a cream band (`BAND3`), `####`/level-1 no band. Role chips
+per role incl. `comptage`=violet. A top
 level-1 `# ` title (`config.survey_title`) + ONE front-matter row per survey_* field (each merging
 `description..valeur`, rich text via `.md_to_fmt_txt()`; `config.n_individuals` in the `n` column of the
-survey_population row) then an always-on **"how to read" legend** (`howto_head`/`howto` rows: one line per
-PRESENT column + type + role, via `.cb_howto_columns/_types/_roles`) then a hyperlinked **table of
+survey_population row) then an always-on **"how to read" legend** (a `howto_head` `##` band + ONE `howto`
+row whose single merged `description..freq` cell holds the WHOLE body: intro, a bulleted "Description des
+colonnes" via `.cb_howto_columns`, then a NESTED "Types et rôles" grouping each present role under its type
+— types `.cb_type_desc`, roles `.cb_role_info`; `\n`-separated with blank lines for spacing + a trailing
+empty line, row height estimated since merged cells don't auto-fit) then a hyperlinked **table of
 contents** (`toc_head`/`toc` rows → internal `wb_add_hyperlink` to each `##`/`###` section's row,
-resolved by matching `.toc_target` against title `h`) precede the variables. New row types
-`howto_head`/`howto`/`toc_head`/`toc` join `.cb_segment_by_variable`'s front group; new internal fields
-`.role_key` (chips) + `.toc_target`. Header/title/front-matter/legend/toc rows carry no block borders.
+resolved by matching `.toc_target` against title `h`; last entry carries `\n\n` for spacing) precede the
+variables. The legend/TOC headings render as `##`/`###` (`howto_head`=level 2, `toc_head`=level 3, via
+the title loop). New row types `howto_head`/`howto`/`toc_head`/`toc` join `.cb_segment_by_variable`'s
+front group; new internal fields `.role_key` (chips) + `.toc_target`. Header/title/front-matter/legend/toc rows carry no block borders.
 `description` is always bold. Widths: `description` 72, `missing_values` 30, `orig_val` 60; `variable`
 is 18 but widens to 27 only when the longest name would wrap. Section titles sit in column `h` and
 **overflow** into the empty cells to their right: the data write uses `na = NULL` so trailing cells are

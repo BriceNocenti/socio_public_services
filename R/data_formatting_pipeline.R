@@ -7783,39 +7783,42 @@ generate_format_script <- function(meta_json,
 
 .cb_howto_columns <- function(lang, cols) {
   fr <- !identical(lang, "en")
-  d <- list(  # key = c(fr_label, fr_text, en_label, en_text)
-    variable        = c("variable", "le nom de code de la variable dans le fichier de données",
-                        "variable", "the variable's code name in the data file"),
+  d <- list(  # key = c(fr_label, fr_text, en_label, en_text) ; the "- " bullet is
+              # added at format time (below), not baked into the label.
+    variable        = c("variable", "le nom de code de la variable dans la base de données",
+                        "variable", "the variable's code name in the database"),
     description     = c("description", "ce que mesure la variable, en clair",
                         "description", "what the variable measures, in plain words"),
-    type            = c("type", "le type informatique (catégorielle, nombre, texte…)",
-                        "type", "the storage type (factor, number, text…)"),
+    type            = c("type", "le type informatique de la variable (catégorielle, nombre, texte…)",
+                        "type", "the variable's storage type (categorical, number, text…)"),
     role            = c("role", "le rôle statistique de la variable (voir ci-dessous)",
-                        "role", "the statistical role of the variable (see below)"),
+                        "role", "the variable's statistical role (see below)"),
     na              = c("valeurs_manquantes", "nombre et part de non-réponses (NA), avec le détail des codes manquants",
-                        "missing_values", "count and share of non-responses (NA), with the missing codes"),
-    val             = c("valeur", "les modalités (réponses possibles) ou, pour un nombre, les statistiques résumées",
-                        "value", "the categories (possible answers) or, for a number, summary statistics"),
-    n               = c("n", "le nombre d'individus concernés par chaque modalité",
-                        "n", "the number of individuals in each category"),
-    pct             = c("freq", "la fréquence (part en %) de chaque modalité — la barre bleue la représente",
-                        "freq", "the frequency (% share) of each category — shown by the blue bar"),
-    orig_val        = c("libellé_origine", "le libellé d'origine de la modalité, avant simplification",
-                        "original_label", "the original category label, before simplification"),
-    orig_code       = c("code_origine", "le code d'origine de la modalité dans les données brutes",
-                        "original_code", "the original category code in the raw data"),
-    question_prefix = c("prefixe_question", "un sélecteur dplyr prêt à l'emploi pour toute la batterie de questions",
-                        "question_prefix", "a ready-to-use dplyr selector for the whole question battery"))
+                        "missing_values", "count and share of non-responses (NA), with the detail of the missing codes"),
+    val             = c("valeur", "pour les variables catégorielles, les modalités (réponses possibles) ; pour les variables numériques, des statistiques descriptives",
+                        "value", "for categorical variables, the categories (possible answers); for numeric variables, descriptive statistics"),
+    n               = c("n", "pour les variables catégorielles, le nombre d'individus concernés par chaque modalité ; pour les variables numériques, la moyenne, le maximum, le troisième quartile (Q3), la médiane, le premier quartile (Q1), le minimum",
+                        "n", "for categorical variables, the number of individuals in each category; for numeric variables, the mean, maximum, third quartile (Q3), median, first quartile (Q1), minimum"),
+    pct             = c("freq", "la fréquence (part en %) de chaque modalité",
+                        "freq", "the frequency (% share) of each category"),
+    orig_val        = c("libellé_origine", "le libellé d'origine de la modalité, dans la base de données initiale",
+                        "original_label", "the category's original label, in the initial database"),
+    orig_code       = c("code_origine", "le code d'origine de la modalité, dans la base de données initiale",
+                        "original_code", "the category's original code, in the initial database"),
+    question_prefix = c("prefixe_question", "un préfixe commun unique pour les différentes réponses à une même question (batterie de questions), ou quand il n’y en a pas la liste des variables de cette batterie",
+                        "question_prefix", "a unique common prefix for the answers to one question (a question battery), or, failing that, the list of that battery's variables"))
   out <- character(0)
   for (k in cols) {
     v <- d[[k]]; if (is.null(v)) next
-    out <- c(out, if (fr) paste0("**", v[[1]], "** : ", v[[2]])
-                  else    paste0("**", v[[3]], "** : ", v[[4]]))
+    lab <- if (fr) v[[1]] else v[[3]]; txt <- if (fr) v[[2]] else v[[4]]
+    out <- c(out, paste0("- **", lab, "** : ", txt))
   }
   out
 }
 
-.cb_howto_roles <- function(lang, role_keys) {
+# Role (label, text) keyed by role key, for the current language; NULL if unknown.
+# Used to nest roles under their type in the "Types et rôles" legend.
+.cb_role_info <- function(lang, role_key) {
   fr <- !identical(lang, "en")
   d <- list(
     factor_binary  = c("binaire", "deux réponses possibles (ex. oui / non)",
@@ -7824,42 +7827,32 @@ generate_format_script <- function(meta_json,
                        "nominal", "unordered categories (e.g. region, sex)"),
     factor_ordinal = c("ordinale", "catégories ordonnées (ex. jamais < parfois < souvent)",
                        "ordinal", "ordered categories (e.g. never < sometimes < often)"),
-    integer_count  = c("comptage", "un nombre entier qui dénombre (ex. nombre d'activités)",
-                       "count", "a whole number counting something (e.g. number of activities)"),
+    integer_count  = c("comptage", "un nombre entier qui dénombre divers éléments (ex. nombre d'activités)",
+                       "count", "a whole number counting various items (e.g. number of activities)"),
     integer        = c("discret", "un nombre entier",
                        "discrete", "a whole number"),
     integer_scale  = c("échelle", "une échelle numérique",
                        "scale", "a numeric scale"),
     double         = c("continue", "un nombre à décimales (ex. un montant, une durée)",
                        "continuous", "a number with decimals (e.g. an amount, a duration)"),
-    identifier     = c("identifiant", "un code identifiant chaque individu (non analysable)",
-                       "identifier", "a code identifying each individual (not analysable)"))
-  out <- character(0)
-  for (k in role_keys) {
-    v <- d[[k]]; if (is.null(v)) next
-    out <- c(out, if (fr) paste0("**", v[[1]], "** : ", v[[2]])
-                  else    paste0("**", v[[3]], "** : ", v[[4]]))
-  }
-  out
+    identifier     = c("identifiant", "un code identifiant chaque individu",
+                       "identifier", "a code identifying each individual"))
+  v <- d[[role_key]]; if (is.null(v)) return(NULL)
+  if (fr) c(v[[1]], v[[2]]) else c(v[[3]], v[[4]])
 }
 
-# Types glossary, keyed by the DISPLAY label .cb_type_label() produces (so the
-# key set matches per language). Only the labels present in the sheet are passed.
-.cb_howto_types <- function(lang, type_labels) {
-  g <- if (identical(lang, "en")) list(
+# Type description text, keyed by the DISPLAY label .cb_type_label() produces (so
+# the key set matches per language). "" if the label is unknown.
+.cb_type_desc <- function(lang, type_label) {
+  g <- if (identical(lang, "en")) c(
     factor = "a categorical variable (a factor)", integer = "a whole number",
     double = "a number with decimals", chr = "free text",
     logical = "true or false", date = "a date"
-  ) else list(
+  ) else c(
     "catégorielle" = "une variable à catégories (un facteur)", "nb entier" = "un nombre entier",
     "nb décimal" = "un nombre à décimales", "texte" = "du texte libre",
     "booléenne" = "vrai ou faux", "date" = "une date")
-  out <- character(0)
-  for (t in type_labels) {
-    v <- g[[t]]; if (is.null(v)) next
-    out <- c(out, paste0("**", t, "** : ", v))
-  }
-  out
+  unname(g[type_label]) %||% ""
 }
 
 # One empty codebook row (all fields blank / typed NA).
@@ -8186,9 +8179,15 @@ generate_format_script <- function(meta_json,
   cols_pres  <- c("variable", "description", "type", "role", "na", "val", "n", "pct",
                   if (any_new_label) "orig_val", "orig_code",
                   if (has_batt) "question_prefix")
-  types_pres <- unique(vapply(entries, function(e) .cb_type_label(e$role, e$r_class, lang),
-                              character(1)))
-  roles_pres <- unique(vapply(entries, function(e) e$role %||% "", character(1)))
+  # "Types et rôles" nested: group present roles under their type (from
+  # .cb_type_label), first-appearance order — types get a "- " bullet, their roles
+  # a nested "  - " bullet, so each role sits under the right type.
+  tr_order <- character(0); tr_roles <- list()
+  for (e in entries) {
+    tl <- .cb_type_label(e$role, e$r_class, lang); rk <- e$role %||% ""
+    if (!tl %in% tr_order) tr_order <- c(tr_order, tl)
+    if (nzchar(rk)) tr_roles[[tl]] <- union(tr_roles[[tl]] %||% character(0), rk)
+  }
 
   top_rows <- list()
   tpush <- function(r) top_rows[[length(top_rows) + 1L]] <<- r
@@ -8201,26 +8200,43 @@ generate_format_script <- function(meta_json,
                   n = if (identical(f$key, "survey_population") && is.finite(n_ind))
                         n_ind else NA_real_))
 
-  tpush(.cb_row(.row_type = "howto_head",
-                h = if (fr_lang) "Comment lire ce dictionnaire" else "How to read this codebook"))
-  tpush(.cb_row(.row_type = "howto", description = if (fr_lang)
-    "Ce dictionnaire décrit chaque variable de l'enquête, une ligne par modalité de réponse."
-    else "This codebook describes every survey variable, one row per answer category."))
-  tpush(.cb_row(.row_type = "howto",
-                description = if (fr_lang) "**Les colonnes :**" else "**Columns:**"))
-  for (ln in .cb_howto_columns(lang, cols_pres))
-    tpush(.cb_row(.row_type = "howto", description = ln))
-  tr_lines <- c(.cb_howto_types(lang, types_pres), .cb_howto_roles(lang, roles_pres))
-  if (length(tr_lines)) {
-    tpush(.cb_row(.row_type = "howto",
-                  description = if (fr_lang) "**Types et rôles :**" else "**Types and roles:**"))
-    for (ln in tr_lines) tpush(.cb_row(.row_type = "howto", description = ln))
+  # The legend/TOC headings render exactly like ## / ### outline headers (red text
+  # + the section band): howto_head = level 2, toc_head = level 3.
+  tpush(.cb_row(.row_type = "howto_head", .h_level = 2L, h = paste0("## ",
+                if (fr_lang) "Comment lire ce dictionnaire des variables" else "How to read this codebook")))
+  # Nested Types & roles (types "- ", their roles "  - ").
+  tr_lines <- character(0)
+  for (tl in tr_order) {
+    td <- .cb_type_desc(lang, tl)
+    tr_lines <- c(tr_lines, if (nzchar(td)) paste0("- **", tl, "** : ", td)
+                            else            paste0("- **", tl, "**"))
+    for (rk in tr_roles[[tl]] %||% character(0)) {
+      ri <- .cb_role_info(lang, rk); if (is.null(ri)) next
+      tr_lines <- c(tr_lines, paste0("  - **", ri[[1]], "** : ", ri[[2]]))
+    }
   }
+  # The whole legend body lives in ONE merged cell (a single `howto` row): intro,
+  # a bulleted "Description des colonnes", then a NESTED "Types et rôles"; blank
+  # markdown lines give the spacing, a trailing empty line pads the cell bottom.
+  legend_body <- c(
+    if (fr_lang) "Ce dictionnaire décrit chaque variable de l'enquête, avec une ligne par modalité de réponse."
+    else "This codebook describes every survey variable, with one row per answer category.",
+    "",
+    if (fr_lang) "**Description des colonnes :**" else "**Column descriptions:**",
+    .cb_howto_columns(lang, cols_pres),
+    if (length(tr_lines))
+      c("", if (fr_lang) "**Types et rôles :**" else "**Types and roles:**", tr_lines),
+    "")
+  tpush(.cb_row(.row_type = "howto", description = paste(legend_body, collapse = "\n")))
 
   if (length(toc_sections)) {
-    tpush(.cb_row(.row_type = "toc_head", h = if (fr_lang) "Sommaire" else "Contents"))
-    for (s in toc_sections) {
+    tpush(.cb_row(.row_type = "toc_head", .h_level = 3L,
+                  h = paste0("### ", if (fr_lang) "Sommaire" else "Contents")))
+    ns <- length(toc_sections)
+    for (k in seq_len(ns)) {
+      s   <- toc_sections[[k]]
       lbl <- if (s$level == 3L) paste0("    ", s$label) else s$label
+      if (k == ns) lbl <- paste0(lbl, "\n\n")     # two blank lines close the sommaire
       tpush(.cb_row(.row_type = "toc", description = lbl,
                     .toc_target = s$target, .h_level = as.integer(s$level)))
     }
@@ -8262,12 +8278,12 @@ generate_format_script <- function(meta_json,
   # BAND2/BAND3 = ## / ### section bands; role chips per statistical role.
   GREY  <- "FFF2F2F2"
   ROSE  <- "FFFDE9ED"
-  BAND2 <- "FFB4C7E7"
-  BAND3 <- "FFD6E0F0"
-  BAR   <- "#7EA6CE"                 # data-bar blue (CF colors use "#RRGGBB")
-  role_fill <- c(
+  BAND2 <- "FFFAD6DD"                # ## band: darker rose (same family as batteries)
+  BAND3 <- "FFFFF2CC"                # ### band: cream
+  BAR   <- "#F47474"                 # data-bar color (CF colors use "#RRGGBB")
+  role_fill <- c(   # pastel chip per role, matched luminosity (comptage = violet)
     factor_binary = "FFDCE6F1", factor_nominal = "FFE2EFDA", factor_ordinal = "FFFCE4D6",
-    integer_count = "FFEDEDED", integer = "FFEDEDED", integer_scale = "FFEDEDED",
+    integer_count = "FFE6DEF2", integer = "FFE6DEF2", integer_scale = "FFE6DEF2",
     double = "FFE1E7EF", identifier = "FFF2F2F2", other = "FFF7F7F7", unclear = "FFF7F7F7")
   # Zebra shade per VARIABLE block, resetting to white after every section header:
   # a value block is white/grey alternately; frontmatter/legend/toc/spacer stay
@@ -8531,18 +8547,18 @@ generate_format_script <- function(meta_json,
     wb <- openxlsx2::wb_set_cell_style(wb, "Codebook", dims = dstrs[i],
                                        style = paste0("cb_xf_", i))
 
-  # Title rows: bold heading text (no underline), text in the h column overflowing
-  # into the empty cells to its right. ## / ### get a full-width colored band (dark
-  # navy text on it); the level-1 survey title and #### battery headers keep the
-  # red accent with no band. Bands only for the two user-owned outline levels.
-  title_idx <- which(cb$.row_type == "title")
+  # Title rows: bold RED heading text (no underline), in the h column overflowing
+  # into the empty cells to its right. ## gets a darker-rose band, ### a cream band;
+  # the level-1 survey title and #### battery headers keep the red accent with no
+  # band. The legend/TOC headings (howto_head=##, toc_head=###) render the same way.
+  title_idx <- which(cb$.row_type %in% c("title", "howto_head", "toc_head"))
   for (i in title_idx) {
     lvl  <- cb$.h_level[i]; lc <- as.character(lvl)
     size <- c(`1` = 18, `2` = 13, `3` = 12, `4` = 10)[[lc]]
     hcm  <- c(`1` = 1.4, `2` = 1.0, `3` = 0.85, `4` = 0.8)[[lc]]
     banded  <- lc %in% c("2", "3")
     band    <- if (identical(lc, "2")) BAND2 else BAND3
-    txt_col <- if (banded) "FF1F3864" else RED           # navy on band, else red
+    txt_col <- RED                                        # red text at every level
     row_dims <- openxlsx2::wb_dims(rows = xr(i), cols = seq_len(K))
     if (banded)
       wb <- openxlsx2::wb_add_fill(wb, "Codebook", dims = row_dims,
@@ -8589,23 +8605,11 @@ generate_format_script <- function(meta_json,
   }
 
   # "How to read" legend + clickable table of contents (top matter, below the
-  # survey front-matter). Legend headings: bold text + a thin bottom rule (no
-  # band — bands are reserved for the ## / ### outline). Legend body rows render
+  # survey front-matter). The headings ("## Comment lire…", "### Sommaire") are
+  # rendered by the title loop above (band + red text). Legend body rows render
   # like front-matter (one merged rich-text line). TOC rows are INTERNAL
   # hyperlinks to each section's row, resolved from the final tibble positions.
   section_txt <- cb$h                            # title text per row (incl. # markers)
-  for (i in which(cb$.row_type %in% c("howto_head", "toc_head"))) {
-    d <- openxlsx2::wb_dims(rows = xr(i), cols = ci[["h"]])
-    wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = d, name = "DejaVu Sans",
-            size = 12, bold = TRUE, color = openxlsx2::wb_color(hex = "FF1F3864"))
-    wb <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
-            horizontal = "left", vertical = "center", wrap_text = FALSE)
-    wb <- openxlsx2::wb_add_border(wb, "Codebook",
-            dims = openxlsx2::wb_dims(rows = xr(i), cols = seq_len(K)),
-            top_border = NULL, left_border = NULL, right_border = NULL,
-            bottom_border = "thin", bottom_color = black)
-    wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i), heights = cm_to_pt(0.75))
-  }
   for (i in which(cb$.row_type == "howto")) {
     md   <- cb$description[[i]]
     wb <- openxlsx2::wb_merge_cells(wb, "Codebook",
@@ -8616,23 +8620,32 @@ generate_format_script <- function(meta_json,
               x = if (is.null(rich)) md else rich, dims = d, col_names = FALSE)
     wb   <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
               horizontal = "left", vertical = "top", wrap_text = TRUE)
+    # Merged cells don't auto-fit: size the row from the wrapped-line estimate
+    # (~125 chars/line over the description..freq width), + slack for blank lines.
+    segs    <- strsplit(md, "\n", fixed = TRUE)[[1]]; if (!length(segs)) segs <- ""
+    n_lines <- sum(pmax(1L, ceiling(nchar(segs) / 125))) + 2L
+    wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i),
+            heights = min(max(n_lines * 14.5 + 8, 16), 4000))
   }
   title_rows <- which(cb$.row_type == "title")
   for (i in which(cb$.row_type == "toc")) {
-    tgt <- cb$.toc_target[[i]]
-    j   <- if (!is.na(tgt)) title_rows[match(tgt, section_txt[title_rows])] else NA_integer_
-    d   <- openxlsx2::wb_dims(rows = xr(i), cols = ci[["description"]])
+    tgt    <- cb$.toc_target[[i]]
+    j      <- if (!is.na(tgt)) title_rows[match(tgt, section_txt[title_rows])] else NA_integer_
+    d      <- openxlsx2::wb_dims(rows = xr(i), cols = ci[["description"]])
+    lbl    <- cb$description[[i]]
+    has_nl <- grepl("\n", lbl, fixed = TRUE)    # last entry carries two closing blank lines
     # The bulk write blanked description on non-first rows, so (re)write the label
     # here; the hyperlink then jumps to the section's row in this sheet.
-    wb <- openxlsx2::wb_add_data(wb, "Codebook", x = cb$description[[i]], dims = d,
-            col_names = FALSE)
+    wb <- openxlsx2::wb_add_data(wb, "Codebook", x = lbl, dims = d, col_names = FALSE)
     if (!is.na(j))
       wb <- openxlsx2::wb_add_hyperlink(wb, "Codebook", dims = d,
               target = paste0("Codebook!A", xr(j)), is_external = FALSE)
     wb <- openxlsx2::wb_add_font(wb, "Codebook", dims = d, name = "DejaVu Sans", size = 10,
             color = openxlsx2::wb_color(hex = "FF0563C1"), underline = "single")
-    wb <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d,
-            horizontal = "left", vertical = "center", wrap_text = FALSE)
+    wb <- openxlsx2::wb_add_cell_style(wb, "Codebook", dims = d, horizontal = "left",
+            vertical = if (has_nl) "top" else "center", wrap_text = has_nl)
+    if (has_nl)
+      wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i), heights = cm_to_pt(1.1))
   }
 
   # Empty battery-closing rows: a genuinely blank 2 cm row that visually detaches
@@ -8674,17 +8687,25 @@ generate_format_script <- function(meta_json,
       r <- fac_pct[(brk[k] + 1L):brk[k + 1L]]
       paste0(pcol, min(r), ":", pcol, max(r))
     }, character(1))
-    wb <- openxlsx2::wb_add_conditional_formatting(wb, "Codebook",
-            dims = paste(runs, collapse = ","), type = "dataBar",
-            style = c(BAR, BAR), rule = c(0, 1),
+    # ONE dataBar rule over a multi-area sqref (Excel's native form). Separate
+    # per-run rules render only the first range in Excel/LibreOffice, so we add one
+    # rule then widen its sqref (classic $conditionalFormatting + x14 xm:sqref).
+    full_sqref <- paste(runs, collapse = " ")
+    wb <- openxlsx2::wb_add_conditional_formatting(wb, "Codebook", dims = runs[[1]],
+            type = "dataBar", style = c(BAR, BAR), rule = c(0, 1),
             params = list(showValue = TRUE, gradient = FALSE, border = FALSE))
+    ws <- wb$worksheets[[1]]                    # Codebook is the only worksheet
+    ws$conditionalFormatting$sqref <- full_sqref
+    ws$extLst <- sub("<xm:sqref>[^<]*</xm:sqref>",
+                     paste0("<xm:sqref>", full_sqref, "</xm:sqref>"), ws$extLst)
+    wb$worksheets[[1]] <- ws
   }
 
   # Column widths (description + na wider; variable widened only when names wrap).
   var_maxlen <- suppressWarnings(max(nchar(cb$variable), na.rm = TRUE))
-  var_w      <- if (is.finite(var_maxlen) && var_maxlen > 16) 27 else 18
-  widths <- c(h = 2.5, variable = var_w, description = 60, type = 9.2, role = 8,
-              na = 20, val = 25, n = 9, pct = 8, sep = 2, orig_val = 50,
+  var_w      <- if (is.finite(var_maxlen) && var_maxlen > 15) 25 else 16
+  widths <- c(h = 2, variable = var_w, description = 55, type = 9.2, role = 8,
+              na = 18, val = 20, n = 9, pct = 12, sep = 2, orig_val = 50,
               orig_code = 11.5, question_prefix = 26)
   wb <- openxlsx2::wb_set_col_widths(wb, "Codebook", cols = seq_len(K),
                                      widths = unname(widths[disp_cols]))

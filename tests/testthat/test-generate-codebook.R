@@ -559,7 +559,14 @@ test_that("C11: xlsx cell fills/borders + data bars + TOC map to the right cells
   expect_false(identical(fill_hex(paste0("G", rF)), "FFFDE9ED"))
   expect_true(right_border(paste0("I", rF)))
 
-  # Data bars over the factor freq column, and one internal TOC hyperlink (## Bloc A).
-  expect_true(any(grepl("dataBar", unlist(wb$worksheets[[1]]$conditionalFormatting))))
+  # Data bars: exactly ONE dataBar rule over a MULTI-AREA sqref (Excel's native
+  # form; separate per-run rules render only the first range in some viewers).
+  cf <- wb$worksheets[[1]]$conditionalFormatting
+  expect_true(any(grepl("dataBar", cf$cf)))
+  db <- cf[grepl("dataBar", cf$cf), , drop = FALSE]
+  expect_equal(nrow(db), 1L)                                  # single merged rule
+  expect_gte(length(strsplit(db$sqref[[1]], " ")[[1]]), 2L)   # FRUIT + battery runs
+  expect_match(wb$worksheets[[1]]$extLst, "<xm:sqref>[^<]* [^<]*</xm:sqref>")  # widened x14
+  # One internal TOC hyperlink (## Bloc A).
   expect_gte(length(unlist(wb$worksheets[[1]]$hyperlinks)), 1L)
 })
