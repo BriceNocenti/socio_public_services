@@ -154,6 +154,40 @@ test_that("D3: a battery with a non-binary member is left untouched (silently)",
   expect_equal(entries[[1]]$levels_sorted[[2]]$order, 2L)
 })
 
+test_that("D4: a non-contiguous battery title aborts generate_format_script()", {
+  # "Bat A" is carried by B1 and B3 but split by B2 (a mistyped "Bat B") — the
+  # exact shape of a hand-edit typo. It must abort with a helpful message.
+  vars <- batt_vars(3)
+  vars$B1$battery <- "Bat A"
+  vars$B2$battery <- "Bat B"          # the typo'd sibling that splits Bat A
+  vars$B3$battery <- "Bat A"
+  path <- tmp_json()
+  on.exit(unlink(path))
+  .write_meta_json(make_meta_list(vars), path)
+
+  out_path <- tempfile(fileext = ".R")
+  on.exit(unlink(out_path), add = TRUE)
+  err <- tryCatch(generate_format_script(path, output_path = out_path),
+                  error = function(e) conditionMessage(e))
+  expect_match(err, "non contigu")
+  expect_match(err, "Bat A")          # the split battery
+  expect_match(err, "Bat B")          # the interrupting (typo'd) sibling title
+  expect_match(err, "B1")             # variable names are listed
+  expect_false(file.exists(out_path)) # aborts before writing
+})
+
+test_that("D5: a contiguous battery still generates the script normally", {
+  vars <- batt_vars(3, title = "Bat A")     # B1, B2, B3 all contiguous
+  path <- tmp_json()
+  on.exit(unlink(path))
+  .write_meta_json(make_meta_list(vars), path)
+
+  out_path <- tempfile(fileext = ".R")
+  on.exit(unlink(out_path), add = TRUE)
+  expect_equal(generate_format_script(path, output_path = out_path), out_path)
+  expect_true(file.exists(out_path))
+})
+
 
 # ---------------------------------------------------------------------------
 # E. Format blocks

@@ -219,5 +219,35 @@ test_that("OU8: outline prompt file has the #### schema + real examples", {
   sp <- paste(readLines(f, encoding = "UTF-8", warn = FALSE), collapse = "\n")
   expect_match(sp, '"battery"', fixed = TRUE)
   expect_match(sp, '"from"', fixed = TRUE)
-  expect_match(sp, "PRAT_VILLE", fixed = TRUE)   # a real example token
+  expect_match(sp, "ACTI_CULT", fixed = TRUE)    # recap-battery example token
+  expect_match(sp, "MENAGE", fixed = TRUE)       # numeric-grid example token
+  # contiguous-only: the mixed-battery "bridge" teaching is gone
+  expect_false(grepl("BRIDGE", sp, fixed = TRUE))
+})
+
+
+# ---------------------------------------------------------------------------
+# OU9. items battery + a separate recap battery (both battery:true)
+# ---------------------------------------------------------------------------
+
+test_that("OU9: an item battery and a separate recap battery both become batteries", {
+  vars <- list(
+    CONCERT   = ou_bin("Aller a un concert au cours des 4 dernieres semaines", "CONCERT",
+                       headers = "## Activites suivies"),
+    CINEMA    = ou_bin("Aller au cinema au cours des 4 dernieres semaines", "CINEMA"),
+    THEATRE   = ou_bin("Aller au theatre au cours des 4 dernieres semaines", "THEATRE"),
+    ACTI_CULT = ou_bin("Aller a un concert, au cine, au theatre au cours des 4 dernieres semaines", "ACTI_CULT"),
+    LECTURE   = ou_bin("Lire un livre, une BD, un magazine au cours des 4 dernieres semaines", "LECTURE"),
+    ACTU_EVEN = ou_bin("Suivre l'actu sportive au cours des 4 dernieres semaines", "ACTU_EVEN")
+  )
+  path <- ou_json(vars)
+  resp <- paste0(
+    '[{"title":"Activites suivies","from":"CONCERT","to":"THEATRE","battery":true},',
+    '{"title":"Recapitulatifs","from":"ACTI_CULT","to":"ACTU_EVEN","battery":true}]')
+  with_mock_ai(resp, suppressWarnings(suppressMessages(ai_build_outline(path))))
+  bt <- ou_batt(path)
+  expect_equal(unname(bt["CONCERT"]),   "Activites suivies")
+  expect_equal(unname(bt["THEATRE"]),   "Activites suivies")
+  expect_equal(unname(bt["ACTI_CULT"]), "Recapitulatifs")   # recaps -> their own battery
+  expect_equal(unname(bt["ACTU_EVEN"]), "Recapitulatifs")
 })

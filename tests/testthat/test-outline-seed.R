@@ -1,7 +1,8 @@
 # Tests for the deterministic battery-candidate seed (internal, feeds
-# ai_build_outline) + preview_outline(). Functions under test:
+# ai_build_outline) + preview_outline() + check_batteries(). Functions under test:
 #   .batt_seed_candidates, .batt_signature, .batt_common_token_prefix,
-#   .batt_provisional_title, .batt_strip_common, preview_outline
+#   .batt_provisional_title, .batt_strip_common, .batt_precision_ok,
+#   preview_outline, check_batteries
 # Prefix: D
 
 # Build a JSON with the given variables and return its path.
@@ -200,4 +201,57 @@ test_that("D8b: .batt_strip_common removes common prefix AND suffix", {
          "Au moins une APS pratiquee au domicile, sur 12 mois")
   out <- .batt_strip_common(x)
   expect_equal(out, c("en ville", "au domicile"))
+})
+
+
+# ---------------------------------------------------------------------------
+# D9. check_batteries(): interleaved batteries -> reorder + relocate() strings
+# ---------------------------------------------------------------------------
+
+test_that("D9: two interleaved same-signature groups are flagged with relocate()", {
+  vars <- list(
+    PRAT_A = d_bin("APS en ville", "PRAT_A"),
+    NB_A   = d_cnt("Nb ville", "NB_A"),
+    PRAT_B = d_bin("APS a domicile", "PRAT_B"),
+    NB_B   = d_cnt("Nb domicile", "NB_B"),
+    PRAT_C = d_bin("APS au travail", "PRAT_C"),
+    NB_C   = d_cnt("Nb travail", "NB_C")
+  )
+  res    <- suppressMessages(check_batteries(d_json(vars)))
+  relocs <- vapply(res$reorder, function(r) r$relocate, character(1))
+  expect_equal(length(res$reorder), 2L)                       # binary + count groups
+  expect_true('relocate(all_of(c("PRAT_B", "PRAT_C")), .after = "PRAT_A")' %in% relocs)
+  expect_true('relocate(all_of(c("NB_B", "NB_C")), .after = "NB_A")' %in% relocs)
+})
+
+
+# ---------------------------------------------------------------------------
+# D10. check_batteries(): a mis-typed member (LIVRE-like) is flagged, no prefix
+# ---------------------------------------------------------------------------
+
+test_that("D10: a wrong role between two same-question neighbours is an outlier", {
+  vars <- list(
+    CINEMA  = d_bin("Aller au cinema au cours des 4 dernieres semaines", "CINEMA"),
+    LIVRE   = d_cnt("Lire un livre au cours des 4 dernieres semaines", "LIVRE"),
+    THEATRE = d_bin("Aller au theatre au cours des 4 dernieres semaines", "THEATRE")
+  )
+  res <- suppressMessages(check_batteries(d_json(vars)))
+  expect_true("LIVRE" %in% res$outliers)                      # shared label stem
+  expect_equal(length(res$reorder), 0L)                       # 2-var groups, no reorder
+})
+
+
+# ---------------------------------------------------------------------------
+# D11. check_batteries(): a clean contiguous battery flags nothing
+# ---------------------------------------------------------------------------
+
+test_that("D11: a clean contiguous same-signature battery is not flagged", {
+  vars <- list(
+    LIC_A = d_bin("Licence federale", "LIC_A"),
+    LIC_B = d_bin("Licence scolaire", "LIC_B"),
+    LIC_C = d_bin("Licence autre", "LIC_C")
+  )
+  res <- suppressMessages(check_batteries(d_json(vars)))
+  expect_equal(length(res$reorder), 0L)
+  expect_equal(length(res$outliers), 0L)
 })

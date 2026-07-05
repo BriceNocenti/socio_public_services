@@ -47,31 +47,32 @@ A JSON array of contiguous `####` groups, nothing else (no prose, no markdown fe
 
 ## Batteries — which groups are `battery:true`
 
-Mark `battery:true` **only** for a genuine multi-answer battery of **at least 3 variables**. How to recognise one:
+Mark `battery:true` only for a genuine multi-answer battery of **at least 3 variables**: a **contiguous** run whose members all answer the **same** questionnaire question. Recognise one by:
 
-1. **The shared question in `desc`** — the common wording / theme (`"Au moins une APS pratiquée …"`, `"… au cours des 4 dernières semaines"`, `"Frein 'Vous …'"`). Decisive.
-2. **Contiguity** — members are consecutive.
-3. **Same role** and (for factors) the **same or a subset of** level codes — a battery may be **mixed** (a yes/no interleaved with a count per item), and a single mis-typed member is bridged, not excluded.
-4. A **common name prefix** *when there is one* — many real batteries have **none**, so never require it.
+1. **The shared question stem in `desc`** — the common wording (`"… au cours des 4 dernières semaines"`, `"Au moins une APS pratiquée …"`, `"Nombre d'heures consacrées à …"`). **Decisive.**
+2. **Same answer type** — all members share the same `role` (all `factor_binary` Non/Oui, all on the same scale with the same `nlev`, or all the same numeric type). A member with a **different role** is not part of the battery.
+3. **Contiguity** — members are consecutive. A battery is always **one clean contiguous run**: interleaved batteries are reordered upstream, before you ever see them.
 
-**Split when it is really several questions.** A long interleaved run often covers several distinct sub-questions (by lieu, then compagnie, then âge…) — **split into one battery per sub-question**. Rule of thumb: if the honest title would need "selon A, B **and** C", it is several batteries. Likewise, distinct nomenclatures (e.g. broad families vs. detailed activities) are **separate** batteries, never merged.
+A common name prefix helps *when there is one*, but many real batteries have none — never require it.
 
-**Do NOT force a battery.** Sets that merely share a role, a name prefix or a level count are **not** batteries unless one multi-answer question is behind them:
+**Split when it is really several questions.** One contiguous same-type run can still cover several distinct questions (by lieu, then compagnie, then âge…). Split it into **one battery per question**: if the honest title would need "selon A, B **and** C", it is several batteries. Distinct nomenclatures (broad families vs. detailed activities) are separate batteries too.
 
-- **A numeric grid IS a battery.** Several numeric variables that each give **one direct answer per item** to a single question — hours per task, a count per age band, a duration or rating per item — form a battery, even when the answers are numbers and the names share no prefix. Never demote a numeric grid to a group just because it is numeric.
-- **But variables COMPUTED FROM the others are not battery members.** A variable that aggregates or summarises the rest — an overall total, an index or score, a "récapitulatif", a re-coded synthesis — answers no per-item question: keep it OUT of the battery it summarises, in an adjacent thematic group. A set made ONLY of such computed aggregates is itself a thematic group (`battery:false`), even if the seed suggests one.
+**Do NOT force a battery.** Sharing a role, a name prefix or an `nlev` is not enough — a battery exists only when **one multi-answer question** is behind the run.
+
+- **A numeric grid IS a battery.** Several numeric variables that each give **one direct answer per item to a single question** — hours per task, a count per age band, a rating per item — form a battery, even when the answers are numbers and the names share no prefix. Never demote it just because it is numeric.
+- **Recaps and computed variables stay OUT of the items' battery.** A variable that **combines or re-codes several items** — its `desc` lists several of them, or says "récapitulatif" / "variable calculée" — answers no single per-item question, so it is never a member of the battery it summarises. But when **three or more parallel recaps** sit together (same answer type, same question stem), they form their **own** `battery:true`. One or two isolated computed indicators (an overall total, an index or score) are just a thematic group (`battery:false`).
 
 ## The `batt` seed is only a candidate — do NOT trust it
 
-`batt` comes from a mechanical pre-pass that matched **only** variable type, level codes and name prefix — **never meaning**, and it only ever hints at *batteries*. It is routinely wrong. Decide from the **questions** (`desc`). You will regularly **SPLIT** an over-merged seed, **MERGE** a seed with its `null`-seed neighbours, **MOVE A BOUNDARY**, **BRIDGE** a mis-typed real member (an `integer_count` among yes/no items) into a battery, **CREATE** a battery the seed missed, or **DROP** a seed that is not a real battery (those variables then join a thematic group). If the questions disagree with the seed, **follow the questions**.
+`batt` comes from a mechanical pre-pass that matched **only** variable type and name/label similarity — **never meaning**. It is routinely wrong. Decide from the **questions** (`desc`). You will regularly **SPLIT** an over-merged seed, **MERGE** a seed with its `null`-seed neighbours, **MOVE A BOUNDARY**, **CREATE** a battery the seed missed, or **DROP** a seed that is not a real battery (its variables then join a thematic group). If the questions disagree with the seed, **follow the questions**.
 
 ---
 
 ## Examples
 
-The `Input:` / `Output:` pairs are in the **exact** format. In every one, **the groups cover all the section's variables** — nothing is left out. Notice how the output **overrides the `batt` seed**, how leftover questions become a thematic group, and how derived/recap variables are kept **out** of batteries.
+The `Input:` / `Output:` pairs are in the **exact** format. In every one, **the groups cover all the section's variables** — nothing is left out. The variable names are illustrative (drawn from one sports-practice survey); judge each survey on its own `desc`. Watch how the output **overrides the `batt` seed** — **SPLIT** an over-merged candidate (Ex. 2), **MERGE** ones the pre-pass split apart (Ex. 3), **MOVE a boundary** and **DROP** members that don't belong (Ex. 4), **CREATE** a battery the seed missed and **DROP** a false one (Ex. 5) — because the seed matched only shape, never meaning. Derived/recap variables are kept **out** of the items' battery, forming their own battery when several are parallel.
 
-### Example 1 — a section: one battery + one thematic group, full coverage
+### Example 1 — one battery + one thematic group, full coverage
 
 Input:
 
@@ -96,27 +97,21 @@ Output:
 ]
 ```
 
-### Example 2 — the seed lumped SEVERAL questions → SPLIT into several batteries
+### Example 2 — the seed lumped TWO questions → SPLIT
 
-Same over-merged seed on all 12 variables, but they answer **three** sub-questions (lieu, compagnie, âge). Split into one battery per sub-question. **The seed said one battery; the answer is three.**
+The seed put all six ordinal frequency items under one candidate (`À quelle fréquence`). But the first three ask how often you **practise** an activity, the last three how often you **follow** sport in the media — two different questions. **SPLIT** the seed into two batteries.
 
 Input:
 
 ```json
 [
-{"section":"## Contexte de la pratique"},
-{"var":"PRAT_VILLE","role":"factor_binary","nlev":3,"desc":"Au moins une APS pratiquée en ville","batt":"Pratique et nombre d'APS"},
-{"var":"NB_APS_EN_VILLE","role":"integer_count","nlev":0,"desc":"Nombre d'APS pratiquées en ville","batt":"Pratique et nombre d'APS"},
-{"var":"PRAT_DOM","role":"factor_binary","nlev":3,"desc":"Au moins une APS pratiquée à son domicile","batt":"Pratique et nombre d'APS"},
-{"var":"NB_APS_DOMICILE","role":"integer_count","nlev":0,"desc":"Nombre d'APS pratiquées à son domicile","batt":"Pratique et nombre d'APS"},
-{"var":"AVEC_AMIS","role":"factor_binary","nlev":3,"desc":"Au moins une APS pratiquée avec des amis","batt":"Pratique et nombre d'APS"},
-{"var":"NB_APS_AMIS","role":"integer_count","nlev":0,"desc":"Nombre d'APS pratiquées avec des amis","batt":"Pratique et nombre d'APS"},
-{"var":"AVEC_SEUL","role":"factor_binary","nlev":3,"desc":"Au moins une APS pratiquée seul","batt":"Pratique et nombre d'APS"},
-{"var":"NB_APS_SEUL","role":"integer_count","nlev":0,"desc":"Nombre d'APS pratiquées seul","batt":"Pratique et nombre d'APS"},
-{"var":"DEB_MOINS15","role":"factor_binary","nlev":3,"desc":"Au moins une APS débutée avant 15 ans","batt":"Pratique et nombre d'APS"},
-{"var":"NB_APS_MOINS15","role":"integer_count","nlev":0,"desc":"Nombre d'APS débutées avant 15 ans","batt":"Pratique et nombre d'APS"},
-{"var":"DEB_15_19","role":"factor_binary","nlev":3,"desc":"Au moins une APS débutée entre 15 et 19 ans","batt":"Pratique et nombre d'APS"},
-{"var":"NB_APS_15_19","role":"integer_count","nlev":0,"desc":"Nombre d'APS débutées entre 15 et 19 ans","batt":"Pratique et nombre d'APS"}
+{"section":"## Fréquences déclarées"},
+{"var":"FREQ_MARCHE","role":"factor_ordinal","nlev":4,"desc":"À quelle fréquence pratiquez-vous la marche ou la randonnée","batt":"À quelle fréquence"},
+{"var":"FREQ_VELO","role":"factor_ordinal","nlev":4,"desc":"À quelle fréquence pratiquez-vous le vélo","batt":"À quelle fréquence"},
+{"var":"FREQ_NATATION","role":"factor_ordinal","nlev":4,"desc":"À quelle fréquence pratiquez-vous la natation","batt":"À quelle fréquence"},
+{"var":"FREQ_TV_SPORT","role":"factor_ordinal","nlev":4,"desc":"À quelle fréquence regardez-vous du sport à la télévision","batt":"À quelle fréquence"},
+{"var":"FREQ_PRESSE_SPORT","role":"factor_ordinal","nlev":4,"desc":"À quelle fréquence lisez-vous la presse sportive","batt":"À quelle fréquence"},
+{"var":"FREQ_RESEAU_SPORT","role":"factor_ordinal","nlev":4,"desc":"À quelle fréquence suivez-vous le sport sur les réseaux sociaux","batt":"À quelle fréquence"}
 ]
 ```
 
@@ -124,27 +119,26 @@ Output:
 
 ```json
 [
-{"title":"Pratique et nombre d'APS par lieu","from":"PRAT_VILLE","to":"NB_APS_DOMICILE","battery":true},
-{"title":"Pratique et nombre d'APS selon la compagnie","from":"AVEC_AMIS","to":"NB_APS_SEUL","battery":true},
-{"title":"Pratique et nombre d'APS selon l'âge de début","from":"DEB_MOINS15","to":"NB_APS_15_19","battery":true}
+{"title":"Fréquence de pratique d'activités","from":"FREQ_MARCHE","to":"FREQ_NATATION","battery":true},
+{"title":"Fréquence de suivi médiatique du sport","from":"FREQ_TV_SPORT","to":"FREQ_RESEAU_SPORT","battery":true}
 ]
 ```
 
-### Example 3 — MERGE, EXTEND and BRIDGE a mis-typed member into one battery
+### Example 3 — the seed split ONE question by name prefix → MERGE
 
-All six answer the same question ("… au cours des 4 dernières semaines ?"). The seed tagged only the last three and missed `LIVRE`, an `integer_count` among yes/no items. Make **one** battery — extend back and **bridge `LIVRE`**.
+The mechanical pre-pass made two candidates from the name prefixes (`AQUA`, `RAQ`). But every item answers the **same** checklist question — "Quels sports avez-vous pratiqués au cours des 12 derniers mois ?". **MERGE** them into one battery: a shared name prefix is not a question, and distinct prefixes can be one.
 
 Input:
 
 ```json
 [
-{"section":"## Loisirs et pratiques culturelles"},
-{"var":"CONCERT","role":"factor_binary","nlev":2,"desc":"Aller à un concert, au cours des 4 dernières semaines","batt":null},
-{"var":"CINEMA","role":"factor_binary","nlev":2,"desc":"Aller au cinéma, au cours des 4 dernières semaines","batt":null},
-{"var":"LIVRE","role":"integer_count","nlev":0,"desc":"Lire un livre (roman, essai, etc.), au cours des 4 dernières semaines","batt":null},
-{"var":"THEATRE_MUSEE_EXPO","role":"factor_binary","nlev":2,"desc":"Aller au théâtre, au musée, voir une exposition, au cours des 4 dernières semaines","batt":"Aller au théâtre"},
-{"var":"BD_MANGA","role":"factor_binary","nlev":2,"desc":"Lire une bande dessinée, un manga, au cours des 4 dernières semaines","batt":"Aller au théâtre"},
-{"var":"MAGAZINE_REVUE","role":"factor_binary","nlev":2,"desc":"Lire un magazine, une revue, au cours des 4 dernières semaines","batt":"Aller au théâtre"}
+{"section":"## Sports pratiqués"},
+{"var":"AQUA_NATATION","role":"factor_binary","nlev":2,"desc":"Natation, au cours des 12 derniers mois","batt":"AQUA"},
+{"var":"AQUA_PLONGEE","role":"factor_binary","nlev":2,"desc":"Plongée, au cours des 12 derniers mois","batt":"AQUA"},
+{"var":"AQUA_AQUAGYM","role":"factor_binary","nlev":2,"desc":"Aquagym, au cours des 12 derniers mois","batt":"AQUA"},
+{"var":"RAQ_TENNIS","role":"factor_binary","nlev":2,"desc":"Tennis, au cours des 12 derniers mois","batt":"RAQ"},
+{"var":"RAQ_BADMINTON","role":"factor_binary","nlev":2,"desc":"Badminton, au cours des 12 derniers mois","batt":"RAQ"},
+{"var":"RAQ_SQUASH","role":"factor_binary","nlev":2,"desc":"Squash, au cours des 12 derniers mois","batt":"RAQ"}
 ]
 ```
 
@@ -152,25 +146,28 @@ Output:
 
 ```json
 [
-{"title":"Activités culturelles au cours des 4 dernières semaines","from":"CONCERT","to":"MAGAZINE_REVUE","battery":true}
+{"title":"Sports pratiqués au cours des 12 derniers mois","from":"AQUA_NATATION","to":"RAQ_SQUASH","battery":true}
 ]
 ```
 
-### Example 4 — keep derived RECAP variables OUT of the battery
+### Example 4 — items battery + a SEPARATE recap battery (MOVE the boundary, DROP the recaps out)
 
-The four detailed items are one battery. `ACTI_CULT` and `LECTURE` are **calculated recaps** of those items — they are NOT battery members; they form a separate thematic group.
+The seed lumped all nine yes/no items into one candidate. But `ACTI_CULT`, `LECTURE`, `ACTU_EVEN_SPORT` each **combine several** of the detailed items (their `desc` lists several activities) — they are calculated recaps. **MOVE the boundary** back to `REGARDER_SPORT` to keep them **out** of the items' battery; as three parallel recaps sharing the same stem, they form **their own** battery.
 
 Input:
 
 ```json
 [
-{"section":"## Activités culturelles"},
-{"var":"CONCERT","role":"factor_binary","nlev":2,"desc":"Aller à un concert, au cours des 4 dernières semaines","batt":"culturel"},
-{"var":"CINEMA","role":"factor_binary","nlev":2,"desc":"Aller au cinéma, au cours des 4 dernières semaines","batt":"culturel"},
-{"var":"THEATRE_MUSEE","role":"factor_binary","nlev":2,"desc":"Aller au théâtre, au musée, au cours des 4 dernières semaines","batt":"culturel"},
-{"var":"BD_MANGA","role":"factor_binary","nlev":2,"desc":"Lire une BD, un manga, au cours des 4 dernières semaines","batt":"culturel"},
-{"var":"ACTI_CULT","role":"factor_binary","nlev":2,"desc":"Récapitulatif : aller à un concert, au ciné, au théâtre ou au musée (variable calculée)","batt":"culturel"},
-{"var":"LECTURE","role":"factor_binary","nlev":2,"desc":"Récapitulatif : lire un livre, une BD, un magazine (variable calculée)","batt":"culturel"}
+{"section":"## Activités culturelles et sportives suivies"},
+{"var":"CONCERT","role":"factor_binary","nlev":2,"desc":"Aller à un concert au cours des 4 dernières semaines","batt":"Activités suivies"},
+{"var":"CINEMA","role":"factor_binary","nlev":2,"desc":"Aller au cinéma au cours des 4 dernières semaines","batt":"Activités suivies"},
+{"var":"THEATRE_MUSEE_EXPO","role":"factor_binary","nlev":2,"desc":"Aller au théâtre, au musée, voir une exposition au cours des 4 dernières semaines","batt":"Activités suivies"},
+{"var":"BD_MANGA","role":"factor_binary","nlev":2,"desc":"Lire une bande dessinée, un manga au cours des 4 dernières semaines","batt":"Activités suivies"},
+{"var":"ACTU_SPORT","role":"factor_binary","nlev":2,"desc":"Lire la presse sportive au cours des 4 dernières semaines","batt":"Activités suivies"},
+{"var":"REGARDER_SPORT","role":"factor_binary","nlev":2,"desc":"Regarder des évènements sportifs à la télévision au cours des 4 dernières semaines","batt":"Activités suivies"},
+{"var":"ACTI_CULT","role":"factor_binary","nlev":2,"desc":"Aller à un concert, au ciné, au théâtre, au musée, voir une expo au cours des 4 dernières semaines","batt":"Activités suivies"},
+{"var":"LECTURE","role":"factor_binary","nlev":2,"desc":"Lire un livre, une BD, un magazine, une revue au cours des 4 dernières semaines","batt":"Activités suivies"},
+{"var":"ACTU_EVEN_SPORT","role":"factor_binary","nlev":2,"desc":"Suivre l'actu sportive, regarder un événement sportif à la télé ou par un autre moyen au cours des 4 dernières semaines","batt":"Activités suivies"}
 ]
 ```
 
@@ -178,23 +175,23 @@ Output:
 
 ```json
 [
-{"title":"Activités culturelles au cours des 4 dernières semaines","from":"CONCERT","to":"BD_MANGA","battery":true},
-{"title":"Récapitulatifs d'activités culturelles","from":"ACTI_CULT","to":"LECTURE","battery":false}
+{"title":"Activités culturelles et sportives suivies au cours des 4 dernières semaines","from":"CONCERT","to":"REGARDER_SPORT","battery":true},
+{"title":"Récapitulatifs d'activités culturelles et sportives","from":"ACTI_CULT","to":"ACTU_EVEN_SPORT","battery":true}
 ]
 ```
 
 ### Example 5 — a numeric grid is a battery; variables computed FROM others are a group
 
-`MENAGE`/`JARDINAGE`/`BRICOLAGE` are one **direct answer per item** (hours per task) — a numeric grid, so **one battery**, even though the answers are numbers and the names share no prefix. `NB_APS_TOTAL` and `IPAQ_SCORE` are **computed from** the rest of the survey (a total and an index): they answer no per-item question, so they form a thematic group.
+`MENAGE`/`JARDINAGE`/`BRICOLAGE` are one **direct answer per item** (hours per task) — a numeric grid, so **one battery**, even though the answers are numbers, the names share no prefix, and the seed missed them (`batt:null`): **CREATE** it. `NB_APS_TOTAL` (which the seed tagged `"Nombre"`) and `IPAQ_SCORE` are **computed from** the rest of the survey (a total and an index): they answer no per-item question — **DROP** that seed and put them in a thematic group.
 
 Input:
 
 ```json
 [
 {"section":"## Temps et intensité d'activité"},
-{"var":"MENAGE","role":"double","nlev":0,"desc":"Nombre d'heures par semaine consacrées au ménage","batt":null},
-{"var":"JARDINAGE","role":"double","nlev":0,"desc":"Nombre d'heures par semaine consacrées au jardinage","batt":null},
-{"var":"BRICOLAGE","role":"double","nlev":0,"desc":"Nombre d'heures par semaine consacrées au bricolage","batt":null},
+{"var":"MENAGE","role":"double","nlev":0,"desc":"Nombre moyen d'heures de ménage lors d'une semaine habituelle","batt":null},
+{"var":"JARDINAGE","role":"double","nlev":0,"desc":"Nombre moyen d'heures de jardinage lors d'une semaine habituelle","batt":null},
+{"var":"BRICOLAGE","role":"double","nlev":0,"desc":"Nombre moyen d'heures de bricolage lors d'une semaine habituelle","batt":null},
 {"var":"NB_APS_TOTAL","role":"integer_count","nlev":0,"desc":"Nombre total d'APS pratiquées sur 12 mois (variable calculée)","batt":"Nombre"},
 {"var":"IPAQ_SCORE","role":"double","nlev":0,"desc":"Score global d'activité physique IPAQ (variable calculée)","batt":null}
 ]

@@ -340,6 +340,28 @@ test_that("C4e: .battery_selector prefers a unique prefix, else pipe-joins names
   expect_equal(.battery_selector("SOLO", c("SOLO", "OTHER")), "SOLO")
 })
 
+test_that("C4f: a non-contiguous battery title aborts the codebook with a helpful message", {
+  bin <- function(nm, batt) list(var_label = nm, role = "factor_binary", r_class = "double",
+    new_name = nm, battery = batt,
+    levels = list("1" = list(order = 1L, label = "Oui", n = 6L, pct = 60L),
+                  "0" = list(order = 2L, label = "Non", n = 4L, pct = 40L)))
+  # "Bat A" is carried by A1 and A3 but split by A2 (a mistyped "Bat B") — the
+  # exact shape of the pps20 hand-edit typo that triggered the openxlsx2 crash.
+  vars <- list(A1 = bin("A1", "Bat A"), A2 = bin("A2", "Bat B"), A3 = bin("A3", "Bat A"))
+  path <- cb_json(vars)
+
+  # The guard sits in .cb_build_tibble(), before any xlsx write -> no openxlsx2 needed.
+  err <- tryCatch(.cb_build_tibble(.read_meta_json(path)),
+                  error = function(e) conditionMessage(e))
+  expect_match(err, "non contigu")
+  expect_match(err, "Bat A")            # the split battery
+  expect_match(err, "Bat B")            # the interrupting (typo'd) sibling title
+  expect_match(err, "A1")               # variable names listed
+  # generate_codebook() surfaces the same abort end-to-end.
+  expect_error(generate_codebook(path, output_path = tempfile(fileext = ".xlsx")),
+               "non contigu")
+})
+
 
 # ---------------------------------------------------------------------------
 # C5. orig_val column dropped when no new labels differ

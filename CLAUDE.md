@@ -73,13 +73,23 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
      non-battery #### to `headers` (start-markers) and true batteries (>=min_size) to the repeated
      `battery` field; reports variables in no #### (incomplete coverage). ##/### anchors never
      touched; JSON untouched if 0 valid spans. seed=FALSE: batt null everywhere.
-     Prompt = instructions/outline_prompt.md (real pps20 examples; seed framed as a mere candidate
-     the AI overrides; teaches split/merge/bridge + keeping derived/recap vars OUT of batteries).
+     Batteries are strictly CONTIGUOUS same-role runs (NO mixed/interleaved, NO bridge — those are
+     handled upstream by check_batteries() + manual reorder). Prompt = instructions/outline_prompt.md
+     (real pps20 examples; seed framed as a mere candidate the AI overrides; teaches contiguous
+     batteries, split-when-several-questions, numeric-grid-is-a-battery, and recaps OUT of the item
+     battery — but >=3 parallel recaps form their OWN battery:true).
      Reuses all shared AI infra (.build_message_body / ai_call_claude / batch / .cache_ai_raw / parse).
    → Internal seed = .batt_seed_candidates(): same role + level-code signature + a precision gate
-     (must share a name-token prefix OR a >=10-char label stem — role+codes alone is not enough),
+     (.batt_precision_ok: name-token prefix OR >=10-char label stem — role+codes alone is not enough),
      split by prefix cluster, heals + FLAGS type-outliers. preview_outline(meta_json) prints the
      full ##/###/#### markdown outline (batteries expanded), usable before/after this step.
+
+5.4 check_batteries(meta_json, min_size = 3) — pre-AI, read-only console diagnostic (run after
+     extract, before ai_build_outline). Reuses the seed signature + precision gate. Flags (A) INTERLEAVED
+     (mixed) batteries — non-contiguous same-signature groups — with a copy-paste relocate() to gather
+     them (apply on df, then extract recreate=TRUE); (B) TYPE-OUTLIERS — a single wrong-role member
+     between same-question neighbours (catches a binary mis-typed integer_count, e.g. LIVRE) — to fix
+     before the AI. Returns invisible(list(reorder, outliers)).
 
 6. generate_format_script(meta_json, output_path = NULL)
    → Generates executable R script that applies all formatting
@@ -318,12 +328,38 @@ OR a >=10-char label stem — role+codes alone is not a battery), prefix-cluster
 derived/recap variables OUT of batteries). `extract(headers=)` is source of truth for the USER levels
 (`##`/`###`): it clears+rewrites them and keeps only the AI `####` across re-extract.
 `ai_suggest_labels()` chunking never cuts a battery in two.
-`preview_outline()` prints the full `##`/`###`/`####` markdown outline (batteries expanded). Prompt =
-`instructions/outline_prompt.md` — real pps20 examples that teach the seed-override (split an over-merged
-interleaved run into per-sub-question batteries; merge/extend/**bridge** a mis-typed interior variable;
-keep distinct nomenclatures separate; a battery=false thematic group vs a battery) — because examples
-teach harder than rules. `desc` truncated to 160 chars so the shared question stem (often at the label's
-END) is visible.
+`preview_outline()` prints the full `##`/`###`/`####` markdown outline (batteries expanded).
+Batteries are strictly **CONTIGUOUS same-role runs** — no mixed/interleaved batteries, no bridging a
+mis-typed member. Interleaved (mixed) batteries are **reordered by hand before extract**, surfaced by
+`check_batteries()` (which also flags type-outliers to fix); the AI only ever sees clean contiguous
+batteries. Prompt = `instructions/outline_prompt.md` — 4 real pps20 examples teaching the seed-override:
+one battery + a thematic group; **items battery + a SEPARATE recap battery** (≥3 parallel recaps →
+their own `battery:true`, e.g. `ACTI_CULT`/`LECTURE`/`ACTU_EVEN_SPORT`); numeric-grid-is-a-battery +
+computed indicators as a group; no-batteries standalones. `desc` truncated to 160 chars so the shared
+question stem (often at the label's END) is visible.
+
+**Key Design Decision** — `check_batteries()` is the pre-AI battery health check (run after extract,
+before `ai_build_outline()`). Deterministic + read-only; reuses `.batt_signature` + `.batt_precision_ok`
+(the seed's precision gate, factored out and shared). It reports (A) **interleaved batteries** —
+same-signature groups that are **SHREDDED** (≥`min_size`, passing the precision gate, AND whose largest
+contiguous cluster is `< min_size` — a group already forming ≥1 battery-sized block is legitimate
+separate batteries, NOT flagged; this cluster gate is what keeps it quiet on a correctly-ordered survey)
+— each with a copy-paste `relocate(all_of(c(...)), .after = ...)` that gathers them contiguous (apply on
+`df`, then re-extract `recreate = TRUE`); and (B) **type-outliers** — a single variable whose `role` differs from its two
+same-question neighbours (same signature, shared name prefix OR ≥10-char label stem, so it catches a
+no-name-prefix case like `LIVRE` mis-typed `integer_count` among binaries). Console style mirrors
+`suggest_keep_codes()`; returns `invisible(list(reorder, outliers))`.
+
+**Key Design Decision** — A `battery` title must sit on a CONTIGUOUS run of variables (the codebook
+merges/boxes each battery over one `[min,max]` span; the format script opens one fold per battery).
+A manual JSON edit that mistypes/duplicates a title on non-consecutive variables (e.g. a dropped
+leading letter splitting `"Nombre…"`/`"ombre…"`) would otherwise surface only as an opaque openxlsx2
+`Merge intersects` crash (codebook) or a silent double fold box (format script). The shared guard
+`.check_battery_contiguity(entries, fn)` — called right after `.gfs_build_entries()` in BOTH
+`.cb_build_tibble()` and `generate_format_script()` — aborts early (`stop`, `call.=FALSE`) with a
+French, `check_batteries()`-style message naming the split title, its non-consecutive variables, and
+the intervening (usually typo'd) sibling title, so the JSON is fixable in seconds. `check_batteries()`
+does NOT catch this (same-signature groups, not mistyped title text).
 
 **Key Design Decision** — Missing-value flagging in `extract_survey_metadata()`. FACTOR levels: **exact**
 by design — flagged `missing` only when the (normalized) label is literally in `config.missing_chr`, OR

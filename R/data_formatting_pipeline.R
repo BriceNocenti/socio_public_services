@@ -3190,6 +3190,18 @@ metadata_add_level_stats <- function(meta_json, df,
   if (nchar(first) > 45L) paste0(substr(first, 1L, 42L), "...") else first
 }
 
+# Precision gate for a battery candidate: its members plausibly answer the SAME
+# question only when they share a name-token prefix OR a >= 10-char common label
+# stem (prefix OR suffix — the shared question stem is often at the label's END).
+# role + level codes alone is not enough (two unrelated yes/no questions in a row
+# are NOT a battery). Shared by .batt_seed_candidates() and check_batteries().
+.batt_precision_ok <- function(names, labels) {
+  if (nzchar(.batt_common_token_prefix(names))) return(TRUE)
+  pre <- trimws(sub("\\s+\\S*$", "", .batt_common_char_prefix(labels)))
+  suf <- trimws(sub("^\\S+\\s+", "", .batt_common_char_suffix(labels)))
+  nchar(pre) >= 10L || nchar(suf) >= 10L
+}
+
 # Deterministic battery-candidate seed (internal — no JSON write, no AI).
 # Returns:
 #   $seed     — per-variable character vector of candidate titles ("" = none),
@@ -3200,8 +3212,11 @@ metadata_add_level_stats <- function(meta_json, df,
 # role + same level-code set + contiguity) AND shares a name-token prefix or a
 # >= 10-char label stem — the precision gate that keeps the seed in "same
 # question" territory (two unrelated yes/no questions in a row are NOT a
-# battery). Interleaved / mis-typed / no-signal batteries are left for the AI,
-# which reads meaning (desc) and creates the ones the seed misses.
+# battery). INTERLEAVED (mixed) batteries are NOT reconstructed here: the user
+# reorders them by hand before extract, surfaced by check_batteries(), so the AI
+# only ever sees CONTIGUOUS batteries. check_batteries() also flags mis-typed
+# members (a wrong role breaking a run). No-signal batteries the seed misses are
+# still created by the AI, which reads meaning (desc).
 .batt_seed_candidates <- function(existing, min_size = 3L) {
   vars   <- existing$variables
   vnames <- names(vars)
@@ -3235,16 +3250,9 @@ metadata_add_level_stats <- function(meta_json, df,
     }
   }
 
-  # -- precision gate: a plausible same-question candidate shares a name prefix
-  #    or a >= 10-char common label stem (prefix OR suffix — the shared question
-  #    stem is often at the label's END). role+codes alone is not enough.
-  seed_ok <- function(idx) {
-    nm <- vnames[idx]; lb <- labels[idx]
-    if (nzchar(.batt_common_token_prefix(nm))) return(TRUE)
-    pre <- trimws(sub("\\s+\\S*$", "", .batt_common_char_prefix(lb)))
-    suf <- trimws(sub("^\\S+\\s+", "", .batt_common_char_suffix(lb)))
-    nchar(pre) >= 10L || nchar(suf) >= 10L
-  }
+  # -- precision gate (shared with check_batteries): a plausible same-question
+  #    candidate shares a name prefix or a >= 10-char common label stem.
+  seed_ok <- function(idx) .batt_precision_ok(vnames[idx], labels[idx])
 
   seed <- character(n)
   add_batt <- function(idx) {
@@ -3277,6 +3285,136 @@ metadata_add_level_stats <- function(meta_json, df,
   }
 
   list(seed = seed, outliers = outliers)
+}
+
+
+# ============================================================
+# 2b-bis-2. check_batteries() — pre-AI battery health check
+# ============================================================
+
+#' Flag interleaved batteries and mis-typed members BEFORE the AI outline
+#'
+#' Deterministic, read-only console report (no API call), run after
+#' \code{extract_survey_metadata()} and BEFORE \code{ai_build_outline()}. Now that
+#' batteries are treated as strictly \emph{contiguous} runs, it surfaces the two
+#' problems the AI no longer papers over:
+#' \enumerate{
+#'   \item \strong{Interleaved (mixed) batteries} — two batteries whose members
+#'     alternate in the source order (e.g. a yes/no \code{PRAT_*} interleaved with
+#'     a count \code{NB_APS_*}). For each one it prints a copy-paste
+#'     \code{relocate()} that gathers the members contiguously; apply the same to
+#'     the raw \code{df}, then re-run
+#'     \code{extract_survey_metadata(..., recreate = TRUE)}.
+#'   \item \strong{Type-outliers} — a single variable whose \code{role} differs
+#'     from its two same-question neighbours (same signature, shared name prefix
+#'     or label stem), which would silently split a battery. Fix its \code{role}
+#'     in the JSON (or the data) before the AI runs.
+#' }
+#' Uses the same signature + precision-gate machinery as the internal battery
+#' seed, so what it flags is exactly what would (mis)shape the outline.
+#'
+#' @param meta_json Path to the survey_meta JSON, or a \code{survey_meta} object.
+#' @param min_size Minimum members for an interleaved group to be worth
+#'   reordering (default 3, the battery minimum).
+#' @return Invisibly, a list with \code{reorder} (one entry per interleaved group:
+#'   \code{title}, member \code{vars}, and the \code{relocate} string) and
+#'   \code{outliers} (the flagged variable names).
+#' @seealso \code{\link{preview_outline}}, \code{\link{ai_build_outline}}
+#' @examples
+#' \dontrun{
+#' check_batteries("survey.survey_meta.json")   # then reorder df + recreate = TRUE
+#' }
+#' @export
+check_batteries <- function(meta_json, min_size = 3L) {
+  json_path <- .resolve_json_path(meta_json)
+  existing  <- .read_meta_json(json_path)
+  vars   <- existing$variables
+  vnames <- names(vars)
+  n      <- length(vnames)
+  if (n == 0L) {
+    message("check_batteries: aucune variable.")
+    return(invisible(list(reorder = list(), outliers = character(0))))
+  }
+
+  sig       <- vapply(vars, .batt_signature, character(1), USE.NAMES = FALSE)
+  labels    <- vapply(vars, function(jv) jv$var_label %||% "", character(1), USE.NAMES = FALSE)
+  first_tok <- vapply(vnames, function(x) strsplit(x, "_", fixed = TRUE)[[1]][[1]],
+                      character(1), USE.NAMES = FALSE)
+  eligible  <- !startsWith(sig, "X|")
+  # A variable carrying an outline header (## / ###) is a fixed section boundary:
+  # never reorder across it (headers are user-owned at this pre-AI stage).
+  sect_head <- vapply(vars, function(jv) length(jv$headers %||% list()) > 0,
+                      logical(1), USE.NAMES = FALSE)
+
+  # -- A. interleaved batteries: same-signature groups that are SHREDDED --------
+  # A mixed battery is a group so tightly interleaved with another that NO
+  # contiguous battery-sized block forms. A group that already makes >=1 clean
+  # block is fine (its members are legitimate separate batteries near their
+  # topics — do NOT propose gathering them survey-wide).
+  reorder <- list()
+  emit_span <- function(lo, hi) {
+    idx <- lo:hi
+    idx <- idx[eligible[idx]]
+    if (length(idx) < 2L) return(invisible())
+    for (s in unique(sig[idx])) {
+      g <- idx[sig[idx] == s]
+      if (length(g) < min_size) next
+      if (max(g) - min(g) + 1L == length(g)) next            # already contiguous
+      cl <- cumsum(c(TRUE, diff(g) != 1L))                    # contiguous clusters
+      if (max(tabulate(cl)) >= min_size) next                 # already forms a battery
+      if (!.batt_precision_ok(vnames[g], labels[g])) next     # not same-question
+      reloc <- paste0('relocate(all_of(c(',
+                      paste0('"', vnames[g][-1L], '"', collapse = ", "),
+                      ')), .after = "', vnames[g][[1L]], '")')
+      reorder[[length(reorder) + 1L]] <<- list(
+        title = .batt_provisional_title(vnames[g], labels[g]),
+        vars = vnames[g], relocate = reloc)
+    }
+  }
+  span_start <- 1L
+  for (i in seq_len(n)) {
+    if (i > 1L && sect_head[i]) { emit_span(span_start, i - 1L); span_start <- i }
+  }
+  emit_span(span_start, n)
+
+  # -- B. type-outliers: one wrong role between two same-question neighbours ----
+  outliers <- character(0)
+  if (n >= 3L) {
+    for (i in 2:(n - 1L)) {
+      if (!(eligible[i] && eligible[i - 1L] && eligible[i + 1L] && !sect_head[i])) next
+      if (sig[i - 1L] != sig[i + 1L] || sig[i] == sig[i - 1L]) next
+      trio <- c(i - 1L, i, i + 1L)
+      if (first_tok[i] == first_tok[i - 1L] ||
+          .batt_precision_ok(vnames[trio], labels[trio]))
+        outliers <- c(outliers, vnames[[i]])
+    }
+  }
+
+  # -- report ------------------------------------------------------------------
+  if (length(reorder) == 0L && length(outliers) == 0L) {
+    message("check_batteries: aucune batterie entrelacée ni membre de type douteux détecté.")
+    return(invisible(list(reorder = reorder, outliers = outliers)))
+  }
+  parts <- character(0)
+  if (length(reorder) > 0L) {
+    parts <- c(parts, paste0(length(reorder),
+      " batterie(s) entrelacée(s) — réordonner df (puis recreate = TRUE) :"))
+    for (r in reorder)
+      parts <- c(parts,
+        paste0('  • "', r$title, '"  (', length(r$vars), " variables)"),
+        paste0("      df |> ", r$relocate))
+    parts <- c(parts,
+      "    (souvent réordonner la 1re batterie suffit à rendre l'autre contiguë)")
+  }
+  if (length(outliers) > 0L) {
+    ro <- vapply(outliers, function(v) existing$variables[[v]]$role %||% "?",
+                 character(1), USE.NAMES = FALSE)
+    parts <- c(parts, paste0(length(outliers),
+      " membre(s) de type douteux (role diffère des voisins) — vérifier 'role' :"))
+    parts <- c(parts, paste0("  • ", format(outliers), "  role=", ro))
+  }
+  message("check_batteries: ", paste(parts, collapse = "\n"))
+  invisible(list(reorder = reorder, outliers = outliers))
 }
 
 
@@ -4437,16 +4575,18 @@ ai_classify_roles <- function(
     warning("ai_build_outline: instructions/outline_prompt.md not found; ",
             "using minimal inline prompt.")
     paste0(
-      "Structure a French survey codebook. Input: a JSON array in questionnaire ",
-      "order of {var, role, nlev, desc, batt} rows and fixed {\"section\":\"## ...\"} ",
-      "anchors. Produce ### subthemes (covering every variable within each ## bloc) ",
-      "and #### groups (batteries or thematic groupings) within them.\n",
-      'Reply ONLY as a JSON array of contiguous spans: ',
-      '[{"level":3|4,"title":"...","from":"<var>","to":"<var>","battery":true|false}].\n',
-      "level 3 = ###, level 4 = #### (battery=true for a real question battery, false ",
-      "for a thematic group). from/to = variable names (inclusive). Spans of the same ",
-      "level must not overlap; every span must stay inside one ## bloc; each #### must ",
-      "stay inside one ###. `batt` is only a candidate hint — override it freely. No prose."
+      "Group the variables of a French survey codebook. Input: a JSON array in ",
+      "questionnaire order of {var, role, nlev, desc, batt} rows and fixed ",
+      "{\"section\":\"## ...\"} / {\"section\":\"### ...\"} anchors — do NOT move, rename or ",
+      "emit them. Cover EVERY variable with contiguous #### groups, each a question ",
+      "battery or a thematic group.\n",
+      'Reply ONLY as a JSON array: ',
+      '[{"title":"...","from":"<var>","to":"<var>","battery":true|false}].\n',
+      "from/to = variable names (inclusive); groups never overlap and each stays inside ",
+      "one ## and one ### section. A battery (battery:true) is a CONTIGUOUS run of >=3 ",
+      "variables answering one multi-answer question (same role + shared question stem in ",
+      "desc); recaps/derived variables stay out. `batt` is only a candidate hint — ",
+      "override it freely. No prose."
     )
   }
 }
@@ -4516,6 +4656,12 @@ ai_classify_roles <- function(
 #' The model also receives \code{config.survey_description} (set at
 #' \code{extract_survey_metadata()}) as global context, when present.
 #'
+#' Batteries are treated as strictly \strong{contiguous} runs of the same
+#' role/answer type. Run \code{\link{check_batteries}} beforehand to surface any
+#' interleaved (mixed) batteries to reorder (its \code{relocate()} +
+#' \code{recreate = TRUE}) or mis-typed members to fix, so the AI only ever sees
+#' clean contiguous batteries.
+#'
 #' @param meta_json Path to the survey_meta JSON, or a \code{survey_meta} object.
 #' @param seed If \code{TRUE} (default), feed the deterministic battery-candidate
 #'   seed as the \code{batt} hint. \code{FALSE} sends \code{batt:null} everywhere.
@@ -4529,9 +4675,12 @@ ai_classify_roles <- function(
 #'   API or writing anything.
 #' @param api_key,model Anthropic credentials / model id.
 #' @return Invisibly, the updated \code{survey_meta} object.
+#' @seealso \code{\link{check_batteries}} (pre-AI reorder / role check),
+#'   \code{\link{preview_outline}}
 #' @examples
 #' \dontrun{
 #' set_headers("survey.survey_meta.json", titles)  # ## blocs (source of truth)
+#' check_batteries("survey.survey_meta.json")       # reorder mixed batteries first
 #' ai_build_outline("survey.survey_meta.json")
 #' preview_outline("survey.survey_meta.json")
 #' }
@@ -7066,6 +7215,41 @@ ai_suggest_varnames <- function(
 }
 
 
+# Why this exists: a `battery` title must sit on a CONTIGUOUS run of variables
+# (design invariant; the codebook merges/boxes each battery over a single [min,max]
+# span, generate_format_script() opens one fold per battery). A manual JSON edit
+# that mistypes or duplicates a title on non-consecutive variables would otherwise
+# surface only as an opaque openxlsx2 "Merge intersects" crash (codebook) or a
+# silent double fold box (format script). Abort early with a message that points
+# straight at the offending title and the (usually mistyped) sibling that split it.
+# Operates on .gfs_build_entries() output, shared by both generators.
+.check_battery_contiguity <- function(entries, fn = "generate_codebook") {
+  batt_of <- vapply(entries, function(e) e$battery %||% "", character(1))
+  names_v <- vapply(entries, function(e) e$new_name %||% e$orig_name %||% "", character(1))
+  parts   <- character(0)
+  for (t in unique(batt_of[nzchar(batt_of)])) {
+    pos <- which(batt_of == t)
+    if (length(pos) < 2L || length(min(pos):max(pos)) == length(pos)) next  # contiguous
+    span    <- min(pos):max(pos)
+    foreign <- span[batt_of[span] != t]
+    ftit    <- batt_of[foreign]; ftit[!nzchar(ftit)] <- "(sans batterie)"
+    parts <- c(parts,
+      paste0('  • "', t, '" portée par des variables NON consécutives : ',
+             paste(names_v[pos], collapse = ", ")))
+    for (ft in unique(ftit))
+      parts <- c(parts,
+        paste0('      interrompue par ',
+               paste(names_v[foreign[ftit == ft]], collapse = ", "),
+               '  -> battery = "', ft, '"'))
+  }
+  if (length(parts))
+    stop(fn, " : batterie(s) non contiguë(s) dans le JSON — corriger le champ ",
+         '"battery" (souvent une faute de frappe dans le titre) :\n',
+         paste(parts, collapse = "\n"), call. = FALSE)
+  invisible(NULL)
+}
+
+
 #' Generate formatting code blocks (Part 2).
 #'
 #' Produces a character vector of R code lines for rename + per-variable blocks.
@@ -7402,6 +7586,7 @@ generate_format_script <- function(meta_json,
 
   # --- Build normalized entries ---
   entries <- .gfs_build_entries(json_vars)
+  .check_battery_contiguity(entries, fn = "generate_format_script")
 
   # --- Numeric stats: read from JSON (written by metadata_add_level_stats) ---
   num_stats <- list()
@@ -7696,6 +7881,7 @@ generate_format_script <- function(meta_json,
 #'   by \code{.cb_write_xlsx()}. Carries attribute \code{"any_new_label"}.
 .cb_build_tibble <- function(json_data, lang = "fr", natural_order = FALSE) {
   entries   <- .gfs_build_entries(json_data$variables)
+  .check_battery_contiguity(entries, fn = "generate_codebook")
   json_vars <- json_data$variables
   config    <- json_data$config
   n_ind     <- suppressWarnings(as.numeric(config$n_individuals %||% NA_real_))
@@ -7937,6 +8123,9 @@ generate_format_script <- function(meta_json,
   # contiguous, so each is a single row range (reused for the merge + the box).
   has_battery <- any(!is.na(cb$.battery))
   batt_titles <- unique(cb$.battery[!is.na(cb$.battery)])
+  # range() assumes each title is a single contiguous run — enforced upstream by
+  # .check_battery_contiguity() (in .cb_build_tibble), so a non-contiguous title
+  # never reaches this merge/box logic.
   batt_ranges <- lapply(batt_titles,
                         function(t) range(which(!is.na(cb$.battery) & cb$.battery == t)))
 
@@ -8227,7 +8416,7 @@ generate_format_script <- function(meta_json,
   var_w      <- if (is.finite(var_maxlen) && var_maxlen > 16) 27 else 18
   widths <- c(h = 2.5, variable = var_w, description = 60, type = 9.2, role = 8,
               na = 20, val = 25, n = 9, pct = 8, sep = 2, orig_val = 50,
-              orig_code = 10, question_prefix = 26)
+              orig_code = 11.5, question_prefix = 26)
   wb <- openxlsx2::wb_set_col_widths(wb, "Codebook", cols = seq_len(K),
                                      widths = unname(widths[disp_cols]))
 
