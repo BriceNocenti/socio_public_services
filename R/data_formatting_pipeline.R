@@ -7672,6 +7672,121 @@ generate_format_script <- function(meta_json,
 
 
 # ============================================================
+# 12b. renumber_binary_batteries() — battery numbering on a df
+# ============================================================
+# Data-level twin of the .gfs_build_entries() binary-battery pass: reuses
+# .nines_sentinel() / .gfs_numeric_prefix() so the emitted level labels are
+# byte-identical to generate_format_script() / generate_codebook().
+
+#' Renuméroter les niveaux d'une batterie de variables binaires sur un data frame
+#'
+#' Réécrit les libellés des niveaux des variables binaires d'une même batterie
+#' (variables partageant un préfixe de nom, ex. \code{HANDI_VIS}/\code{HANDI_MOT}
+#' sous \code{"HANDI_"}) avec les mêmes préfixes numériques que
+#' \code{\link{generate_codebook}} / \code{\link{generate_format_script}} : le pôle
+#' positif (1er niveau) du k-ième membre reçoit le numéro \code{k}, le pôle négatif
+#' (2e niveau) un sentinelle « tout-neuf » partagé (9, 99, 999… selon la taille de
+#' la batterie). Les libellés obtenus sont identiques, octet pour octet, à ceux du
+#' codebook — pratique pour des tableaux croisés dynamiques Excel où l'ordre suit le
+#' préfixe.
+#'
+#' La sélection est sûre aux préfixes imbriqués : chaque colonne est rattachée au
+#' préfixe le plus long qu'elle commence par (ainsi \code{"VETACHAT"} n'absorbe pas
+#' les colonnes de \code{"VETACHATLIEU"}). Un groupe dont les membres ne sont pas
+#' TOUS des facteurs binaires (\code{is.factor(col) && nlevels(col) == 2}) est ignoré
+#' sans erreur (message nommant les variables fautives), le data frame restant
+#' inchangé pour ce groupe. L'opération est idempotente (un préfixe numérique déjà
+#' présent est retiré avant réapplication) et préserve les attributs des colonnes,
+#' notamment \code{attr(col, "label")} et \code{attr(col, "question_prefix")}, ainsi
+#' que la classe \code{ordered} le cas échéant.
+#'
+#' @param df       Data frame déjà formaté (1er niveau = pôle positif, comme pour
+#'   \code{generate_codebook(df)}).
+#' @param prefixes Un ou plusieurs préfixes de noms de variables (vecteur caractère,
+#'   éventuellement NOMMÉ comme l'objet \code{batteries} de l'utilisateur — seules les
+#'   VALEURS sont utilisées, les noms sont ignorés).
+#' @param ...      Réservé pour un usage futur (ignoré).
+#' @return Le data frame modifié.
+#' @seealso \code{\link{generate_codebook}}, \code{\link{generate_format_script}}
+#' @examples
+#' \dontrun{
+#' batteries <- c("Handicap" = "HANDI_", "Revenus" = "REV_")
+#' df <- renumber_binary_batteries(df, batteries)
+#' # HANDI_VIS : "1-Oui" / "9-Non" ; HANDI_MOT : "2-Oui" / "9-Non" ; …
+#' }
+#' @export
+renumber_binary_batteries <- function(df, prefixes, ...) {
+  stopifnot(is.data.frame(df))
+
+  prefixes <- unique(as.character(prefixes))            # ignore les NOMS
+  prefixes <- prefixes[!is.na(prefixes) & nzchar(prefixes)]
+  if (length(prefixes) == 0L) {
+    message("renumber_binary_batteries : aucun préfixe fourni, data frame inchangé.")
+    return(df)
+  }
+
+  col_names   <- names(df)
+  # Rattache chaque colonne au préfixe le PLUS LONG qu'elle commence par.
+  pref_by_len <- prefixes[order(nchar(prefixes), decreasing = TRUE)]
+  assigned <- vapply(col_names, function(cn) {
+    hit <- pref_by_len[startsWith(cn, pref_by_len)]     # tri long->court : hit[1] = plus long
+    if (length(hit) == 0L) NA_character_ else hit[[1L]]
+  }, character(1L))
+
+  unmatched <- prefixes[!prefixes %in% assigned]
+  if (length(unmatched) > 0L)
+    message("renumber_binary_batteries : ", length(unmatched),
+            " préfixe(s) sans colonne correspondante : ",
+            paste(unmatched, collapse = ", "))
+
+  n_done <- 0L; n_skip <- 0L
+  struct_attrs <- c("levels", "class", "names")   # mis à jour par levels<- : ne pas restaurer
+
+  for (p in prefixes) {                            # groupes dans l'ordre des préfixes fournis
+    members <- col_names[which(assigned == p)]     # ordre des colonnes du df préservé
+    if (length(members) == 0L) next
+
+    is_bin <- vapply(members,
+      function(cn) is.factor(df[[cn]]) && nlevels(df[[cn]]) == 2L, logical(1L))
+    if (!all(is_bin)) {
+      message("renumber_binary_batteries : batterie \"", p,
+              "\" ignorée — variable(s) non binaire(s) : ",
+              paste(members[!is_bin], collapse = ", "))
+      n_skip <- n_skip + 1L
+      next
+    }
+
+    sentinel <- .nines_sentinel(length(members))
+    neg_pref <- .gfs_numeric_prefix(sentinel, sentinel)   # ex. "9-", "99-"
+
+    for (k in seq_along(members)) {
+      cn   <- members[[k]]
+      col  <- df[[cn]]
+      snap <- attributes(col)                             # AVANT relabel
+
+      cur    <- levels(col)                               # exactement 2
+      base   <- sub("^\\s*[0-9]+\\s*-\\s*", "", cur)       # idempotence
+      new_lv <- c(paste0(.gfs_numeric_prefix(k, sentinel), base[[1L]]),  # positif = 1er niveau
+                  paste0(neg_pref,                          base[[2L]]))  # négatif = 2e niveau
+
+      levels(col) <- new_lv
+      # Restaure les attributs NON structurels que levels<- pourrait perdre selon
+      # la version de R (label, question_prefix, …) sans toucher levels/class/names.
+      for (nm in setdiff(names(snap), struct_attrs)) attr(col, nm) <- snap[[nm]]
+
+      df[[cn]] <- col
+    }
+    n_done <- n_done + 1L
+  }
+
+  message(sprintf(
+    "renumber_binary_batteries : %d batterie(s) renumérotée(s), %d ignorée(s).",
+    n_done, n_skip))
+  df
+}
+
+
+# ============================================================
 # 9b. generate_codebook() — human-readable Excel codebook
 # ============================================================
 # PURPOSE: Turn a *.survey_meta.json (AI-enriched OR plain, after
@@ -7681,6 +7796,11 @@ generate_format_script <- function(meta_json,
 # See: CLAUDE.md § Pipeline Architecture.
 
 # --- Translation maps (FR default, EN via lang = "en") --------------------
+
+# Empty level-4 header PLACEHOLDER, inserted to close a battery before an unheaded
+# standalone variable (see .cb_build_tibble). Change to e.g. "#### Autres" to give
+# that catch-all group a real title.
+.CB_EMPTY_HEADER <- "-------- " # "    " # "#### "
 
 # Canonical role key — the single key space shared by the role label, the legend
 # order, and the pastel role chip. Merges integer/count/scale into one "num entier"
@@ -7831,15 +7951,17 @@ generate_format_script <- function(meta_json,
               # added at format time (below), not baked into the label.
     variable        = c("variable", "le nom de code de la variable dans la base de données",
                         "variable", "the variable's code name in the database"),
-    description     = c("description", "ce que mesure la variable, en clair",
-                        "description", "what the variable measures, in plain words"),
+    description     = c("description", "ce que mesure la variable, en clair, ou le détail de la question posée dans le questionnaire",
+                        "description", "what the variable measures, in plain words, or the detail of the questionnaire formulation"),
     role            = c("role", "le rôle statistique de la variable (voir la liste ci-dessous)",
                         "role", "the variable's statistical role (see the list below)"),
+    type            = c("R class", "la classe, en language de programmation R, de la variable dans la base finale — factor, ordered factor, integer, double, logical, character",
+                        "R class", "the variable's R programming language class in the final dataset — factor, ordered factor, integer, double, logical, character"),
     na              = c("valeurs_manquantes", "nombre et part de non-réponses (NA), avec le détail des codes manquants",
                         "missing_values", "count and share of non-responses (NA), with the detail of the missing codes"),
     val             = c("valeur", "pour les variables catégorielles, les modalités (réponses possibles) ; pour les variables numériques, des statistiques descriptives",
                         "value", "for categorical variables, the categories (possible answers); for numeric variables, descriptive statistics"),
-    n               = c("n", "pour les variables catégorielles, le nombre d'individus concernés par chaque modalité ; pour les variables numériques, la moyenne, le maximum, le troisième quartile (Q3), la médiane, le premier quartile (Q1), le minimum",
+    n               = c("n", "pour les variables catégorielles, le nombre d'individus (effectif) concernés par chaque modalité ; pour les variables numériques, la moyenne, le maximum, le troisième quartile (Q3), la médiane, le premier quartile (Q1) et le minimum",
                         "n", "for categorical variables, the number of individuals in each category; for numeric variables, the mean, maximum, third quartile (Q3), median, first quartile (Q1), minimum"),
     pct             = c("freq", "la fréquence (part en %) de chaque modalité",
                         "freq", "the frequency (% share) of each category"),
@@ -7847,7 +7969,7 @@ generate_format_script <- function(meta_json,
                         "original_label", "the category's original label, in the initial database"),
     orig_code       = c("code_origine", "le code d'origine de la modalité, dans la base de données initiale",
                         "original_code", "the category's original code, in the initial database"),
-    question_prefix = c("prefixe_question", "un préfixe commun unique pour les différentes réponses à une même question (batterie de questions), ou quand il n’y en a pas la liste des variables de cette batterie",
+    question_prefix = c("prefixe_question", "un préfixe commun unique pour les différentes réponses à une même question (batterie de questions), ou quand il n’y a pas de prefixe unique la liste des variables de cette batterie",
                         "question_prefix", "a unique common prefix for the answers to one question (a question battery), or, failing that, the list of that battery's variables"))
   out <- character(0)
   for (k in cols) {
@@ -7863,18 +7985,18 @@ generate_format_script <- function(meta_json,
 .cb_role_info <- function(lang, role_key) {
   fr <- !identical(lang, "en")
   d <- list(
-    cat_binaire  = c("cat binaire", "deux réponses possibles (ex. oui / non)",
+    cat_binaire  = c("cat binaire", "deux catégories de réponses possibles (ex. oui / non)",
                      "binary", "two possible answers (e.g. yes / no)"),
     cat_ordinale = c("cat ordinale", "catégories ordonnées (ex. jamais < parfois < souvent)",
                      "ordinal", "ordered categories (e.g. never < sometimes < often)"),
     cat_nominale = c("cat nominale", "catégories sans ordre (ex. région, sexe)",
                      "nominal", "unordered categories (e.g. region, sex)"),
-    num_entier   = c("num entier", "un nombre entier (ex. un effectif, un décompte)",
+    num_entier   = c("num entier", "un nombre entier (ex. un effectif, un \"nombre de x\" , un décompte)",
                      "integer", "a whole number (e.g. a count)"),
-    num_decimal  = c("num décimal", "un nombre à décimales (ex. un montant, une durée)",
+    num_decimal  = c("num décimal", "un nombre à décimales (ex. un montant, une durée, avec chiffres après la virgule)",
                      "decimal", "a number with decimals (e.g. an amount, a duration)"),
-    booleen      = c("booléen", "vrai ou faux (indicateur ; on affiche la part de TRUE)",
-                     "boolean", "true or false (indicator; the share of TRUE is shown)"),
+    booleen      = c("booléen", "variable logique binaire, de type vrai ou faux",
+                     "boolean", "binary logical variable, true or false"),
     texte        = c("texte", "du texte libre",
                      "text", "free text"),
     identifiant  = c("identifiant", "un code identifiant chaque individu",
@@ -7995,7 +8117,52 @@ generate_format_script <- function(meta_json,
 #'
 #' @return A tibble with display columns + internal (dot-prefixed) columns used
 #'   by \code{.cb_write_xlsx()}. Carries attribute \code{"any_new_label"}.
-.cb_build_tibble <- function(json_data, lang = "fr", natural_order = FALSE) {
+# Longest common CONTIGUOUS substring of two strings (character-wise, UTF-8 aware).
+# Simple O(m*n) DP over rows, iterating only matching columns per row.
+.longest_common_substring <- function(a, b) {
+  ac <- strsplit(a, "", fixed = TRUE)[[1]]
+  bc <- strsplit(b, "", fixed = TRUE)[[1]]
+  na <- length(ac); nb <- length(bc)
+  if (na == 0L || nb == 0L) return("")
+  prev <- integer(nb + 1L)
+  best_len <- 0L; best_end_a <- 0L
+  for (i in seq_len(na)) {
+    curr <- integer(nb + 1L)
+    for (j in which(bc == ac[[i]])) {
+      curr[[j + 1L]] <- prev[[j]] + 1L
+      if (curr[[j + 1L]] > best_len) { best_len <- curr[[j + 1L]]; best_end_a <- i }
+    }
+    prev <- curr
+  }
+  if (best_len == 0L) return("")
+  paste0(ac[(best_end_a - best_len + 1L):best_end_a], collapse = "")
+}
+
+# Remove from `current` the part it shares with a battery's FIRST description: the
+# longest common contiguous run, but its start advanced to the next WORD BOUNDARY in
+# `current`. This keeps leading punctuation/space (e.g. "] ", ") ") AND never cuts the
+# tail of this item's own word when it happens to share a trailing letter with the
+# first item (e.g. "Ba[s]" vs "Chaussure[s]"). str_squish() at the end.
+.dedup_shared_desc <- function(first, current) {
+  first   <- as.character(first %||% "")
+  current <- as.character(current %||% "")
+  if (!nzchar(first) || !nzchar(current)) return(current)
+  common <- .longest_common_substring(first, current)
+  if (nchar(common) < 3L) return(stringr::str_squish(current))
+  pos <- as.integer(regexpr(common, current, fixed = TRUE))     # first occurrence
+  if (pos < 1L) return(stringr::str_squish(current))
+  end <- pos + nchar(common) - 1L
+  cc  <- strsplit(current, "", fixed = TRUE)[[1]]
+  wrd <- grepl("[\\p{L}\\p{N}]", cc, perl = TRUE)                # word char? (accent-aware)
+  # Advance the start until it begins a WHOLE word (word char preceded by non-word / BOS).
+  while (pos <= end && !(wrd[[pos]] && (pos == 1L || !wrd[[pos - 1L]]))) pos <- pos + 1L
+  if (pos > end) return(stringr::str_squish(current))
+  removed <- paste0(cc[pos:end], collapse = "")
+  stringr::str_squish(sub(removed, "", current, fixed = TRUE))
+}
+
+.cb_build_tibble <- function(json_data, lang = "fr", natural_order = FALSE,
+                             dedup_battery_desc = FALSE) {
   entries   <- .gfs_build_entries(json_data$variables)
   .check_battery_contiguity(entries, fn = "generate_codebook")
   json_vars <- json_data$variables
@@ -8024,6 +8191,15 @@ generate_format_script <- function(meta_json,
   for (title in unique(batt_of[nzchar(batt_of)]))
     batt_select[[title]] <- .battery_selector(all_names[batt_of == title], all_names)
 
+  # First entry INDEX of each battery — the reference description for the optional
+  # dedup_battery_desc trimming (its description is always kept in full).
+  batt_first_idx <- list()
+  if (isTRUE(dedup_battery_desc))
+    for (i2 in seq_along(entries)) {
+      t <- entries[[i2]]$battery %||% ""
+      if (nzchar(t) && is.null(batt_first_idx[[t]])) batt_first_idx[[t]] <- i2
+    }
+
   # The top matter (level-1 title, survey front-matter, "how to read" legend and
   # the clickable table of contents) is assembled AFTER the variable loop and
   # PREPENDED to `rows` — the legend needs the roles/columns actually present and
@@ -8037,13 +8213,16 @@ generate_format_script <- function(meta_json,
     jv <- json_vars[[e$orig_name]]
     cur_batt <- e$battery %||% ""
 
-    # --- Close the previous battery with an empty (2 cm) row when the next
+    # --- Close the previous battery with an EMPTY #### header when the next
     #     variable is NOT itself introduced by a header — i.e. a standalone
-    #     variable with no outline header and no new #### battery header. This
-    #     stops the variables after a battery from looking as if they belonged to
-    #     it. (A following battery / outline header already provides the break.)
+    #     variable with no outline header and no new #### battery header. Here (df
+    #     use case) a #### exists ONLY for batteries, so without this the variables
+    #     after a battery would read as part of it. The empty "#### " is a real
+    #     level-4 outline node that closes the battery and opens a "loose variables"
+    #     group; give it a title (edit the string) to name that group.
+    #     (A following battery / outline header already provides its own break.)
     if (nzchar(prev_battery) && !nzchar(cur_batt) && length(e$headers) == 0L)
-      push(.cb_row(.row_type = "spacer"))
+      push(.cb_row(.row_type = "title", .h_level = 4L, h = .CB_EMPTY_HEADER))
 
     # --- Outline headers (## / ###) stored on this variable ---------------
     # The markdown depth sets the level; the "#" markers are KEPT in the display
@@ -8070,6 +8249,14 @@ generate_format_script <- function(meta_json,
     var_disp <- e$new_name
     type_lab <- .cb_r_class_label(e$role, e$r_class)   # final R class (col "R class")
     role_lab <- .cb_role_label(e$role, e$r_class, lang) # statistical role (legend)
+
+    # Description: optionally trim the part a battery member shares with the
+    # battery's FIRST member (its own description is kept in full).
+    desc_disp <- e$var_label %||% ""
+    if (isTRUE(dedup_battery_desc) && nzchar(cur_batt) &&
+        !identical(batt_first_idx[[cur_batt]], i))
+      desc_disp <- .dedup_shared_desc(entries[[batt_first_idx[[cur_batt]]]]$var_label %||% "",
+                                      desc_disp)
 
     is_factor  <- grepl("^factor_", e$role) && e$n_non_missing > 0
     is_num     <- e$role %in% c("integer", "integer_count", "integer_scale", "double")
@@ -8107,7 +8294,7 @@ generate_format_script <- function(meta_json,
       .battery = bt_tag, .orig_name = e$orig_name,
       .role_key = .cb_role_key(e$role, e$r_class),
       variable = var_disp, type = type_lab, role = role_lab,
-      description = e$var_label, na = na_str, question_prefix = qp, ...)
+      description = desc_disp, na = na_str, question_prefix = qp, ...)
 
     # --- Value rows ------------------------------------------------------
     block_rows <- list()
@@ -8236,11 +8423,12 @@ generate_format_script <- function(meta_json,
   #     read" legend, clickable table of contents. Built here so the legend can
   #     list only the columns/types/roles that are actually present. -----------
   has_batt   <- any(nzchar(batt_of))
-  # The "R class" (internal key `type`) column is expert-facing and NOT described
-  # in the legend; orig_code is dropped in as-is (natural_order) mode.
+  # orig_code is dropped in as-is (natural_order) mode. "R class" (internal key
+  # `type`) is always present and IS described in the legend (as a specialist column).
   cols_pres  <- c("variable", "description", "role", "na", "val", "n", "pct",
                   if (any_new_label) "orig_val",
                   if (!natural_order) "orig_code",
+                  "type",
                   if (has_batt) "question_prefix")
   # Roles actually present, in the canonical .CB_ROLE_ORDER (drives the flat legend).
   roles_present <- unique(vapply(entries,
@@ -8280,7 +8468,7 @@ generate_format_script <- function(meta_json,
     .cb_howto_columns(lang, cols_pres),
     if (length(role_lines))
       c("",
-        if (fr_lang) "**Rôles** (« cat » = variable catégorielle, « num » = variable numérique) :"
+        if (fr_lang) "**Rôles** (« cat » = variable catégorielle ; « num » = variable numérique) :"
         else "**Roles** ('cat' = categorical, 'num' = numeric):",
         role_lines),
     "")
@@ -8344,7 +8532,7 @@ generate_format_script <- function(meta_json,
     num_entier = "FFE6DEF2", num_decimal = "FFE1E7EF", booleen = "FFD6EAF0",
     identifiant = "FFF2F2F2", texte = "FFF7F7F7", autre = "FFF7F7F7")
   # Zebra shade per VARIABLE block, resetting to white after every section header:
-  # a value block is white/grey alternately; frontmatter/legend/toc/spacer stay
+  # a value block is white/grey alternately; frontmatter/legend/toc rows stay
   # white (never entered the block loop). Held constant across a block's rows.
   stripe_grey <- logical(nrow(cb))
   { p <- 0L; cur <- 0L
@@ -8367,15 +8555,15 @@ generate_format_script <- function(meta_json,
   batt_ranges <- lapply(batt_titles,
                         function(t) range(which(!is.na(cb$.battery) & cb$.battery == t)))
 
-  # `type` (= the technical "R class") sits at the far right, an expert annotation
-  # OUTSIDE the boxed block (like question_prefix). `sep` + orig_val/orig_code only
-  # appear when at least one original-label column is shown (dropped in as-is mode).
-  has_orig <- orig_val_kept || orig_code_kept
+  # The `type` (= technical "R class") and `question_prefix` are specialist
+  # annotation columns OUTSIDE the boxed block. An ALWAYS-present thin empty `sep`
+  # column is the gutter that visually detaches them from the main table (even when
+  # no original-label column is shown). orig_val/orig_code sit inside the main table.
   disp_cols <- c("h", "variable", "description", "role", "na",
                  "val", "n", "pct",
-                 if (has_orig) "sep",
                  if (orig_val_kept) "orig_val",
                  if (orig_code_kept) "orig_code",
+                 "sep",
                  "type",
                  if (has_battery) "question_prefix")
   ci   <- setNames(seq_along(disp_cols), disp_cols)
@@ -8448,7 +8636,7 @@ generate_format_script <- function(meta_json,
             na = "left", val = "left", n = "right", pct = "right",
             orig_val = "left", orig_code = "left", question_prefix = "left",
             sep = "", h = "")
-  al_wrap <- c(variable = TRUE, description = TRUE, type = TRUE, role = TRUE, na = TRUE,
+  al_wrap <- c(variable = TRUE, description = TRUE, type = FALSE, role = FALSE, na = TRUE,
                val = TRUE, n = FALSE, pct = FALSE, orig_val = FALSE, orig_code = FALSE,
                question_prefix = TRUE, sep = FALSE, h = FALSE)  # merged per battery -> wrap
   sd_fmt <- "\"σ\"0.0"
@@ -8516,19 +8704,21 @@ generate_format_script <- function(meta_json,
       bt <- (ex == r1) & inhbc
       bb <- (ex == r2) & inhbc
       if (kind == "numeric" && nm %in% c("val", "n", "pct")) bb <- bb | (ex %in% mean_ex)
-      bl <- (nm == "val") || (kind == "factor" && nm %in% c("sep", "orig_val"))
+      bl <- (nm == "val") || (kind == "factor" && nm == "orig_val")
       # freq (pct) closes on the right for NON-battery blocks; batteries get the
-      # dark-red rectangle's right edge instead.
-      br <- (kind == "factor" && nm %in% c("sep", "orig_code")) || (nm == "pct" && !in_batt)
+      # dark-red rectangle's right edge instead. `sep` is a pure gutter (no borders).
+      br <- (kind == "factor" && nm == "orig_code") || (nm == "pct" && !in_batt)
       # Fill token (priority: role chip > battery rose > zebra stripe > none). The
       # sentinel "none" keeps it a non-empty LAST field so strsplit never drops it.
+      # NOTE: `type` (R class) is NOT zebra-striped — it stays in the plain
+      # specialist-column region past the `sep` gutter (like question_prefix).
       fillv <- rep("none", m)
       if (nm == "role") {
         fc <- if (!is.na(rk) && rk %in% names(role_fill)) role_fill[[rk]] else NA_character_
         if (!is.na(fc)) fillv[] <- fc
       } else if (in_batt && nm %in% c("val", "n", "pct")) {
         fillv[] <- ROSE
-      } else if (nm %in% c("variable", "description", "type", "role", "na", "val", "n", "pct")) {
+      } else if (nm %in% c("variable", "description", "role", "na", "val", "n", "pct")) {
         fillv[sgrey] <- GREY
       }
       keys <- paste(ff, hh, vv, if (ww) "1" else "0", nf,
@@ -8714,13 +8904,6 @@ generate_format_script <- function(meta_json,
       wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(i), heights = cm_to_pt(1.1))
   }
 
-  # Empty battery-closing rows: a genuinely blank 2 cm row that visually detaches
-  # the variables below a battery from it.
-  spacer_idx <- which(cb$.row_type == "spacer")
-  if (length(spacer_idx) > 0)
-    wb <- openxlsx2::wb_set_row_heights(wb, "Codebook", rows = xr(spacer_idx),
-                                        heights = cm_to_pt(2))
-
   # Per battery: (1) a striking dark-red rectangle around its summary table,
   # columns valeur | n | freq only (update = TRUE layers over the black
   # per-variable borders without disturbing numfmt/fill); (2) merge the selector
@@ -8770,8 +8953,8 @@ generate_format_script <- function(meta_json,
   # Column widths (description + na wider; variable widened only when names wrap).
   var_maxlen <- suppressWarnings(max(nchar(cb$variable), na.rm = TRUE))
   var_w      <- if (is.finite(var_maxlen) && var_maxlen > 15) 25 else 16
-  widths <- c(h = 2, variable = var_w, description = 55, type = 13, role = 10,
-              na = 18.2, val = 20, n = 9, pct = 12, sep = 2, orig_val = 50,
+  widths <- c(h = 1, variable = var_w, description = 52, type = 13, role = 10.2,
+              na = 18.2, val = 27, n = 9, pct = 12, sep = 2, orig_val = 50,
               orig_code = 11.5, question_prefix = 26)
   wb <- openxlsx2::wb_set_col_widths(wb, "Codebook", cols = seq_len(K),
                                      widths = unname(widths[disp_cols]))
@@ -8816,6 +8999,12 @@ generate_format_script <- function(meta_json,
 #'                     exactly as stored, sorted by original code, with no numeric
 #'                     ordering prefix (and no binary 1-row collapse). Forced
 #'                     \code{TRUE} in df-first mode. Default \code{FALSE}.
+#' @param dedup_battery_desc Logical. When \code{TRUE}, for the 2nd+ variables of a
+#'                     battery the part of the \code{description} shared with the
+#'                     battery's FIRST member (the longest common contiguous run,
+#'                     trimmed to start at a word character) is removed, keeping only
+#'                     each item's own wording. The first member keeps its full
+#'                     description. Default \code{FALSE}.
 #' @param ...          In df-first mode, extra arguments forwarded to
 #'                     \code{extract_survey_metadata()} (ignored otherwise).
 #'
@@ -8832,9 +9021,10 @@ generate_format_script <- function(meta_json,
 #'   generate_codebook(pps20)
 #' }
 generate_codebook <- function(meta_json,
-                              output_path      = NULL,
-                              lang             = "fr",
-                              keep_original    = FALSE,
+                              output_path        = NULL,
+                              lang               = "fr",
+                              keep_original      = FALSE,
+                              dedup_battery_desc = FALSE,
                               ...) {
   lang <- match.arg(lang, c("fr", "en"))
 
@@ -8869,7 +9059,8 @@ generate_codebook <- function(meta_json,
 
   json_data <- .read_meta_json(json_path)
   cb <- .cb_build_tibble(json_data, lang = lang,
-                         natural_order = isTRUE(keep_original))
+                         natural_order = isTRUE(keep_original),
+                         dedup_battery_desc = isTRUE(dedup_battery_desc))
 
   orig_val_kept <- isTRUE(attr(cb, "any_new_label"))
   if (!orig_val_kept) cb$orig_val <- NULL
@@ -8993,10 +9184,10 @@ generate_codebook <- function(meta_json,
 }
 
 # Split a codebook tibble into: front (survey title + front-matter rows) and one
-# per-variable segment (leading ## / ### / #### title rows + the value block +
-# a trailing battery-closing spacer), keyed by `.orig_name`. Relies on the
-# invariant that a spacer is emitted only when the next var has NO header, so a
-# block boundary carries EITHER a lone spacer OR title rows, never both.
+# per-variable segment (leading ## / ### / #### title rows + the value block),
+# keyed by `.orig_name`. A battery that ends before an unheaded variable is closed
+# by an EMPTY #### header (see .cb_build_tibble), which is just a leading title of
+# the following segment — so every block boundary is carried by title rows.
 .cb_segment_by_variable <- function(tib) {
   n  <- nrow(tib)
   rt <- tib$.row_type
@@ -9021,7 +9212,6 @@ generate_codebook <- function(meta_json,
     v1  <- i
     while (i <= n && !(identical(rt[[i]], "value") && isl[[i]])) i <- i + 1L
     seg <- c(seg, v1:i); i <- i + 1L
-    if (i <= n && identical(rt[[i]], "spacer")) { seg <- c(seg, i); i <- i + 1L }
     segs[[key]] <- seg; ord <- c(ord, key)
   }
   list(front = front, segs = segs, order = ord)
@@ -9132,9 +9322,10 @@ generate_codebook <- function(meta_json,
 #' @return Invisibly, the combined display tibble (internal dot-columns dropped).
 #' @export
 add_new_variables_to_codebook_from_df <- function(meta_json, df,
-                                                   output_path   = NULL,
-                                                   lang          = "fr",
-                                                   keep_original = FALSE,
+                                                   output_path        = NULL,
+                                                   lang               = "fr",
+                                                   keep_original      = FALSE,
+                                                   dedup_battery_desc = FALSE,
                                                    ...) {
   lang <- match.arg(lang, c("fr", "en"))
   if (!is.data.frame(df))
@@ -9158,7 +9349,8 @@ add_new_variables_to_codebook_from_df <- function(meta_json, df,
 
   # Originals: identical to generate_codebook(meta_json, keep_original = ...).
   tib_orig <- .cb_build_tibble(json_data, lang = lang,
-                               natural_order = isTRUE(keep_original))
+                               natural_order = isTRUE(keep_original),
+                               dedup_battery_desc = isTRUE(dedup_battery_desc))
 
   write_out <- function(final) {
     final$.block_id <- as.integer(ifelse(
@@ -9195,7 +9387,8 @@ add_new_variables_to_codebook_from_df <- function(meta_json, df,
   new_df   <- df[new_vars]
   new_json <- .cb_new_vars_json(new_df, ...)
   new_json <- .cb_inject_new_batteries(new_json, new_df)
-  tib_new  <- .cb_build_tibble(new_json, lang = lang, natural_order = TRUE)
+  tib_new  <- .cb_build_tibble(new_json, lang = lang, natural_order = TRUE,
+                               dedup_battery_desc = isTRUE(dedup_battery_desc))
   vrow <- tib_new$.row_type == "value"                 # new vars have no origin
   tib_new$orig_val[vrow]  <- NA_character_
   tib_new$orig_code[vrow] <- NA_character_

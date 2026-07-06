@@ -268,7 +268,7 @@ test_that("C4d: a #### group in `headers` renders a level-4 title row (not a bat
   expect_true(all(is.na(cb$question_prefix)))
 })
 
-test_that("C4b: a `battery` title emits ONE #### header before the run's first member", {
+test_that("C4b: a `battery` #### header, closed by an empty #### before an unheaded var", {
   vars <- list(
     A_ONE = list(var_label = "q1", role = "factor_binary", r_class = "double", new_name = "A_ONE",
                  battery = "Batterie A",
@@ -285,18 +285,20 @@ test_that("C4b: a `battery` title emits ONE #### header before the run's first m
   jd <- .read_meta_json(cb_json(vars))
   cb <- .cb_build_tibble(jd)
   titles <- cb[cb$.row_type == "title", ]
-  # Exactly one #### header, carrying the battery title, at level 4 (# kept).
-  expect_equal(nrow(titles), 1L)
-  expect_equal(titles$h, "#### Batterie A")
-  expect_equal(titles$.h_level, 4L)
-  # It sits immediately before A_ONE, and there is no header before A_TWO.
+  # The #### battery header, then the EMPTY-header placeholder closing it before OTHER.
+  expect_equal(nrow(titles), 2L)
+  expect_equal(titles$h, c("#### Batterie A", .CB_EMPTY_HEADER))
+  expect_equal(titles$.h_level, c(4L, 4L))
+  # Battery header sits immediately before A_ONE, and no header before A_TWO.
   first_a1 <- min(which(cb$variable %in% "A_ONE"))
   expect_equal(cb$.row_type[first_a1 - 1L], "title")
   first_a2 <- min(which(cb$variable %in% "A_TWO"))
   expect_equal(cb$.row_type[first_a2 - 1L], "value")
-  # A closing spacer row detaches the standalone OTHER from the battery above it.
+  # An empty-header placeholder (not a spacer) detaches the standalone OTHER from the battery.
   first_other <- min(which(cb$variable %in% "OTHER"))
-  expect_equal(cb$.row_type[first_other - 1L], "spacer")
+  expect_equal(cb$.row_type[first_other - 1L], "title")
+  expect_equal(cb$h[first_other - 1L], .CB_EMPTY_HEADER)
+  expect_false("spacer" %in% cb$.row_type)
 })
 
 test_that("C4b2: no closing spacer between two adjacent batteries (new #### separates)", {
@@ -664,4 +666,46 @@ test_that("C14: .to_utf8 recovers latin1 bytes and preserves valid UTF-8", {
   # Valid UTF-8 bytes flagged "unknown" (the read.csv "UTF-8-BOM" case) survive as-is.
   u <- "café"; Encoding(u) <- "unknown"
   expect_equal(.to_utf8(u), "café")
+})
+
+
+# ---------------------------------------------------------------------------
+# C15. Battery description dedup (dedup_battery_desc) + R class legend / sep gutter
+# ---------------------------------------------------------------------------
+
+test_that("C15: LCS + .dedup_shared_desc trim the shared run, keep leading punctuation", {
+  expect_equal(.longest_common_substring("XYZ ABCDEF", "123 ABCDEF"), " ABCDEF")
+  expect_equal(.longest_common_substring("abc", "xyz"), "")
+  # removal starts at a word char, so the leading "] " of the current var is kept
+  expect_equal(.dedup_shared_desc("[Bas] Stem commun ici.", "[Veste] Stem commun ici."),
+               "[Veste]")
+})
+
+test_that("C15b: dedup_battery_desc trims 2nd+ battery members, keeps the first full", {
+  stem <- " Les questions qui suivent, en 2024. Variable catégorielle."
+  mk <- function(h) list(var_label = paste0(h, stem), role = "factor_binary",
+    r_class = "double", new_name = "V", battery = "VET",
+    levels = list("1" = list(order = 1L, label = "Oui", n = 6L, pct = 60L),
+                  "0" = list(order = 2L, label = "Non", n = 4L, pct = 40L)))
+  vars <- list(A = mk("[Bas]"), B = mk("[Veste]"), C = mk("[Chaussures]"))
+  for (nm in names(vars)) vars[[nm]]$new_name <- nm
+  jd <- .read_meta_json(cb_json(vars))
+  d  <- function(cb) cb$description[cb$.is_first %in% TRUE & cb$.row_type == "value"]
+  expect_equal(d(.cb_build_tibble(jd))[[2]], paste0("[Veste]", stem))     # default: full
+  expect_equal(d(.cb_build_tibble(jd, dedup_battery_desc = TRUE)),
+               c(paste0("[Bas]", stem), "[Veste]", "[Chaussures]"))       # first full, rest trimmed
+})
+
+test_that("C15c: R class column keeps a sep gutter before it and is described in the legend", {
+  skip_if_not_installed("openxlsx2")
+  df <- tibble::tibble(SEXE = factor(c("F", "H", "F", "H")), AGE = c(20, 30, 40, 50))
+  out <- tempfile(fileext = ".xlsx"); on.exit(unlink(out), add = TRUE)
+  suppressMessages(generate_codebook(df, output_path = out))
+  wb <- openxlsx2::wb_load(out)
+  d   <- openxlsx2::wb_to_df(wb, sheet = 1, col_names = FALSE, na.strings = NULL)
+  hdr <- as.character(unlist(d[1, ]))
+  rc  <- which(hdr == "R class")
+  expect_length(rc, 1L)
+  expect_true(is.na(hdr[rc - 1L]) || identical(hdr[rc - 1L], ""))  # empty sep gutter before R class
+  expect_true(grepl("programmation R", paste(unlist(d), collapse = " ")))  # legend describes it
 })

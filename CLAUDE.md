@@ -122,16 +122,22 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
      "## Title ----" line is ever an outline node. `.gfs_section_comment()` returns a char VECTOR.
      All new box/marker glyphs are \u-escaped (Windows source-encoding safety, file convention).
 
-7. generate_codebook(meta_json, output_path = NULL, lang = "fr", keep_original = FALSE, ...)
+7. generate_codebook(meta_json, output_path = NULL, lang = "fr", keep_original = FALSE, dedup_battery_desc = FALSE, ...)
+   → dedup_battery_desc = TRUE: for the 2nd+ members of a battery, remove the part of the
+     `description` shared with the battery's FIRST member (longest common contiguous run, start
+     advanced to a WORD BOUNDARY so leading "] "/") " and the item's own trailing letter are kept),
+     then str_squish. First member keeps its full description. Helpers .longest_common_substring /
+     .dedup_shared_desc. (Also on add_new_variables_to_codebook_from_df().)
    → Styled .xlsx codebook (openxlsx2): one row per level / numeric stat, variable
      info merged over rows, headers, frozen panes, selective borders.
    → Headers are DATA-DRIVEN from the JSON (no more titles/binary_batteries args): each
      var's `headers` array holds its ##/### outline titles; its `battery` field the ####
      question-battery title (one header per run). Title text KEEPS its # markers (machine-readable
      hierarchy), no underline; ##/### render as full-width colored bands, ####/level-1 stay red.
-     A battery is CLOSED by an empty 2 cm row, unless the next variable already carries a header
-     (a new #### battery or a ##/### outline) — so standalone variables never read as part of the
-     battery above them.
+     A battery is CLOSED by an EMPTY `#### ` header (the `.CB_EMPTY_HEADER` placeholder — a real
+     level-4 outline node) when the next variable carries no header of its own, so standalone
+     variables never read as part of the battery above them (a following battery / ##/### outline
+     already provides its own break). Edit `.CB_EMPTY_HEADER` to give that catch-all group a title.
    → VISUAL LAYER (see Key Design Decisions): zebra stripe per variable (reset at each header),
      pastel role chips, data bars in factor `freq`, mono `variable`/`prefixe_question`, an always-on
      "how to read" legend + a hyperlinked table of contents below the front-matter.
@@ -159,8 +165,9 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
      `...` forwarded to extract (headers / survey_* etc.); no missing/yes-no args by default.
      A 2-level factor collapses to ONE row on its FIRST level; orig_val/orig_code columns dropped.
    → `type` column = final R CLASS (English: factor / ordered factor / integer / double /
-     logical / character), header "R class", placed at the far right before prefixe_question,
-     NOT described in the legend (.cb_r_class_label). `role` = the only user-facing statistical
+     logical / character), header "R class", placed at the far right before prefixe_question. The
+     column IS described in the legend when present (via .cb_howto_columns); only the per-value
+     .cb_r_class_label mappings (factor, double, …) are not enumerated there. `role` = the only user-facing statistical
      role, always present: cat binaire/ordinale/nominale, num entier (merges count/scale),
      num décimal, booléen, texte, identifiant, autre (.cb_role_key + .CB_ROLE_ORDER; flat legend
      with a "cat = catégorielle, num = numérique" note). Logical vars render as ONE TRUE row.
@@ -288,8 +295,10 @@ numbers with number formats decided **per value**: a whole-number stat uses `#,#
 a fractional one `#,##0.0` (one decimal); factor `freq` is an Excel percentage (value stored as a
 0–1 fraction, format `0%`); sd keeps `"σ"0.0`. Not pre-rounded text, so precision is preserved.
 The `type` column shows the **final R class** (English: factor / ordered factor / integer /
-double / logical / character) via `.cb_r_class_label(role, r_class)` — header "R class",
-placed at the far right before `prefixe_question`, and NOT described in the legend (expert-facing).
+double / logical / character) via `.cb_r_class_label(role, r_class)` — header "R class", placed at
+the far right (a **specialist** column, so: no zebra stripe, described in the legend as a technical
+column, and separated from the main table by an ALWAYS-present thin empty `sep` gutter that also
+precedes `prefixe_question`; orig_val/orig_code now sit in the main table BEFORE the sep).
 The `role` column is the ONLY user-facing statistical role via `.cb_role_label(role, r_class, lang)`
 + the canonical `.cb_role_key()`/`.CB_ROLE_ORDER` key space (shared by label, chip, legend order):
 cat binaire/ordinale/nominale, num entier (merges integer/count/scale), num décimal, booléen
@@ -311,12 +320,12 @@ first arg builds a temp JSON silently (extract formatted = TRUE + metadata_add_l
 injection, `...` → extract) and sets `keep_original`.
 
 **Key Design Decision** — Codebook xlsx layout (`.cb_write_xlsx`): column order
-`h | variable | description | role | missing_values | valeur | n | freq | [sep | orig_val | orig_code] | type ("R class") | [prefixe_question]`
-— `type` (= the technical R class) sits at the FAR RIGHT (an annotation column, OUTSIDE the box, like
-`prefixe_question`); `sep`+`orig_val`+`orig_code` appear only when an original-label column is kept
-(`orig_val` iff any relabelling, `orig_code` iff `!keep_original`), all dropped in as-is/df mode.
-(FR/EN headers via `.cb_headers`; `role` has no accent; `identifier`→`identifiant`/`identifier`; the
-empty thin `sep` column separates the value block from the original-label block). All borders are
+`h | variable | description | role | missing_values | valeur | n | freq | [orig_val | orig_code] | sep | type ("R class") | [prefixe_question]`
+— the technical `type` (R class) + `prefixe_question` are specialist annotation columns OUTSIDE the
+box; an ALWAYS-present thin empty `sep` gutter (a pure spacer, no borders) detaches them from the main
+table. `orig_val`/`orig_code` sit in the main table BEFORE the sep, each shown conditionally
+(`orig_val` iff any relabelling, `orig_code` iff `!keep_original`), both dropped in as-is/df mode.
+(FR/EN headers via `.cb_headers`; `role` has no accent; `identifier`→`identifiant`/`identifier`). All borders are
 **black thin**. The `sep` + `orig_val`/`orig_code` borders (and the box extension over those columns)
 are drawn **only for factor blocks** — the only ones that fill them; non-factor blocks are boxed
 `variable → pct` with just the `val` left separator. Each factor block is boxed top+bottom (skipping
@@ -392,8 +401,8 @@ reads as a table of contents. A `####` is either a **battery** or a **thematic g
 they leave nothing loose. Two storage concerns, deliberately split: `headers` holds the outline as
 **start-markers** (`##`/`###` user anchors + non-battery `####` groups, rendered once, level = `#`
 count clamped 2..4), and `battery` (REPEATED on every member) flags a **true multi-answer battery** —
-which alone gets the boxed rendering + closing spacer + the auto-added prefixe_question selector column
-and a dark-red valeur|n|freq rectangle. The codebook
+which alone gets the boxed rendering + an empty-`####` close (when the next var is unheaded) + the
+auto-added prefixe_question selector column and a dark-red valeur|n|freq rectangle. The codebook
 renderer already treats a `####` in `headers` as a size-10 title, so non-battery groups need **no
 renderer change**. Input to the model = every var in order with the fixed `##`/`###` sections
 interleaved as `{"section":"..."}` rows + `config.survey_description` + a deterministic candidate
@@ -511,6 +520,18 @@ entiers`** (codes not round-tripping as plain integers: `01`, `80-84`, `01 - GUA
 deliberately does NOT use code contiguity or display-vs-code order (those flag ordinary Likert batteries);
 commune names / generic geo codes are left to the name rule (unreliable by content).
 
+**Key Design Decision** — `renumber_binary_batteries(df, prefixes)` is the public, df-first twin of the
+mode-(2) binary-battery pass: it rewrites the factor **levels** of an already-formatted df directly (no
+JSON), so the labels are byte-identical to `generate_codebook(df)` / `generate_format_script()`. Reuses
+`.nines_sentinel()` + `.gfs_numeric_prefix()` (positive = 1st level → position k, negative → shared
+sentinel). `prefixes` may be a named vector (values used, e.g. the user's `batteries`); each column joins
+the **longest** matching prefix (overlap-safe: `VETACHAT` vs `VETACHATLIEU`). A group not **all**
+`is.factor && nlevels==2` is skipped with a message (df untouched). Idempotent (strips a leading
+`^\s*[0-9]+\s*-\s*`), preserves `attr(,"label")` / `attr(,"question_prefix")` / `ordered` via
+snapshot-restore around `levels<-`. Positive pole = **first level** (same as `generate_codebook(df)`; no
+yes/no guessing) — reorder factors positive-first beforehand if needed. Placed right after
+`generate_format_script()`; tests in `test-renumber-binary-battery.R` (prefix `RB`).
+
 ---
 
 ## Test Suite Design
@@ -575,6 +596,7 @@ Each dummy has matching configs:
 | `test-keep-codes.R`             | KC     | keep_codes numbering + set_keep_codes / suggest_keep_codes |
 | `test-json-roundtrip.R`         | J/K/BT | JSON roundtrip, backup, migration, battery/headers fields  |
 | `test-nomenclatures-insee.R`    | O      | INSEE nomenclature helpers                                 |
+| `test-renumber-binary-battery.R`| RB     | `renumber_binary_batteries()` df-level battery numbering   |
 
 ### Mocking AI Calls
 
