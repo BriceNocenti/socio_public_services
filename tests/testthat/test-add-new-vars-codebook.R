@@ -160,7 +160,7 @@ test_that("NV4: inline + trailing new vars placed correctly, xlsx written", {
 
   # AGE_NEW: ordinal, placed between AGE_ORIG and SEX_ORIG
   expect_true("AGE_NEW" %in% res$variable)
-  expect_equal(unique(res$role[res$variable %in% "AGE_NEW"]), "ordinale")
+  expect_equal(unique(res$role[res$variable %in% "AGE_NEW"]), "cat ordinale")
   an <- min(which(res$variable == "AGE_NEW"))
   expect_true(min(which(res$variable == "AGE_ORIG")) < an)
   expect_true(an < min(which(res$variable == "SEX_ORIG")))

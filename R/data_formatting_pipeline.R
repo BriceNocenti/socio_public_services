@@ -558,8 +558,23 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
 # 1b. .normalize_text() — shared text normalization
 # ============================================================
 
+# Recover a character vector to valid UTF-8 WITHOUT lossy replacement.
+# read.csv(fileEncoding = "UTF-8-BOM") and haven/labelled imports frequently
+# return strings flagged "unknown"/"latin1". stri_enc_toutf8(validate = TRUE)
+# would turn any byte it deems ill-formed into U+FFFD (the "?" the user saw in
+# LimeSurvey labels). Instead: bytes that are already valid UTF-8 are simply
+# (re)declared UTF-8 (no reinterpretation, session-encoding-independent); the
+# rest are decoded from Windows-1252 (a latin1 superset covering French text).
+.to_utf8 <- function(x) {
+  if (!is.character(x) || length(x) == 0) return(x)
+  bad <- !validUTF8(x)                       # FALSE for NA and valid-UTF-8 bytes
+  if (any(bad)) x[bad] <- iconv(x[bad], from = "windows-1252", to = "UTF-8")
+  Encoding(x) <- "UTF-8"                      # bytes are valid UTF-8 everywhere now
+  x
+}
+
 # Normalize a character vector for consistent comparison and display:
-#   - Detect and convert to UTF-8 (via stringi if available, iconv fallback)
+#   - Recover to valid UTF-8 without loss (.to_utf8)
 #   - Non-breaking spaces (U+00A0, U+202F, U+2009) → regular space
 #   - Typographic apostrophes (', ‛, ʼ, ʻ) → straight apostrophe (')
 #   - Straight double quotes around words → French guillemets (« »)
@@ -574,17 +589,8 @@ apply_sas_value_labels <- function(df, path, encoding = "UTF-8", strip_f = TRUE,
 .normalize_text <- function(x, to_guillemets = FALSE, sanitize = FALSE) {
   if (!is.character(x) || length(x) == 0) return(x)
 
-  # 1. Ensure UTF-8 — use stringi when available, fall back to iconv
-  if (requireNamespace("stringi", quietly = TRUE)) {
-    x <- stringi::stri_enc_toutf8(x, is_unknown_8bit = TRUE, validate = TRUE)
-  } else {
-    enc <- Encoding(x)
-    needs_conv <- enc %in% c("latin1", "unknown") & !is.na(x)
-    if (any(needs_conv)) {
-      x[needs_conv] <- iconv(x[needs_conv], from = "latin1", to = "UTF-8",
-                             sub = "\uFFFD")
-    }
-  }
+  # 1. Recover to valid UTF-8 without lossy replacement (see .to_utf8).
+  x <- .to_utf8(x)
 
   # 2. Non-breaking and narrow spaces → regular space
   x <- gsub("\u00a0|\u202f|\u2009|\u2007", " ", x, useBytes = FALSE)
@@ -2197,8 +2203,9 @@ apply_nomenclatures <- function(
 extract_survey_metadata <- function(
     df,
     meta_json,
-    missing_num     = c(96, 99, 996, 999, 9996, 9999), # 8, 9,
-    missing_chr     = c("-1", "NSP", "NRP", "NR", "REFUS",
+    formatted       = FALSE,
+    missing_num     = if (formatted) numeric(0) else c(96, 99, 996, 999, 9996, 9999), # 8, 9,
+    missing_chr     = if (formatted) character(0) else c("-1", "NSP", "NRP", "NR", "REFUS",
                         "Ne sait pas", "Refus"), # "8", "9",
     yes_labels      = NULL,
     no_labels       = NULL,
@@ -2222,6 +2229,10 @@ extract_survey_metadata <- function(
   #     so every battery member shares one level set); drop them from over-declared sets.
   #   "all"  keep every declared code as a level.  "none"  keep only observed codes.
   empty_levels <- match.arg(empty_levels)
+  # `formatted = TRUE`: the df is already clean/analysis-ready (factor labels ARE the
+  # final labels, missing values are already NA). It flips missing_num/missing_chr to
+  # empty (above), disables ALL missing flagging (below), and makes the first factor
+  # level the positive pole of a binary. Set automatically by generate_codebook(df).
   # `headers`: optional named vector c("## Titre" = "VARNAME", ...) — the survey
   # outline. When supplied it is the SOURCE OF TRUTH: re-applied (replacing) each
   # run, so edit it in your script, not in the JSON. Omit it to instead preserve
@@ -2385,12 +2396,15 @@ extract_survey_metadata <- function(
     }
 
     # --- flag candidate missing values (unified: numeric code + label text) ---
-    is_miss <- purrr::map2_lgl(raw_values, raw_labels, function(v, l) {
-      v_num   <- suppressWarnings(as.numeric(v))
-      num_hit <- !is.na(v_num) && v_num %in% missing_num
-      lbl_hit <- l %in% missing_chr || grepl(missing_lbl_pattern, l, perl = TRUE)
-      num_hit || lbl_hit
-    })
+    # formatted = already-clean df: missing are already NA, so flag nothing (a real
+    # category such as "Ne sait pas" stays a category).
+    is_miss <- if (isTRUE(formatted)) rep(FALSE, length(raw_values)) else
+      purrr::map2_lgl(raw_values, raw_labels, function(v, l) {
+        v_num   <- suppressWarnings(as.numeric(v))
+        num_hit <- !is.na(v_num) && v_num %in% missing_num
+        lbl_hit <- l %in% missing_chr || grepl(missing_lbl_pattern, l, perl = TRUE)
+        num_hit || lbl_hit
+      })
     missing_vals_vec <- raw_values[is_miss]
 
     # --- non-missing values/labels for role detection ---
@@ -2413,6 +2427,9 @@ extract_survey_metadata <- function(
     )
     detected_role <- role_out$role
     pos_idx_auto  <- role_out$pos_idx   # 1L/2L/NA for binary; NA for others
+    # formatted df: the FIRST factor level is the positive pole (deterministic, no
+    # yes/no guessing) — so the single-row binary shows the level the analyst put first.
+    if (isTRUE(formatted) && detected_role == "factor_binary") pos_idx_auto <- 1L
 
     # Override role: from JSON variables section
     if (vname %in% names(.effective_roles)) {
@@ -2480,8 +2497,8 @@ extract_survey_metadata <- function(
       })
     } else integer(0)
 
-    # For binary with known positive: swap order so positive=1, negative=2
-    if (detected_role == "factor_binary" && !is.na(pos_idx_auto) && n_lev >= 2) {
+    # For binary/logical with known positive: swap order so positive=1, negative=2
+    if (detected_role %in% c("factor_binary", "logical") && !is.na(pos_idx_auto) && n_lev >= 2) {
       non_null_idx <- which(!is_miss)
       if (length(non_null_idx) >= 2) {
         pos_in_nonnull <- if (pos_idx_auto == 1L) non_null_idx[1] else non_null_idx[2]
@@ -2743,6 +2760,12 @@ extract_survey_metadata <- function(
       list(role = "integer", pos_idx = NA_integer_)
   }
 
+  # 0. Logical column (TRUE/FALSE) → booléen role. Rendered in the codebook as a
+  #    single TRUE row (share of TRUE). Positive pole = TRUE: with raw_values sorted
+  #    ascending (FALSE, TRUE) the positive sits SECOND, so pos_idx = 2L (as for a
+  #    bare 0/1 indicator). Both poles are stored so stats can count them.
+  if (is.logical(col)) return(list(role = "logical", pos_idx = 2L))
+
   # 1. Identifier: ID name or all (total) values unique
   id_pattern <- "^(IDENT|IDENTIF|IDENTIFIANT|ID|_ID|ID_|NUMEN|NUMIDENT)$|^IDENT"
   if (grepl(id_pattern, vname, ignore.case = TRUE) || n_dist_total == n_rows) {
@@ -2874,7 +2897,9 @@ extract_survey_metadata <- function(
 metadata_add_level_stats <- function(meta_json, df,
                                      add_observed_levels = TRUE,
                                      max_new_levels      = 50L) {
-  factor_roles <- c("factor_binary", "factor_nominal", "factor_ordinal")
+  # `logical` reuses the factor path: its TRUE/FALSE levels get n/pct so the codebook
+  # can show the share of TRUE on a single row (the FALSE count feeds the denominator).
+  factor_roles <- c("factor_binary", "factor_nominal", "factor_ordinal", "logical")
 
   json_path <- .resolve_json_path(meta_json)
   loaded    <- .load_meta(json_path)
@@ -7657,42 +7682,61 @@ generate_format_script <- function(meta_json,
 
 # --- Translation maps (FR default, EN via lang = "en") --------------------
 
-# role -> functional-role label (does not repeat the R class shown in `type`)
-.cb_role_label <- function(role, lang = "fr") {
-  m <- if (identical(lang, "en")) c(
-    factor_binary = "binary", factor_ordinal = "ordinal", factor_nominal = "nominal",
-    integer_count = "count", integer = "discrete", integer_scale = "scale",
-    double = "continuous", identifier = "identifier", other = "", unclear = ""
-  ) else c(
-    factor_binary = "binaire", factor_ordinal = "ordinale", factor_nominal = "nominale",
-    integer_count = "comptage", integer = "discret", integer_scale = "échelle",
-    double = "continue", identifier = "identifiant", other = "", unclear = ""
-  )
-  unname(m[role]) %||% ""
+# Canonical role key — the single key space shared by the role label, the legend
+# order, and the pastel role chip. Merges integer/count/scale into one "num entier"
+# (the count/scale nuance stays JSON-only); logical -> booléen; free text -> texte;
+# anything else (incl. other/unclear) -> autre. ALWAYS returns a key.
+.CB_ROLE_ORDER <- c("cat_binaire", "cat_ordinale", "cat_nominale",
+                    "num_entier", "num_decimal", "booleen", "texte",
+                    "identifiant", "autre")
+
+.cb_role_key <- function(role, r_class = "") {
+  switch(role %||% "",
+    factor_binary  = "cat_binaire",
+    factor_ordinal = "cat_ordinale",
+    factor_nominal = "cat_nominale",
+    integer = , integer_count = , integer_scale = "num_entier",
+    double     = "num_decimal",
+    logical    = "booleen",
+    identifier = "identifiant",
+    if (identical(r_class %||% "", "character")) "texte" else "autre")
 }
 
-# role (+ r_class for identifier/other) -> R class after generate_format_script()
-.cb_type_label <- function(role, r_class, lang = "fr") {
-  base <- if (grepl("^factor_", role)) "factor"
-    else if (role %in% c("integer", "integer_count", "integer_scale")) "integer"
-    else if (role == "double") "double"
-    else {
-      rc <- r_class %||% ""
-      if (rc %in% c("numeric", "double")) "double"
-      else if (rc == "integer") "integer"
-      else if (rc == "logical") "logical"
-      else if (rc %in% c("Date", "POSIXct", "POSIXt")) "date"
-      else if (rc == "factor") "factor"
-      else "character"
-    }
+# role -> user-facing statistical role (the ONLY non-technical description, kept
+# in the legend). Always non-empty.
+.cb_role_label <- function(role, r_class = "", lang = "fr") {
+  key <- .cb_role_key(role, r_class)
   m <- if (identical(lang, "en")) c(
-    factor = "factor", integer = "integer", double = "double",
-    character = "chr", logical = "logical", date = "date"
+    cat_binaire = "binary", cat_ordinale = "ordinal", cat_nominale = "nominal",
+    num_entier = "integer", num_decimal = "decimal", booleen = "boolean",
+    texte = "text", identifiant = "identifier", autre = "other"
   ) else c(
-    factor = "catégorielle", integer = "nb entier", double = "nb décimal",
-    character = "texte", logical = "booléenne", date = "date"
+    cat_binaire = "cat binaire", cat_ordinale = "cat ordinale", cat_nominale = "cat nominale",
+    num_entier = "num entier", num_decimal = "num décimal", booleen = "booléen",
+    texte = "texte", identifiant = "identifiant", autre = "autre"
   )
-  unname(m[base])
+  unname(m[key])
+}
+
+# role (+ r_class for identifier/other) -> FINAL R class the variable has on the
+# formatted db (= generate_format_script() output; = the input df class in df mode).
+# English only, expert-facing; shown in the "R class" column, not the legend.
+.cb_r_class_label <- function(role, r_class = "") {
+  role <- role %||% ""
+  if (identical(role, "factor_ordinal")) return("ordered factor")
+  if (grepl("^factor_", role))           return("factor")
+  if (role %in% c("integer", "integer_count", "integer_scale")) return("integer")
+  if (identical(role, "double"))         return("double")
+  if (identical(role, "logical"))        return("logical")
+  # identifier / other / unclear / "" -> the actual underlying R class
+  rc <- r_class %||% ""
+  if (rc %in% c("numeric", "double"))    "double"
+  else if (rc == "integer")              "integer"
+  else if (rc == "logical")              "logical"
+  else if (rc == "ordered")              "ordered factor"
+  else if (rc == "factor")               "factor"
+  else if (rc %in% c("Date", "POSIXct", "POSIXt")) "Date"
+  else                                   "character"
 }
 
 # Names of the six numeric summary rows (keyed lookup; row order set in .cb_build_tibble).
@@ -7708,12 +7752,12 @@ generate_format_script <- function(meta_json,
 # Column header labels.
 .cb_headers <- function(lang = "fr") {
   if (identical(lang, "en"))
-    c(h = "", variable = "variable", type = "type", role = "role",
+    c(h = "", variable = "variable", type = "R class", role = "role",
       description = "description", na = "missing_values", val = "value", n = "n",
       pct = "freq", orig_val = "original_label", orig_code = "original_code",
       question_prefix = "question_prefix")
   else
-    c(h = "", variable = "variable", type = "type", role = "role",
+    c(h = "", variable = "variable", type = "R class", role = "role",
       description = "description", na = "valeurs_manquantes", val = "valeur", n = "n",
       pct = "freq", orig_val = "libellé_origine", orig_code = "code_origine",
       question_prefix = "prefixe_question")
@@ -7789,10 +7833,8 @@ generate_format_script <- function(meta_json,
                         "variable", "the variable's code name in the database"),
     description     = c("description", "ce que mesure la variable, en clair",
                         "description", "what the variable measures, in plain words"),
-    type            = c("type", "le type informatique de la variable (catégorielle, nombre, texte…)",
-                        "type", "the variable's storage type (categorical, number, text…)"),
-    role            = c("role", "le rôle statistique de la variable (voir ci-dessous)",
-                        "role", "the variable's statistical role (see below)"),
+    role            = c("role", "le rôle statistique de la variable (voir la liste ci-dessous)",
+                        "role", "the variable's statistical role (see the list below)"),
     na              = c("valeurs_manquantes", "nombre et part de non-réponses (NA), avec le détail des codes manquants",
                         "missing_values", "count and share of non-responses (NA), with the detail of the missing codes"),
     val             = c("valeur", "pour les variables catégorielles, les modalités (réponses possibles) ; pour les variables numériques, des statistiques descriptives",
@@ -7816,43 +7858,31 @@ generate_format_script <- function(meta_json,
   out
 }
 
-# Role (label, text) keyed by role key, for the current language; NULL if unknown.
-# Used to nest roles under their type in the "Types et rôles" legend.
+# Role (label, text) keyed by the CANONICAL role key (.cb_role_key), for the
+# current language; NULL if unknown. Feeds the flat "Rôles" legend list.
 .cb_role_info <- function(lang, role_key) {
   fr <- !identical(lang, "en")
   d <- list(
-    factor_binary  = c("binaire", "deux réponses possibles (ex. oui / non)",
-                       "binary", "two possible answers (e.g. yes / no)"),
-    factor_nominal = c("nominale", "catégories sans ordre (ex. région, sexe)",
-                       "nominal", "unordered categories (e.g. region, sex)"),
-    factor_ordinal = c("ordinale", "catégories ordonnées (ex. jamais < parfois < souvent)",
-                       "ordinal", "ordered categories (e.g. never < sometimes < often)"),
-    integer_count  = c("comptage", "un nombre entier qui dénombre divers éléments (ex. nombre d'activités)",
-                       "count", "a whole number counting various items (e.g. number of activities)"),
-    integer        = c("discret", "un nombre entier",
-                       "discrete", "a whole number"),
-    integer_scale  = c("échelle", "une échelle numérique",
-                       "scale", "a numeric scale"),
-    double         = c("continue", "un nombre à décimales (ex. un montant, une durée)",
-                       "continuous", "a number with decimals (e.g. an amount, a duration)"),
-    identifier     = c("identifiant", "un code identifiant chaque individu",
-                       "identifier", "a code identifying each individual"))
+    cat_binaire  = c("cat binaire", "deux réponses possibles (ex. oui / non)",
+                     "binary", "two possible answers (e.g. yes / no)"),
+    cat_ordinale = c("cat ordinale", "catégories ordonnées (ex. jamais < parfois < souvent)",
+                     "ordinal", "ordered categories (e.g. never < sometimes < often)"),
+    cat_nominale = c("cat nominale", "catégories sans ordre (ex. région, sexe)",
+                     "nominal", "unordered categories (e.g. region, sex)"),
+    num_entier   = c("num entier", "un nombre entier (ex. un effectif, un décompte)",
+                     "integer", "a whole number (e.g. a count)"),
+    num_decimal  = c("num décimal", "un nombre à décimales (ex. un montant, une durée)",
+                     "decimal", "a number with decimals (e.g. an amount, a duration)"),
+    booleen      = c("booléen", "vrai ou faux (indicateur ; on affiche la part de TRUE)",
+                     "boolean", "true or false (indicator; the share of TRUE is shown)"),
+    texte        = c("texte", "du texte libre",
+                     "text", "free text"),
+    identifiant  = c("identifiant", "un code identifiant chaque individu",
+                     "identifier", "a code identifying each individual"),
+    autre        = c("autre", "un autre type de variable",
+                     "other", "another kind of variable"))
   v <- d[[role_key]]; if (is.null(v)) return(NULL)
   if (fr) c(v[[1]], v[[2]]) else c(v[[3]], v[[4]])
-}
-
-# Type description text, keyed by the DISPLAY label .cb_type_label() produces (so
-# the key set matches per language). "" if the label is unknown.
-.cb_type_desc <- function(lang, type_label) {
-  g <- if (identical(lang, "en")) c(
-    factor = "a categorical variable (a factor)", integer = "a whole number",
-    double = "a number with decimals", chr = "free text",
-    logical = "true or false", date = "a date"
-  ) else c(
-    "catégorielle" = "une variable à catégories (un facteur)", "nb entier" = "un nombre entier",
-    "nb décimal" = "un nombre à décimales", "texte" = "du texte libre",
-    "booléenne" = "vrai ou faux", "date" = "une date")
-  unname(g[type_label]) %||% ""
 }
 
 # One empty codebook row (all fields blank / typed NA).
@@ -8038,12 +8068,13 @@ generate_format_script <- function(meta_json,
     # --- Variable-level fields (repeated on every row of the block) --------
     block_id <- block_id + 1L
     var_disp <- e$new_name
-    type_lab <- .cb_type_label(e$role, e$r_class, lang)
-    role_lab <- .cb_role_label(e$role, lang)
+    type_lab <- .cb_r_class_label(e$role, e$r_class)   # final R class (col "R class")
+    role_lab <- .cb_role_label(e$role, e$r_class, lang) # statistical role (legend)
 
-    is_factor <- grepl("^factor_", e$role) && e$n_non_missing > 0
-    is_num    <- e$role %in% c("integer", "integer_count", "integer_scale", "double")
-    is_double <- e$role == "double"
+    is_factor  <- grepl("^factor_", e$role) && e$n_non_missing > 0
+    is_num     <- e$role %in% c("integer", "integer_count", "integer_scale", "double")
+    is_double  <- e$role == "double"
+    is_logical <- identical(e$role, "logical")   # rendered as a single TRUE row
 
     # NA cell: prefer stored top-level na_n/na_pct; else derive per type ----
     na_n_val   <- suppressWarnings(as.numeric(jv$na_n %||% NA_real_))
@@ -8065,22 +8096,51 @@ generate_format_script <- function(meta_json,
     # Missing-value cell: total + per-level counts (all types), blanks last.
     na_str <- .format_missing_summary(na_n_val, na_pct_val, e$missing_levels)
 
-    block_kind <- if (is_factor) "factor" else if (is_num) "numeric" else "char"
+    # logical shares the "factor" block kind so it gets the freq data-bar + 0-1 pct.
+    block_kind <- if (is_factor || is_logical) "factor" else if (is_num) "numeric" else "char"
     # question_prefix now carries a ready-to-use battery selector (not the title);
     # .battery marks the run for the red rectangle. Both only for true batteries.
     qp <- if (nzchar(cur_batt)) batt_select[[cur_batt]] %||% NA_character_ else NA_character_
     bt_tag <- if (nzchar(cur_batt)) cur_batt else NA_character_
     mk <- function(...) .cb_row(
       .block_id = block_id, .block_kind = block_kind, .is_double = is_double,
-      .battery = bt_tag, .orig_name = e$orig_name, .role_key = e$role,
+      .battery = bt_tag, .orig_name = e$orig_name,
+      .role_key = .cb_role_key(e$role, e$r_class),
       variable = var_disp, type = type_lab, role = role_lab,
       description = e$var_label, na = na_str, question_prefix = qp, ...)
 
     # --- Value rows ------------------------------------------------------
     block_rows <- list()
-    if (natural_order && is_factor) {
-      # "As-is" mode (df-first, no AI): every non-missing level, sorted by
-      # numeric code, labels shown exactly as stored (no numeric prefix).
+    if (is_logical) {
+      # Booléen: ONE row, the share of TRUE. Take the TRUE level's n/pct (it holds
+      # order 1 / code "TRUE"); the FALSE level exists only for the denominator.
+      lv <- NULL
+      for (l in e$levels_sorted) if (identical(l$code, "TRUE")) { lv <- l; break }
+      if (is.null(lv) && length(e$levels_sorted)) lv <- e$levels_sorted[[1]]
+      block_rows <- list(mk(
+        val = "TRUE",
+        n   = if (is.null(lv[["n"]]))   NA_real_ else as.numeric(lv[["n"]]),
+        pct = if (is.null(lv[["pct"]])) NA_real_ else as.numeric(lv[["pct"]])))
+
+    } else if (natural_order && is_factor && e$role == "factor_binary" && e$n_non_missing == 2L) {
+      # As-is (df-first / keep_original) binary → a SINGLE row on the positive pole,
+      # which extract set to order 1 (= the FIRST factor level in formatted mode).
+      # Labels shown verbatim (no numeric prefix).
+      lv  <- e$levels_sorted[[1]]
+      lv2 <- e$levels_sorted[[2]]
+      if (!identical(lv$display_label, lv$orig_label)) any_new_label <- TRUE
+      block_rows <- list(mk(
+        .is_binary = TRUE, val = lv$display_label,
+        n   = if (is.null(lv[["n"]]))   NA_real_ else as.numeric(lv[["n"]]),
+        pct = if (is.null(lv[["pct"]])) NA_real_ else as.numeric(lv[["pct"]]),
+        orig_val  = paste(c(lv$orig_label %||% "", lv2$orig_label %||% ""), collapse = " / "),
+        orig_code = lv$code))
+
+    } else if (natural_order && is_factor) {
+      # "As-is" mode (df-first, no AI): every non-missing level, sorted by numeric
+      # code when the codes are integer-like (else stored order), labels shown exactly
+      # as stored (no numeric prefix). For a real df factor the codes ARE the label
+      # strings, so this falls back to the factor-level order.
       lv_list   <- e$levels_sorted
       codes_num <- suppressWarnings(as.numeric(
                      vapply(lv_list, function(lv) lv$code %||% "", character(1))))
@@ -8176,18 +8236,17 @@ generate_format_script <- function(meta_json,
   #     read" legend, clickable table of contents. Built here so the legend can
   #     list only the columns/types/roles that are actually present. -----------
   has_batt   <- any(nzchar(batt_of))
-  cols_pres  <- c("variable", "description", "type", "role", "na", "val", "n", "pct",
-                  if (any_new_label) "orig_val", "orig_code",
+  # The "R class" (internal key `type`) column is expert-facing and NOT described
+  # in the legend; orig_code is dropped in as-is (natural_order) mode.
+  cols_pres  <- c("variable", "description", "role", "na", "val", "n", "pct",
+                  if (any_new_label) "orig_val",
+                  if (!natural_order) "orig_code",
                   if (has_batt) "question_prefix")
-  # "Types et rôles" nested: group present roles under their type (from
-  # .cb_type_label), first-appearance order — types get a "- " bullet, their roles
-  # a nested "  - " bullet, so each role sits under the right type.
-  tr_order <- character(0); tr_roles <- list()
-  for (e in entries) {
-    tl <- .cb_type_label(e$role, e$r_class, lang); rk <- e$role %||% ""
-    if (!tl %in% tr_order) tr_order <- c(tr_order, tl)
-    if (nzchar(rk)) tr_roles[[tl]] <- union(tr_roles[[tl]] %||% character(0), rk)
-  }
+  # Roles actually present, in the canonical .CB_ROLE_ORDER (drives the flat legend).
+  roles_present <- unique(vapply(entries,
+                                 function(e) .cb_role_key(e$role, e$r_class),
+                                 character(1)))
+  roles_present <- .CB_ROLE_ORDER[.CB_ROLE_ORDER %in% roles_present]
 
   top_rows <- list()
   tpush <- function(r) top_rows[[length(top_rows) + 1L]] <<- r
@@ -8204,28 +8263,26 @@ generate_format_script <- function(meta_json,
   # + the section band): howto_head = level 2, toc_head = level 3.
   tpush(.cb_row(.row_type = "howto_head", .h_level = 2L, h = paste0("## ",
                 if (fr_lang) "Comment lire ce dictionnaire des variables" else "How to read this codebook")))
-  # Nested Types & roles (types "- ", their roles "  - ").
-  tr_lines <- character(0)
-  for (tl in tr_order) {
-    td <- .cb_type_desc(lang, tl)
-    tr_lines <- c(tr_lines, if (nzchar(td)) paste0("- **", tl, "** : ", td)
-                            else            paste0("- **", tl, "**"))
-    for (rk in tr_roles[[tl]] %||% character(0)) {
-      ri <- .cb_role_info(lang, rk); if (is.null(ri)) next
-      tr_lines <- c(tr_lines, paste0("  - **", ri[[1]], "** : ", ri[[2]]))
-    }
+  # Flat "Rôles" list, canonical order, one "- **role** : text" line each.
+  role_lines <- character(0)
+  for (rk in roles_present) {
+    ri <- .cb_role_info(lang, rk); if (is.null(ri)) next
+    role_lines <- c(role_lines, paste0("- **", ri[[1]], "** : ", ri[[2]]))
   }
   # The whole legend body lives in ONE merged cell (a single `howto` row): intro,
-  # a bulleted "Description des colonnes", then a NESTED "Types et rôles"; blank
-  # markdown lines give the spacing, a trailing empty line pads the cell bottom.
+  # a bulleted "Description des colonnes", then a flat "Rôles" list; blank markdown
+  # lines give the spacing, a trailing empty line pads the cell bottom.
   legend_body <- c(
     if (fr_lang) "Ce dictionnaire décrit chaque variable de l'enquête, avec une ligne par modalité de réponse."
     else "This codebook describes every survey variable, with one row per answer category.",
     "",
     if (fr_lang) "**Description des colonnes :**" else "**Column descriptions:**",
     .cb_howto_columns(lang, cols_pres),
-    if (length(tr_lines))
-      c("", if (fr_lang) "**Types et rôles :**" else "**Types and roles:**", tr_lines),
+    if (length(role_lines))
+      c("",
+        if (fr_lang) "**Rôles** (« cat » = variable catégorielle, « num » = variable numérique) :"
+        else "**Roles** ('cat' = categorical, 'num' = numeric):",
+        role_lines),
     "")
   tpush(.cb_row(.row_type = "howto", description = paste(legend_body, collapse = "\n")))
 
@@ -8261,6 +8318,7 @@ generate_format_script <- function(meta_json,
 #' rectangle around its valeur|n|freq block, and its selector cell (question_prefix)
 #' merged across the whole battery.
 .cb_write_xlsx <- function(cb, path, lang = "fr", orig_val_kept = TRUE,
+                           orig_code_kept = TRUE,
                            title_mode = c("overflow", "merge"),
                            freeze = TRUE) {
   if (!requireNamespace("openxlsx2", quietly = TRUE))
@@ -8281,10 +8339,10 @@ generate_format_script <- function(meta_json,
   BAND2 <- "FFFAD6DD"                # ## band: darker rose (same family as batteries)
   BAND3 <- "FFFFF2CC"                # ### band: cream
   BAR   <- "#F47474"                 # data-bar color (CF colors use "#RRGGBB")
-  role_fill <- c(   # pastel chip per role, matched luminosity (comptage = violet)
-    factor_binary = "FFDCE6F1", factor_nominal = "FFE2EFDA", factor_ordinal = "FFFCE4D6",
-    integer_count = "FFE6DEF2", integer = "FFE6DEF2", integer_scale = "FFE6DEF2",
-    double = "FFE1E7EF", identifier = "FFF2F2F2", other = "FFF7F7F7", unclear = "FFF7F7F7")
+  role_fill <- c(   # pastel chip per CANONICAL role key (.cb_role_key)
+    cat_binaire = "FFDCE6F1", cat_nominale = "FFE2EFDA", cat_ordinale = "FFFCE4D6",
+    num_entier = "FFE6DEF2", num_decimal = "FFE1E7EF", booleen = "FFD6EAF0",
+    identifiant = "FFF2F2F2", texte = "FFF7F7F7", autre = "FFF7F7F7")
   # Zebra shade per VARIABLE block, resetting to white after every section header:
   # a value block is white/grey alternately; frontmatter/legend/toc/spacer stay
   # white (never entered the block loop). Held constant across a block's rows.
@@ -8309,9 +8367,16 @@ generate_format_script <- function(meta_json,
   batt_ranges <- lapply(batt_titles,
                         function(t) range(which(!is.na(cb$.battery) & cb$.battery == t)))
 
-  disp_cols <- c("h", "variable", "description", "type", "role", "na",
-                 "val", "n", "pct", "sep",
-                 if (orig_val_kept) "orig_val", "orig_code",
+  # `type` (= the technical "R class") sits at the far right, an expert annotation
+  # OUTSIDE the boxed block (like question_prefix). `sep` + orig_val/orig_code only
+  # appear when at least one original-label column is shown (dropped in as-is mode).
+  has_orig <- orig_val_kept || orig_code_kept
+  disp_cols <- c("h", "variable", "description", "role", "na",
+                 "val", "n", "pct",
+                 if (has_orig) "sep",
+                 if (orig_val_kept) "orig_val",
+                 if (orig_code_kept) "orig_code",
+                 "type",
                  if (has_battery) "question_prefix")
   ci   <- setNames(seq_along(disp_cols), disp_cols)
   K    <- length(disp_cols)
@@ -8421,12 +8486,13 @@ generate_format_script <- function(meta_json,
     }
 
     # collect per-cell style keys (font | h | v | wrap | numfmt | top bot left right)
-    # question_prefix is styled (font/alignment) but stays OUTSIDE the boxed
-    # block (an optional annotation column), so exclude it from box borders.
+    # question_prefix and type ("R class") are styled (font/alignment) but stay
+    # OUTSIDE the boxed block (optional annotation columns), so exclude them from
+    # box borders (hbc).
     scols <- if (kind == "factor") setdiff(disp_cols, "h")
              else setdiff(disp_cols, c("h", "sep", "orig_val", "orig_code"))
-    hbc   <- if (kind == "factor") setdiff(disp_cols, c("h", "sep", "question_prefix"))
-             else setdiff(disp_cols, c("h", "sep", "orig_val", "orig_code", "question_prefix"))
+    hbc   <- if (kind == "factor") setdiff(disp_cols, c("h", "sep", "type", "question_prefix"))
+             else setdiff(disp_cols, c("h", "sep", "orig_val", "orig_code", "type", "question_prefix"))
     mean_ex <- ex[cb$.stat_rule[b] %in% TRUE]
     nvals   <- suppressWarnings(as.numeric(cb$n[b]))     # aligned with ex
     for (nm in scols) {
@@ -8704,8 +8770,8 @@ generate_format_script <- function(meta_json,
   # Column widths (description + na wider; variable widened only when names wrap).
   var_maxlen <- suppressWarnings(max(nchar(cb$variable), na.rm = TRUE))
   var_w      <- if (is.finite(var_maxlen) && var_maxlen > 15) 25 else 16
-  widths <- c(h = 2, variable = var_w, description = 55, type = 9.2, role = 8,
-              na = 18, val = 20, n = 9, pct = 12, sep = 2, orig_val = 50,
+  widths <- c(h = 2, variable = var_w, description = 55, type = 13, role = 10,
+              na = 18.2, val = 20, n = 9, pct = 12, sep = 2, orig_val = 50,
               orig_code = 11.5, question_prefix = 26)
   wb <- openxlsx2::wb_set_col_widths(wb, "Codebook", cols = seq_len(K),
                                      widths = unname(widths[disp_cols]))
@@ -8779,8 +8845,13 @@ generate_codebook <- function(meta_json,
     if (length(df_nm) != 1L || !grepl("^[A-Za-z.][A-Za-z0-9._]*$", df_nm))
       df_nm <- "codebook"
     tmp_json <- tempfile(pattern = paste0(df_nm, "_"), fileext = ".survey_meta.json")
-    suppressMessages(extract_survey_metadata(df0, meta_json = tmp_json, ...))
+    # formatted = TRUE: no missing detection, labels/order kept as-is (see
+    # extract_survey_metadata()). `...` still forwards headers / survey_* etc.
+    suppressMessages(extract_survey_metadata(df0, meta_json = tmp_json, formatted = TRUE, ...))
     suppressMessages(metadata_add_level_stats(tmp_json, df = df0))
+    # Wire batteries declared as attr(col, "question_prefix", "…") into the JSON
+    # `battery` field (same mechanism as add_new_variables_to_codebook_from_df()).
+    .write_meta_json(.cb_inject_new_batteries(.read_meta_json(tmp_json), df0), tmp_json)
     if (is.null(output_path)) output_path <- paste0(df_nm, "_codebook.xlsx")
     keep_original <- TRUE
     message("generate_codebook: temporary metadata written to ", tmp_json)
@@ -8802,8 +8873,11 @@ generate_codebook <- function(meta_json,
 
   orig_val_kept <- isTRUE(attr(cb, "any_new_label"))
   if (!orig_val_kept) cb$orig_val <- NULL
+  # As-is mode (keep_original / df-first): orig_code repeats `valeur`, so drop it.
+  orig_code_kept <- !isTRUE(keep_original)
 
-  .cb_write_xlsx(cb, output_path, lang = lang, orig_val_kept = orig_val_kept)
+  .cb_write_xlsx(cb, output_path, lang = lang,
+                 orig_val_kept = orig_val_kept, orig_code_kept = orig_code_kept)
   message(sprintf("Codebook written to %s (%d variables, %d rows)",
                   output_path, length(unique(stats::na.omit(cb$.block_id))), nrow(cb)))
 
@@ -8893,21 +8967,14 @@ generate_codebook <- function(meta_json,
   invisible(FALSE)
 }
 
-# Extract + stat the new df columns into a THROWAWAY temp JSON (never meta_json),
-# reusing the survey's missing/yes-no config so detection stays consistent.
-.cb_new_vars_json <- function(new_df, config, ...) {
+# Extract + stat the new df columns into a THROWAWAY temp JSON (never meta_json).
+# New columns are already FINAL (clean factor labels, NA missing), so extract them
+# in formatted mode — no missing detection, first factor level = positive pole —
+# exactly like generate_codebook(df).
+.cb_new_vars_json <- function(new_df, ...) {
   tmp <- tempfile(pattern = "newvars_", fileext = ".survey_meta.json")
   on.exit(unlink(tmp), add = TRUE)
-  mn <- suppressWarnings(as.numeric(unlist(config$missing_num %||% numeric(0))))
-  mc <- as.character(unlist(config$missing_chr %||% character(0)))
-  yl <- as.character(unlist(config$yes_labels  %||% character(0)))
-  nl <- as.character(unlist(config$no_labels   %||% character(0)))
-  suppressMessages(extract_survey_metadata(
-    new_df, meta_json = tmp,
-    missing_num = mn, missing_chr = mc,
-    yes_labels  = if (length(yl)) yl else NULL,
-    no_labels   = if (length(nl)) nl else NULL,
-    ...))
+  suppressMessages(extract_survey_metadata(new_df, meta_json = tmp, formatted = TRUE, ...))
   suppressMessages(metadata_add_level_stats(tmp, df = new_df))
   .read_meta_json(tmp)
 }
@@ -9099,7 +9166,9 @@ add_new_variables_to_codebook_from_df <- function(meta_json, df,
     .cb_assert_battery_contiguity_rows(final)
     orig_val_kept <- isTRUE(attr(tib_orig, "any_new_label"))
     if (!orig_val_kept) final$orig_val <- NULL
-    .cb_write_xlsx(final, output_path, lang = lang, orig_val_kept = orig_val_kept)
+    orig_code_kept <- !isTRUE(keep_original)
+    .cb_write_xlsx(final, output_path, lang = lang,
+                   orig_val_kept = orig_val_kept, orig_code_kept = orig_code_kept)
     invisible(final[, !grepl("^\\.", names(final)), drop = FALSE])
   }
 
@@ -9124,7 +9193,7 @@ add_new_variables_to_codebook_from_df <- function(meta_json, df,
 
   # -- new-variable tibble (verbatim from df) ---------------------------------
   new_df   <- df[new_vars]
-  new_json <- .cb_new_vars_json(new_df, json_data$config, ...)
+  new_json <- .cb_new_vars_json(new_df, ...)
   new_json <- .cb_inject_new_batteries(new_json, new_df)
   tib_new  <- .cb_build_tibble(new_json, lang = lang, natural_order = TRUE)
   vrow <- tib_new$.row_type == "value"                 # new vars have no origin

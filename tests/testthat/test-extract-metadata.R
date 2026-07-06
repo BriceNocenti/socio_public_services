@@ -400,3 +400,40 @@ test_that("E14: labelled 0/1 all-Non stays factor_binary; empty Oui pole flagged
   expect_equal(v$levels[["0"]]$order, 2L)
   expect_null(v$levels[["0"]][["n"]])                   # observed pole: no n until stats
 })
+
+
+# ===========================================================================
+# E-LOG: a logical column -> role "logical", TRUE ordered first (positive pole)
+# ===========================================================================
+test_that("E-LOG: logical column becomes role 'logical' with TRUE as order 1", {
+  df <- tibble::tibble(X = c(TRUE, FALSE, TRUE, NA, FALSE), Y = c(1, 2, 3, 4, 5))
+  path <- tmp_json(); on.exit(unlink(path), add = TRUE)
+  suppressMessages(extract_survey_metadata(df, path))
+  v <- .read_meta_json(path)$variables$X
+  expect_equal(v$role, "logical")
+  expect_equal(v$levels[["TRUE"]]$order, 1L)             # positive pole first
+  expect_equal(v$levels[["FALSE"]]$order, 2L)
+})
+
+
+# ===========================================================================
+# E-FMT: formatted = TRUE disables missing flagging + first level is positive
+# ===========================================================================
+test_that("E-FMT: formatted mode flags nothing missing and makes first level positive", {
+  df <- tibble::tibble(
+    SEXE = factor(c("Femme", "Homme", "Femme", "Homme")),
+    Q    = factor(c("Oui", "NSP", "Oui", "Non")),   # 'NSP' NOT flagged in formatted mode
+    NUM  = c(1, 2, 99, 2))                            # 99 is a default missing_num code (repeat -> not an id)
+  path <- tmp_json(); on.exit(unlink(path), add = TRUE)
+  suppressMessages(extract_survey_metadata(df, path, formatted = TRUE))
+  mj <- .read_meta_json(path)
+  # No level flagged missing anywhere.
+  miss <- unlist(lapply(mj$variables, function(vv)
+    vapply(vv$levels %||% list(), function(lv) isTRUE(lv$missing), logical(1))))
+  expect_false(any(miss))
+  # Binary positive pole = FIRST factor level (Femme), no yes/no guessing.
+  expect_equal(mj$variables$SEXE$role, "factor_binary")
+  expect_equal(mj$variables$SEXE$levels[["Femme"]]$order, 1L)
+  # 99 stays real data: NUM is numeric with no missing levels.
+  expect_true(mj$variables$NUM$role %in% c("integer", "double"))
+})

@@ -1,5 +1,5 @@
 # Tests for generate_codebook() and its internals.
-# Functions under test: .cb_type_label, .cb_role_label, .cb_build_tibble,
+# Functions under test: .cb_r_class_label, .cb_role_label, .cb_build_tibble,
 #   .cb_write_xlsx, generate_codebook
 # Prefix: C
 
@@ -43,20 +43,24 @@ cb_vars <- function() list(
 # C1. Type / role label maps
 # ---------------------------------------------------------------------------
 
-test_that("C1: type labels derive R class from role (+ r_class fallback)", {
-  expect_equal(.cb_type_label("factor_ordinal", "double", "fr"), "catégorielle")
-  expect_equal(.cb_type_label("integer_count", "numeric", "fr"), "nb entier")
-  expect_equal(.cb_type_label("double", "numeric", "fr"), "nb décimal")
-  expect_equal(.cb_type_label("identifier", "character", "fr"), "texte")
-  expect_equal(.cb_type_label("factor_binary", "double", "en"), "factor")
+test_that("C1: R class label = final R class from role (+ r_class fallback)", {
+  expect_equal(.cb_r_class_label("factor_ordinal", "double"), "ordered factor")
+  expect_equal(.cb_r_class_label("integer_count", "numeric"), "integer")
+  expect_equal(.cb_r_class_label("double", "numeric"), "double")
+  expect_equal(.cb_r_class_label("identifier", "character"), "character")
+  expect_equal(.cb_r_class_label("factor_binary", "double"), "factor")
+  expect_equal(.cb_r_class_label("logical", "logical"), "logical")
 })
 
-test_that("C1b: role labels translate, integer_count -> comptage / count", {
-  expect_equal(.cb_role_label("integer_count", "fr"), "comptage")
-  expect_equal(.cb_role_label("integer_scale", "fr"), "échelle")
-  expect_equal(.cb_role_label("double", "fr"), "continue")
-  expect_equal(.cb_role_label("factor_ordinal", "fr"), "ordinale")
-  expect_equal(.cb_role_label("integer_count", "en"), "count")
+test_that("C1b: role labels are the user-facing cat/num/booléen set", {
+  expect_equal(.cb_role_label("integer_count", "", "fr"), "num entier")
+  expect_equal(.cb_role_label("integer_scale", "", "fr"), "num entier")
+  expect_equal(.cb_role_label("double", "", "fr"), "num décimal")
+  expect_equal(.cb_role_label("factor_ordinal", "", "fr"), "cat ordinale")
+  expect_equal(.cb_role_label("logical", "", "fr"), "booléen")
+  expect_equal(.cb_role_label("other", "character", "fr"), "texte")
+  expect_equal(.cb_role_label("other", "", "fr"), "autre")
+  expect_equal(.cb_role_label("integer_count", "", "en"), "integer")
 })
 
 
@@ -546,18 +550,18 @@ test_that("C11: xlsx cell fills/borders + data bars + TOC map to the right cells
   }
   d <- openxlsx2::wb_to_df(wb, sheet = 1, col_names = FALSE, skip_empty_rows = FALSE,
                            na.strings = NULL)
-  rF <- which(d[[7]] == "1-Pomme")[1]                 # FRUIT val row (col G = 7)
+  rF <- which(d[[6]] == "1-Pomme")[1]                 # FRUIT val row (col F = 6)
   rB <- which(d[[2]] == "B1")[1]                       # B1 row (col B = 2)
 
-  # Battery B1: valeur|n|freq (G,H,I) are rose; role (E) is the binary chip, not rose.
+  # Battery B1: valeur|n|freq (F,G,H) are rose; role (D) is the binary chip, not rose.
+  expect_equal(fill_hex(paste0("F", rB)), "FFFDE9ED")
   expect_equal(fill_hex(paste0("G", rB)), "FFFDE9ED")
   expect_equal(fill_hex(paste0("H", rB)), "FFFDE9ED")
-  expect_equal(fill_hex(paste0("I", rB)), "FFFDE9ED")
-  expect_equal(fill_hex(paste0("E", rB)), "FFDCE6F1")
+  expect_equal(fill_hex(paste0("D", rB)), "FFDCE6F1")
   # Non-battery FRUIT: role chip (nominal green), val not rose, freq has a right border.
-  expect_equal(fill_hex(paste0("E", rF)), "FFE2EFDA")
-  expect_false(identical(fill_hex(paste0("G", rF)), "FFFDE9ED"))
-  expect_true(right_border(paste0("I", rF)))
+  expect_equal(fill_hex(paste0("D", rF)), "FFE2EFDA")
+  expect_false(identical(fill_hex(paste0("F", rF)), "FFFDE9ED"))
+  expect_true(right_border(paste0("H", rF)))
 
   # Data bars: exactly ONE dataBar rule over a MULTI-AREA sqref (Excel's native
   # form; separate per-run rules render only the first range in some viewers).
@@ -569,4 +573,95 @@ test_that("C11: xlsx cell fills/borders + data bars + TOC map to the right cells
   expect_match(wb$worksheets[[1]]$extLst, "<xm:sqref>[^<]* [^<]*</xm:sqref>")  # widened x14
   # One internal TOC hyperlink (## Bloc A).
   expect_gte(length(unlist(wb$worksheets[[1]]$hyperlinks)), 1L)
+})
+
+
+# ---------------------------------------------------------------------------
+# C12. Logical variable -> single TRUE row ("booléen" role, "logical" R class)
+# ---------------------------------------------------------------------------
+
+test_that("C12: a logical var renders one TRUE row with the TRUE level's n/pct", {
+  vars <- list(BOIS = list(
+    var_label = "Chauffage bois", role = "logical", r_class = "logical",
+    new_name = "BOIS", n_distinct_data = 2L,
+    levels = list(
+      "TRUE"  = list(order = 1L, label = "TRUE",  n = 30L, pct = 60L),
+      "FALSE" = list(order = 2L, label = "FALSE", n = 20L, pct = 40L))))
+  jd  <- .read_meta_json(cb_json(vars))
+  cb  <- .cb_build_tibble(jd)
+  row <- cb[cb$variable %in% "BOIS" & cb$.row_type == "value", ]
+  expect_equal(nrow(row), 1L)
+  expect_equal(row$val, "TRUE")
+  expect_equal(row$n, 30)
+  expect_equal(row$pct, 60)
+  expect_equal(row$type, "logical")          # R class column
+  expect_equal(row$role, "booléen")
+  expect_equal(row$.role_key, "booleen")     # drives the chip
+  expect_equal(row$.block_kind, "factor")    # so it gets the freq data-bar
+})
+
+
+# ---------------------------------------------------------------------------
+# C13. generate_codebook(<data.frame>) — formatted / as-is codebook
+# ---------------------------------------------------------------------------
+
+test_that("C13: df-first codebook keeps labels/order, collapses binaries, wires batteries", {
+  skip_if_not_installed("openxlsx2")
+  df <- tibble::tibble(
+    DIPLOM = factor(c("1-Brevet", "2-CAP", "3-Bac", "2-CAP", "3-Bac", "1-Brevet")),
+    AGE4   = ordered(c("18-29", "30-44", "60+", "30-44", "18-29", "60+"),
+                     levels = c("18-29", "30-44", "45-59", "60+")),
+    SEXE   = factor(c("Femme", "Homme", "Femme", "Homme", "Femme", "Homme")),
+    ECOLO  = c(TRUE, FALSE, TRUE, TRUE, FALSE, TRUE),
+    CH_BOIS = c(TRUE, FALSE, TRUE, FALSE, TRUE, FALSE),
+    CH_GAZ  = c(FALSE, TRUE, FALSE, TRUE, FALSE, TRUE))
+  df$CH_BOIS <- `attr<-`(df$CH_BOIS, "question_prefix", "CH_")
+  df$CH_GAZ  <- `attr<-`(df$CH_GAZ,  "question_prefix", "CH_")
+  out <- tempfile(fileext = ".xlsx"); on.exit(unlink(out), add = TRUE)
+  res <- suppressMessages(generate_codebook(df, output_path = out))
+
+  expect_true(file.exists(out))
+  # res drops the internal dot-columns; value rows are those with `variable` set.
+  # Ordinal keeps its factor-level order and shows "ordered factor" R class.
+  ao <- res[res$variable %in% "AGE4", ]
+  expect_equal(ao$val, c("18-29", "30-44", "45-59", "60+"))
+  expect_equal(unique(ao$type), "ordered factor")
+  expect_equal(unique(ao$role), "cat ordinale")
+  # Nominal keeps its "NN-Label" labels verbatim (no extra numbering prefix).
+  dv <- res[res$variable %in% "DIPLOM", ]
+  expect_equal(dv$val, c("1-Brevet", "2-CAP", "3-Bac"))
+  # 2-level factor collapses to ONE row on the FIRST level (Femme).
+  sv <- res[res$variable %in% "SEXE", ]
+  expect_equal(nrow(sv), 1L)
+  expect_equal(sv$val, "Femme")
+  expect_equal(unique(sv$role), "cat binaire")
+  # Logical -> one TRUE row, booléen.
+  ev <- res[res$variable %in% "ECOLO", ]
+  expect_equal(nrow(ev), 1L)
+  expect_equal(ev$val, "TRUE"); expect_equal(ev$role, "booléen")
+  # question_prefix attrs became a battery selector (common prefix CH_).
+  qp <- unique(res$question_prefix[res$variable %in% c("CH_BOIS", "CH_GAZ")])
+  expect_true(any(grepl("CH_", qp)))
+  # xlsx headers: "R class" present, original-label columns dropped in as-is mode.
+  hdr <- as.character(unlist(openxlsx2::wb_to_df(
+    openxlsx2::wb_load(out), sheet = 1, col_names = FALSE, na.strings = NULL)[1, ]))
+  expect_true("R class" %in% hdr)
+  expect_false(any(c("code_origine", "libellé_origine") %in% hdr))
+})
+
+
+# ---------------------------------------------------------------------------
+# C14. .to_utf8() encoding recovery (the "?" LimeSurvey-label fix)
+# ---------------------------------------------------------------------------
+
+test_that("C14: .to_utf8 recovers latin1 bytes and preserves valid UTF-8", {
+  lat <- iconv("café", from = "UTF-8", to = "latin1")   # single byte 0xE9
+  expect_false(validUTF8(lat))
+  y <- .to_utf8(lat)
+  expect_true(validUTF8(y))
+  expect_equal(Encoding(y), "UTF-8")
+  expect_equal(y, "café")
+  # Valid UTF-8 bytes flagged "unknown" (the read.csv "UTF-8-BOM" case) survive as-is.
+  u <- "café"; Encoding(u) <- "unknown"
+  expect_equal(.to_utf8(u), "café")
 })

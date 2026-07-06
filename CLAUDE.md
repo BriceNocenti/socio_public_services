@@ -16,8 +16,12 @@ clean, labelled, analysis-ready tibbles. Steps run sequentially, each writing to
 unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
 
 ```
-1. extract_survey_metadata(df, meta_json, ...)
+1. extract_survey_metadata(df, meta_json, formatted = FALSE, ...)
    → Detects column roles, writes initial JSON with levels/labels/role
+   → formatted = TRUE (already-clean df): missing_num/missing_chr default to EMPTY, NOTHING is
+     flagged missing (missing are already NA; a real "Ne sait pas" level stays a category), and a
+     factor_binary's FIRST level is the positive pole (no yes/no guessing). Set automatically by
+     generate_codebook(<df>). A logical column → role "logical" (TRUE ordered first).
    → Numeric vars keep ONLY their special codes as levels (missing_num matches +
      labelled codes, flagged missing:true); plain data-range values never become
      levels. Labelled codes are auto-flagged missing ONLY when SPARSE sentinels
@@ -147,9 +151,19 @@ unified JSON file (`*.survey_meta.json`) that grows brick-by-brick:
      numfmt/fill preserved); non-battery blocks get a `freq` right border instead.
    → Reads JSON only — NO df param (examples/NA now stored in the JSON by
      metadata_add_level_stats). NA cell = missing-value summary (see below), all types.
-   → meta_json may be a DATA FRAME: runs extract + metadata_add_level_stats silently on a
-     temp JSON (tempdir), keep_original forced TRUE (raw labels, code order, no prefix);
-     `...` forwarded to extract_survey_metadata.
+   → meta_json may be a DATA FRAME (already-formatted / "as-is" codebook): runs extract
+     (formatted = TRUE) + metadata_add_level_stats silently on a temp JSON (tempdir),
+     keep_original forced TRUE (labels/order kept verbatim, no prefix), then injects the
+     df columns' `question_prefix` attribute into the `battery` field
+     (.cb_inject_new_batteries) so attr(col,"question_prefix","…")-declared batteries render.
+     `...` forwarded to extract (headers / survey_* etc.); no missing/yes-no args by default.
+     A 2-level factor collapses to ONE row on its FIRST level; orig_val/orig_code columns dropped.
+   → `type` column = final R CLASS (English: factor / ordered factor / integer / double /
+     logical / character), header "R class", placed at the far right before prefixe_question,
+     NOT described in the legend (.cb_r_class_label). `role` = the only user-facing statistical
+     role, always present: cat binaire/ordinale/nominale, num entier (merges count/scale),
+     num décimal, booléen, texte, identifiant, autre (.cb_role_key + .CB_ROLE_ORDER; flat legend
+     with a "cat = catégorielle, num = numérique" note). Logical vars render as ONE TRUE row.
    → val labels/order reuse .gfs_build_entries()/.gfs_level_label() → identical to
      generate_format_script(). Run metadata_add_level_stats() first for n/pct/NA.
 
@@ -184,7 +198,9 @@ The metadata tibble is an internal implementation detail; users never construct 
 The unified JSON (`*.survey_meta.json`) is the single source of truth between steps.
 Users can (and do) manually edit the JSON between AI steps. Key fields per variable:
 
-- `role`: factor_binary, factor_nominal, factor_ordinal, integer, integer_count, double, identifier
+- `role`: factor_binary, factor_nominal, factor_ordinal, integer, integer_count, double, identifier,
+  logical (a TRUE/FALSE column: two levels TRUE(order 1)/FALSE stored, rendered as ONE TRUE row =
+  share of TRUE; R class "logical", role display "booléen")
 - `desc`: boolean — TRUE = descending order for ordinal factors
 - `new_name`: short variable name suggested by AI
 - `levels.{code}.new_label`: short display label suggested by AI
@@ -257,6 +273,13 @@ an all-upper-case df. Parsing is factored into `.parse_sas_value_blocks()` /
 and `apply_sas_value_labels()`; resolution helpers are `.match_df_col()` /
 `.resolve_sas_name_to_col()`.
 
+**Key Design Decision** — Text normalization (`.normalize_text()`) recovers every string to valid
+UTF-8 via `.to_utf8()`: bytes already valid UTF-8 are just re-declared UTF-8 (the `read.csv(fileEncoding
+= "UTF-8-BOM")` "unknown"-flagged case — no reinterpretation, session-encoding-independent), invalid
+bytes are decoded from Windows-1252 (a latin1 superset). This replaced `stri_enc_toutf8(validate =
+TRUE)`, which turned bytes it deemed ill-formed into U+FFFD ("?") — the cause of the "?"-for-accents
+seen in LimeSurvey variable labels / factor levels.
+
 **Key Design Decision** — `generate_codebook()` (section 9b in the source) builds a long
 tibble (`.cb_build_tibble()`) then styles an xlsx (`.cb_write_xlsx()`, openxlsx2). It shares
 `.gfs_build_entries()` + `.gfs_level_label()` with `generate_format_script()` so the `val`
@@ -264,24 +287,35 @@ column is byte-identical to the fct_recode LHS. Numeric summary values are writt
 numbers with number formats decided **per value**: a whole-number stat uses `#,##0` (no decimals),
 a fractional one `#,##0.0` (one decimal); factor `freq` is an Excel percentage (value stored as a
 0–1 fraction, format `0%`); sd keeps `"σ"0.0`. Not pre-rounded text, so precision is preserved.
-`type`/`role` labels come from
-`.cb_type_label()` / `.cb_role_label()` (FR default, `lang="en"` option); `type` is derived
-from `role` (+`r_class` only for identifier/other). A `factor_binary` with exactly 2
-non-missing levels renders one row (positive/order-1 level; `orig_val` shows both labels
-"Oui / Non"); if it has ≠2 levels it falls back to showing all levels and is flagged. Numeric
+The `type` column shows the **final R class** (English: factor / ordered factor / integer /
+double / logical / character) via `.cb_r_class_label(role, r_class)` — header "R class",
+placed at the far right before `prefixe_question`, and NOT described in the legend (expert-facing).
+The `role` column is the ONLY user-facing statistical role via `.cb_role_label(role, r_class, lang)`
++ the canonical `.cb_role_key()`/`.CB_ROLE_ORDER` key space (shared by label, chip, legend order):
+cat binaire/ordinale/nominale, num entier (merges integer/count/scale), num décimal, booléen
+(logical), texte, identifiant, autre — always non-empty. The legend lists roles flat, in canonical
+order, prefixed by "cat = catégorielle, num = numérique" (`.cb_role_info`; `.cb_type_desc` removed).
+A `logical` var renders as ONE `TRUE` row (share of TRUE; block_kind "factor" for the data-bar). A
+`factor_binary` with exactly 2 non-missing levels renders one row (positive/order-1 level; `orig_val`
+shows both labels "Oui / Non"); if it has ≠2 levels it falls back to showing all levels and is flagged. Numeric
 blocks: **mean+sd row first**, then max/Q3/median/Q1/min, thin rule between. The generated
 **format script** label form (`"label" -> varlab` … `|> \`attr<-\`("label", varlab)`) applies
 the label to the final converted object so it survives`factor(as.character())` /
 `as.integer(...)`. No`df` param: text example values + NA come from the JSON (stored by
 `metadata_add_level_stats`), so the codebook is fully JSON-driven.
-`keep_original = TRUE` (forced in df-first mode) shows factor labels as-is, sorted by numeric
-code, no ordering prefix and no binary 1-row collapse — via the `natural_order` path in
-`.cb_build_tibble()`. Passing a **data frame** as the first arg builds a temp JSON silently
-(extract + metadata_add_level_stats,`...` → extract) and sets `keep_original`.
+`keep_original = TRUE` (forced in df-first mode) shows factor labels as-is (sorted by numeric code
+when integer-like, else stored/factor-level order), no ordering prefix; a 2-level binary DOES collapse
+to one row on its FIRST level — via the `natural_order` path in `.cb_build_tibble()`. `orig_code` is
+shown only when `!keep_original` (in as-is mode it repeats `valeur`). Passing a **data frame** as the
+first arg builds a temp JSON silently (extract formatted = TRUE + metadata_add_level_stats + battery
+injection, `...` → extract) and sets `keep_original`.
 
 **Key Design Decision** — Codebook xlsx layout (`.cb_write_xlsx`): column order
-`h | variable | description | type | role | missing_values | valeur | n | freq | sep | orig_val | code`
-(FR/EN headers via `.cb_headers`; `role` has no accent; `identifier`→`identifiant`/`identifier`; an
+`h | variable | description | role | missing_values | valeur | n | freq | [sep | orig_val | orig_code] | type ("R class") | [prefixe_question]`
+— `type` (= the technical R class) sits at the FAR RIGHT (an annotation column, OUTSIDE the box, like
+`prefixe_question`); `sep`+`orig_val`+`orig_code` appear only when an original-label column is kept
+(`orig_val` iff any relabelling, `orig_code` iff `!keep_original`), all dropped in as-is/df mode.
+(FR/EN headers via `.cb_headers`; `role` has no accent; `identifier`→`identifiant`/`identifier`; the
 empty thin `sep` column separates the value block from the original-label block). All borders are
 **black thin**. The `sep` + `orig_val`/`orig_code` borders (and the box extension over those columns)
 are drawn **only for factor blocks** — the only ones that fill them; non-factor blocks are boxed
